@@ -24,6 +24,7 @@ from uuid import UUID
 
 from pydantic import BaseModel as _PydanticBaseModel
 from pydantic import ConfigDict
+from pydantic import Field as _PydanticField
 
 # ---------------------------------------------------------------------------
 # Type mapping: Python annotation → Ferrum field type string (DATA_MODELING.md §3.2)
@@ -110,6 +111,17 @@ class FieldMeta:
     allowed_operators: tuple[str, ...]
     nullable: bool
     pk: bool
+    max_length: int | None = None
+    max_digits: int | None = None
+    decimal_places: int | None = None
+    unique: bool = False
+    db_index: bool = False
+    db_default: str | None = None
+
+    @property
+    def sql_type(self) -> str:
+        """PostgreSQL DDL type string derived from field_type and constraints."""
+        return _field_type_to_sql(self)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -154,6 +166,49 @@ class ModelMetadata:
 
 
 # ---------------------------------------------------------------------------
+# DDL type helper
+# ---------------------------------------------------------------------------
+
+
+def _field_type_to_sql(field: FieldMeta) -> str:
+    """Return the PostgreSQL DDL type string for a FieldMeta.
+
+    This is a DDL-only concern — the query IR path uses the ``field_type``
+    string tags (``"text"``, ``"int"``, etc.) unchanged regardless of DDL type.
+    """
+    ft = field.field_type
+    if ft == "text":
+        if field.max_length is not None:
+            return f"VARCHAR({field.max_length})"
+        return "TEXT"
+    if ft == "int":
+        return "INTEGER"
+    if ft == "big_int":
+        return "BIGSERIAL" if field.pk else "BIGINT"
+    if ft == "float":
+        return "REAL"
+    if ft == "decimal":
+        if field.max_digits is not None and field.decimal_places is not None:
+            return f"NUMERIC({field.max_digits},{field.decimal_places})"
+        return "NUMERIC"
+    if ft == "bool":
+        return "BOOLEAN"
+    if ft == "datetime":
+        return "TIMESTAMPTZ"
+    if ft == "date":
+        return "DATE"
+    if ft == "time":
+        return "TIME"
+    if ft == "uuid":
+        return "UUID"
+    if ft == "bytes":
+        return "BYTEA"
+    if ft == "json":
+        return "JSONB"
+    return "TEXT"
+
+
+# ---------------------------------------------------------------------------
 # ModelConfig factory
 # ---------------------------------------------------------------------------
 
@@ -183,6 +238,58 @@ def ModelConfig(  # noqa: N802
         if isinstance(existing_jse, dict):
             kwargs["json_schema_extra"] = {"__ferrum_table__": table, **existing_jse}
     return ConfigDict(**kwargs)  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
+# Field factory
+# ---------------------------------------------------------------------------
+
+
+def Field(  # noqa: N802
+    *,
+    max_length: int | None = None,
+    max_digits: int | None = None,
+    decimal_places: int | None = None,
+    db_column: str | None = None,
+    unique: bool = False,
+    db_index: bool = False,
+    default: Any = ...,  # noqa: ANN401
+    primary_key: bool = False,
+    **kwargs: Any,  # noqa: ANN401
+) -> Any:  # noqa: ANN401
+    """Ferrum field descriptor with column-level constraints.
+
+    Wraps ``pydantic.Field`` and stores Ferrum-specific extras in
+    ``json_schema_extra`` under the ``"__ferrum__"`` key.  ``_build_metadata``
+    reads those extras at class-definition time.
+
+    ``default`` handling:
+    - ``...`` (no default): field is required; Pydantic treats it as required.
+    - ``str`` value (e.g. ``"NOW()"``): DB-side expression; stored as
+      ``db_default``; Python-side default is ``None``.
+    - Any other value: passed to Pydantic as ``default`` and stored in extras.
+    """
+    ferrum_extras: dict[str, Any] = {
+        "max_length": max_length,
+        "max_digits": max_digits,
+        "decimal_places": decimal_places,
+        "db_column": db_column,
+        "unique": unique,
+        "db_index": db_index,
+        "primary_key": primary_key,
+    }
+
+    if isinstance(default, str):
+        ferrum_extras["db_default"] = default
+        kwargs["default"] = None
+    elif default is not ...:
+        kwargs["default"] = default
+
+    if max_length is not None:
+        kwargs["max_length"] = max_length
+
+    kwargs["json_schema_extra"] = {"__ferrum__": ferrum_extras}
+    return _PydanticField(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -220,11 +327,20 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
         annotation = field_info.annotation
         base_type, nullable = _unwrap_optional(annotation)
 
-        # Check for explicit primary_key in FieldInfo.json_schema_extra (ferrum.Field).
+        # Extract Ferrum field extras from Annotated metadata or FieldInfo.json_schema_extra.
+        # Annotated[T, Field(...)] path: Pydantic stores the FieldInfo items in metadata.
+        ferrum_extras: dict[str, Any] = {}
+        for meta in getattr(field_info, "metadata", []):
+            jse = getattr(meta, "json_schema_extra", None)
+            if isinstance(jse, dict) and "__ferrum__" in jse:
+                ferrum_extras = jse["__ferrum__"]
+                break
+        # Bare default-value path: `field: T = Field(...)` stores extras directly.
         finfo_jse = field_info.json_schema_extra or {}
-        is_pk = False
-        if isinstance(finfo_jse, dict):
-            is_pk = bool(finfo_jse.get("primary_key", False))
+        if isinstance(finfo_jse, dict) and "__ferrum__" in finfo_jse:
+            ferrum_extras = finfo_jse["__ferrum__"]
+
+        is_pk = bool(ferrum_extras.get("primary_key", False))
 
         # Implicit PK: first int field named "id" when no explicit PK is declared.
         if not is_pk and not found_pk and name == "id" and base_type is int:
@@ -240,15 +356,23 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
         if is_pk and db_type == "int":
             db_type = "big_int"
 
+        column_name = ferrum_extras.get("db_column") or name
+
         fields.append(
             FieldMeta(
                 name=name,
-                column_name=name,
+                column_name=column_name,
                 python_type_name=getattr(base_type, "__name__", str(base_type)),
                 field_type=db_type,
                 allowed_operators=_ALLOWED_OPERATORS.get(db_type, ("eq", "is_null", "ne")),
                 nullable=nullable,
                 pk=is_pk,
+                max_length=ferrum_extras.get("max_length"),
+                max_digits=ferrum_extras.get("max_digits"),
+                decimal_places=ferrum_extras.get("decimal_places"),
+                unique=bool(ferrum_extras.get("unique", False)),
+                db_index=bool(ferrum_extras.get("db_index", False)),
+                db_default=ferrum_extras.get("db_default"),
             )
         )
 

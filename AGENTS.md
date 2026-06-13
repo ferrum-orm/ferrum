@@ -188,6 +188,8 @@ ChiefArchitect.
 - The PyO3 extension crate is at `crates/ferrum-pyo3/Cargo.toml`; `pyproject.toml` sets `manifest-path = "crates/ferrum-pyo3/Cargo.toml"` so maturin does not look at the workspace root.
 - `rustfmt.toml` must use only stable-rustfmt options; nightly-only keys (`imports_granularity`, `group_imports`) break `cargo fmt --check` under the pinned stable toolchain.
 - `.importlinter` `root_packages` must use multi-line list syntax, not an inline string.
-- CI gates checked locally: `ruff check`, `ruff format --check`, `mise run type-python` (ty), `cargo check`, `cargo clippy`, `cargo fmt --all --check`, `import-boundary`.
+- Full local CI parity: `mise run ci-local` (lint, type-python, test-rust, import-boundary, all-tests).
+- Python package at `python/ferrum/`; Rust crates at `crates/ferrum-{core,sql,pyo3,migrate}/`.
+- Scoped verification: Rust-only → `mise run test-rust lint-rust`; Python-only → `mise run test-python-unit`; extension/boundary → `mise run dev` plus integration or security tests.
 - Agent team lives in both `.cursor/agents/` and `.claude/agents/`; roles: CEO, ChiefArchitect, ProductManager, BackendEngineer, SecurityEngineer, DevOpsEngineer, CodeReviewer, QAEngineer.
 - Paperclip orchestration API coordinates multi-agent work; agents follow the Paperclip heartbeat skill and work only on assigned issues.

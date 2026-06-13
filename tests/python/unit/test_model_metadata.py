@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import datetime
+from typing import Annotated
 from uuid import UUID
 
 import pytest
@@ -208,6 +209,45 @@ class TestGetMetadataErrors:
     def test_base_model_has_no_metadata(self) -> None:
         with pytest.raises(AttributeError, match="no metadata"):
             ferrum.Model.get_metadata()
+
+
+class TestFieldWithExtras:
+    """Verify that Field() extras flow correctly through _build_metadata to FieldMeta."""
+
+    def test_varchar_field_has_correct_sql_type(self) -> None:
+        class MfVarchar(ferrum.Model):
+            id: int
+            name: Annotated[str, ferrum.Field(max_length=100)]
+
+        field_meta = next(f for f in MfVarchar.get_metadata().fields if f.name == "name")
+        assert field_meta.max_length == 100
+        assert field_meta.sql_type == "VARCHAR(100)"
+
+    def test_db_column_override(self) -> None:
+        class MfColOverride(ferrum.Model):
+            id: int
+            email: Annotated[str, ferrum.Field(db_column="user_email")]
+
+        field_meta = next(f for f in MfColOverride.get_metadata().fields if f.name == "email")
+        assert field_meta.column_name == "user_email"
+        # The field name (Python attribute) is unchanged.
+        assert field_meta.name == "email"
+
+    def test_unique_flag(self) -> None:
+        class MfUnique(ferrum.Model):
+            id: int
+            handle: Annotated[str, ferrum.Field(unique=True)]
+
+        field_meta = next(f for f in MfUnique.get_metadata().fields if f.name == "handle")
+        assert field_meta.unique is True
+
+    def test_db_index_flag(self) -> None:
+        class MfIndexed(ferrum.Model):
+            id: int
+            slug: Annotated[str, ferrum.Field(db_index=True)]
+
+        field_meta = next(f for f in MfIndexed.get_metadata().fields if f.name == "slug")
+        assert field_meta.db_index is True
 
 
 class TestObjectsManager:

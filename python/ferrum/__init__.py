@@ -18,6 +18,7 @@ __all__ = [
     "FerrumMultipleObjectsError",
     "FerrumNotFoundError",
     "FerrumSchemaError",
+    "Field",
     "MigrationResult",
     "Model",
     "ModelConfig",
@@ -42,5 +43,5 @@ from ferrum.errors import (
 )
 from ferrum.hooks import clear_hooks, register_hook
 from ferrum.migrations import MigrationResult
-from ferrum.models import Model, ModelConfig
+from ferrum.models import Field, Model, ModelConfig
 from ferrum.queryset import QuerySet

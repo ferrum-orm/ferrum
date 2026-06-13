@@ -138,9 +138,14 @@ def _col_def(col: dict[str, Any]) -> str:
 
     Security: identifiers are double-quoted; sql_type and default are
     validated against allowlists before interpolation into DDL.
+
+    Parameterised types (e.g. ``VARCHAR(100)``, ``NUMERIC(10,2)``) are accepted:
+    the base token before the first ``(`` is checked against the allowlist so the
+    parameter portion is never interpolated without the token being whitelisted.
     """
     sql_type = col.get("sql_type", "TEXT")
-    if sql_type.upper() not in _SQL_TYPE_ALLOWLIST:
+    base_type = sql_type.split("(")[0].upper()
+    if base_type not in _SQL_TYPE_ALLOWLIST:
         raise FerrumMigrationError(
             f"Unsupported SQL type {sql_type!r}. "
             f"Only standard PostgreSQL types are allowed. [FERR-M001]"
@@ -158,6 +163,8 @@ def _col_def(col: dict[str, Any]) -> str:
         parts.append(f"DEFAULT {default}")
     if col.get("primary_key"):
         parts.append("PRIMARY KEY")
+    if col.get("unique"):
+        parts.append("UNIQUE")
     return " ".join(parts)
 
 
@@ -241,31 +248,25 @@ def _print_plan(plan: dict[str, Any]) -> None:
     print(f"[ferrum migrate] {len(ops)} ops total (not applied)")
 
 
-# Mapping from FieldMeta.python_type_name → PostgreSQL DDL type token.
-# All values come from model-metadata allowlists; user input never reaches here.
-_PYTHON_TYPE_TO_SQL: dict[str, str] = {
-    "int": "INTEGER",
-    "float": "REAL",
-    "str": "TEXT",
-    "bool": "BOOLEAN",
-    "bytes": "BYTEA",
-}
-
-
 def _field_to_col_def(field_meta: FieldMeta, *, is_pk: bool) -> dict[str, Any]:
     """Convert a ``FieldMeta`` to a column-def dict for the plan JSON.
 
     Security: all names come from model-metadata allowlists — never user input.
     The ``not_null`` key is set to ``True`` when the field is not nullable so that
     ``_col_def`` emits the ``NOT NULL`` constraint.
+
+    Uses ``FieldMeta.sql_type`` (which honours ``max_length``, ``max_digits``,
+    ``decimal_places``) rather than a fixed Python-type → SQL mapping so that
+    parameterised column types (``VARCHAR(n)``, ``NUMERIC(p,s)``) are emitted
+    correctly.
     """
-    sql_type = _PYTHON_TYPE_TO_SQL.get(field_meta.python_type_name, "TEXT")
     return {
         "name": field_meta.column_name,
-        "sql_type": sql_type,
+        "sql_type": field_meta.sql_type,
         "not_null": not field_meta.nullable,
-        "default": None,
+        "default": field_meta.db_default,
         "primary_key": is_pk,
+        "unique": field_meta.unique,
     }
 
 
@@ -304,6 +305,18 @@ def compute_plan(
         if table not in existing_tables:
             col_defs = [_field_to_col_def(f, is_pk=(f.pk)) for f in metadata.fields]
             ops.append({"kind": "create_table", "table": table, "columns": col_defs})
+            # Emit AddIndex ops for db_index=True fields (after create_table).
+            for f in metadata.fields:
+                if f.db_index:
+                    ops.append(
+                        {
+                            "kind": "add_index",
+                            "table": table,
+                            "name": f"idx_{table}_{f.name}",
+                            "columns": [f.column_name],
+                            "unique": False,
+                        }
+                    )
         else:
             existing_cols = set(existing_tables[table])
             for f in metadata.fields:
@@ -316,6 +329,17 @@ def compute_plan(
                             **col_def,
                         }
                     )
+                    # Emit AddIndex for newly added db_index=True columns.
+                    if f.db_index:
+                        ops.append(
+                            {
+                                "kind": "add_index",
+                                "table": table,
+                                "name": f"idx_{table}_{f.name}",
+                                "columns": [f.column_name],
+                                "unique": False,
+                            }
+                        )
 
     return {
         "version": 1,
