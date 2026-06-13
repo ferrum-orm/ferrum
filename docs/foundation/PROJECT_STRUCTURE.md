@@ -1,6 +1,6 @@
 # Ferrum Project Structure
 
-**Status:** Proposed — pending CEO approval
+**Status:** Approved (CEO board approval `e69b1ccb`, 2026-06-13)
 **Version:** v0.1
 **Inputs:** [ARCHITECTURE.md](./ARCHITECTURE.md), [PRODUCT_REQUIREMENTS.md](./PRODUCT_REQUIREMENTS.md), [ARCHITECTURE_FEASIBILITY_REVIEW.md](./ARCHITECTURE_FEASIBILITY_REVIEW.md), [SECURITY_REVIEW_PRD.md](./SECURITY_REVIEW_PRD.md)
 **Issue:** GUY-71
@@ -392,4 +392,4 @@ Mirroring AGENTS.md §7, the local commands map to the smallest proof of a chang
 
 ---
 
-*Produced by Chief Architect for GUY-71. Subordinate to ARCHITECTURE.md (GUY-69). Pending CEO approval. No production source created by this task.*
+*Produced by Chief Architect for GUY-71. Subordinate to ARCHITECTURE.md (GUY-69). Approved via CEO board approval `e69b1ccb` (2026-06-13). No production source created by this task.*
