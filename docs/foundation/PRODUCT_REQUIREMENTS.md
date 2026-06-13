@@ -494,12 +494,17 @@ Outcome:
 - Secure observability defaults reduce data-exposure risk but defer rich SQL and OTel inspection to explicit dev/staging paths.
 - Security gates reduce v0.1 flexibility, especially raw SQL and destructive migration flows, but protect the product's core job: safe async database access.
 
-## Open Questions
+## Product Decisions and Open Questions
 
-- What minimum migration command set should v0.1 expose (init/generate/apply/rollback)?
-- Which relationship helpers, if any, are strategically required before v0.1 is useful for real sample apps?
-- Answered for v0.1: observability hooks must include query start, success, failure, SQL context, hydration failure, and migration diagnostics with Tier A safe-for-APM defaults; full SQL inspection is explicit local-dev opt-in and bound-value inspection is unsafe local-dev only.
-- Should Ferrum position primarily as a FastAPI companion, a general async Python ORM, or a Django migration path?
+Resolved for v0.1:
+
+- Migration command set: v0.1 must support project initialization, migration generation, mandatory dry-run/preview, and guarded apply. Rollback is not a v0.1 Must-have; recovery guidance can use forward migrations and documented manual intervention for early releases.
+- Relationship scope: no relationship helper is strategically required for the v0.1 activation path. v0.1 examples should use scalar fields and explicit foreign-key IDs only. Common one-to-many and many-to-one helpers move to v0.2.
+- Observability scope: hooks must include query start, success, failure, SQL context, hydration failure, and migration diagnostics with Tier A safe-for-APM defaults. Full SQL inspection is explicit local-dev opt-in and bound-value inspection is unsafe local-dev only.
+- Positioning: Ferrum should be positioned as a general async Python ORM with FastAPI and Starlette as the primary activation examples, and Django migration as a secondary adoption story.
+
+Still open for architecture:
+
 - What packaging targets must the Rust/PyO3 engine support in the first release?
 
 ## Scope Exclusions Summary
