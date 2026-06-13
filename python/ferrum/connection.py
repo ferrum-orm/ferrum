@@ -12,7 +12,7 @@ This module owns the async I/O path; no SQL building or Rust calls happen here.
 from __future__ import annotations
 
 import contextlib
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 from urllib.parse import urlparse
 
 import asyncpg  # type: ignore[import-untyped]
@@ -34,7 +34,7 @@ def _redacted_dsn_info(dsn: str) -> dict[str, str]:
             "database": (parsed.path or "").lstrip("/") or "unknown",
             "username": parsed.username or "unknown",
         }
-    except Exception:  # noqa: BLE001
+    except Exception:
         return {"host": "unknown", "port": "unknown", "database": "unknown", "username": "unknown"}
 
 

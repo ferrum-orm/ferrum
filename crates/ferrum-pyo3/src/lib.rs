@@ -1,7 +1,7 @@
-//! `ferrum-pyo3`: thin PyO3 extension bridge.
+//! `ferrum-pyo3`: thin `PyO3` extension bridge.
 //!
 //! This is the ONLY crate in the workspace that may declare a `pyo3` dependency.
-//! CI enforces this via `cargo tree` / `cargo-deny` checks (PROJECT_STRUCTURE.md §6.4).
+//! CI enforces this via `cargo tree` / `cargo-deny` checks (`PROJECT_STRUCTURE.md` §6.4).
 //!
 //! # Boundary contract
 //! - All public functions call into `ferrum-core` / `ferrum-sql` synchronously while
@@ -10,8 +10,16 @@
 //! - `Result::Err` from core/sql → catchable Python exception (never process abort).
 //! - Rust panics are caught by the `#[pyfunction]` wrapper and surfaced as
 //!   `FerrumInternalError` (ARCHITECTURE.md §6.2, ERR-2).
-//! - Error payloads carry structured fields only — no trace blobs, no raw PostgreSQL
+//! - Error payloads carry structured fields only — no trace blobs, no raw `PostgreSQL`
 //!   DETAIL/HINT, no memory addresses, no local paths.
+
+// PyO3 0.22.x uses an internal `cfg(gil-refs)` feature gate that Rust's
+// `unexpected_cfgs` lint flags. This is a known upstream issue resolved in
+// PyO3 0.23+. Suppress here until the pyo3 dependency is upgraded.
+#![allow(unexpected_cfgs)]
+// PyO3 0.22's `#[pyfunction]` macro expands code that triggers `useless_conversion`
+// (false positive: macro-generated `PyErr → PyErr` coercions). Remove on pyo3 >= 0.23.
+#![allow(clippy::useless_conversion)]
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -35,7 +43,7 @@ fn compile_query(
     py: Python<'_>,
     metadata_json: &str,
     ir_json: &str,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     // Deserialize inputs — JSON is the interim serialization until ADR-002 finalizes
     // the binary IR contract.
     let metadata: ferrum_core::ir::ModelMetadata =

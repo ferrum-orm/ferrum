@@ -10,6 +10,7 @@
 //! - No user-supplied data reaches identifier positions here.
 
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 use crate::{error::HydrateError, ir::ModelMetadata};
 
 /// A single hydrated row: column name → decoded value.
@@ -31,9 +32,9 @@ pub enum HydratedValue {
 ///
 /// # Errors
 /// Returns `HydrateError` if a required column is absent or a type does not match.
-pub fn hydrate_row(
+pub fn hydrate_row<S: BuildHasher>(
     _metadata: &ModelMetadata,
-    _raw: &HashMap<String, Vec<u8>>,
+    _raw: &HashMap<String, Vec<u8>, S>,
 ) -> Result<RowPayload, HydrateError> {
     // Placeholder — real implementation wired when asyncpg integration lands.
     Ok(HashMap::new())

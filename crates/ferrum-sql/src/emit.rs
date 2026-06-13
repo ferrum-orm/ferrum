@@ -5,6 +5,7 @@
 //!
 //! Placeholder: emitters will be implemented as IR compilation lands in ferrum-core.
 
+use std::fmt::Write as _;
 use ferrum_core::{compile::CompiledQuery, error::CompileError, ir::{ModelMetadata, QuerySetIR}};
 use crate::dialect;
 
@@ -73,10 +74,10 @@ pub fn emit_select(
     }
 
     if let Some(limit) = ir.limit {
-        sql.push_str(&format!(" LIMIT {limit}"));
+        write!(sql, " LIMIT {limit}").expect("write to String is infallible");
     }
     if let Some(offset) = ir.offset {
-        sql.push_str(&format!(" OFFSET {offset}"));
+        write!(sql, " OFFSET {offset}").expect("write to String is infallible");
     }
 
     Ok(CompiledQuery {
@@ -88,7 +89,6 @@ pub fn emit_select(
 
 fn operator_to_sql(op: &str) -> &'static str {
     match op {
-        "eq" => "=",
         "ne" => "!=",
         "gt" => ">",
         "gte" => ">=",
@@ -98,7 +98,7 @@ fn operator_to_sql(op: &str) -> &'static str {
         "is_not_null" => "IS NOT NULL",
         "icontains" => "ILIKE",
         "contains" => "LIKE",
-        _ => "=", // unreachable: allowlist check precedes emission
+        _ => "=", // covers "eq"; unreachable for other values: allowlist check precedes emission
     }
 }
 

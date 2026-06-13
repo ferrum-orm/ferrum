@@ -14,7 +14,6 @@ import pytest
 
 from ferrum.errors import FerrumCompileError
 
-
 pytestmark = pytest.mark.security
 
 
@@ -44,11 +43,14 @@ class TestSQLSafety:
     def test_no_extra_method_exists(self) -> None:
         """SQL-3: The ``extra()`` escape hatch must not exist on QuerySet."""
         from ferrum.queryset import QuerySet
-        assert not hasattr(QuerySet, "extra"), \
+
+        assert not hasattr(QuerySet, "extra"), (
             "QuerySet.extra() must not exist — no raw SQL escape hatches (SQL-3)"
+        )
 
     def test_danger_api_exists_for_unscoped_operations(self) -> None:
         """Unscoped delete/update require explicit danger API (ARCHITECTURE.md §3)."""
         from ferrum.queryset import QuerySet
+
         assert hasattr(QuerySet, "danger_delete_all")
         assert hasattr(QuerySet, "danger_update_all")

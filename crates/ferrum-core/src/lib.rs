@@ -1,7 +1,7 @@
 //! `ferrum-core`: pure, synchronous, stateless SQL compiler and row codec.
 //!
 //! # Invariants
-//! - No PyO3, no Tokio, no network I/O.
+//! - No `PyO3`, no Tokio, no network I/O.
 //! - No `unsafe` (enforced by `#![forbid(unsafe_code)]`).
 //! - Every public function is a pure transformation over borrowed or owned data.
 //! - Compilation is a function `(&ModelMetadata, QuerySetIR) -> Result<CompiledQuery, CompileError>`.

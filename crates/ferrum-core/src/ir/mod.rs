@@ -1,6 +1,6 @@
-//! QuerySet intermediate representation (IR).
+//! `QuerySet` intermediate representation (IR).
 //!
-//! `QuerySetIR` is the typed, versioned, serializable contract that crosses the PyO3
+//! `QuerySetIR` is the typed, versioned, serializable contract that crosses the `PyO3`
 //! boundary from Python into Rust. The version field allows the Rust side to reject
 //! IR produced by an incompatible Python version before any compilation occurs.
 //!

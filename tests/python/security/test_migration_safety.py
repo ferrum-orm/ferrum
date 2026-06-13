@@ -17,7 +17,6 @@ from ferrum.migrations.gates import check_destructive_gate, check_environment_ga
 from ferrum.migrations.orchestrator import MigrationPlan, apply
 from ferrum.migrations.tokens import generate_token, validate_token
 
-
 pytestmark = pytest.mark.security
 
 

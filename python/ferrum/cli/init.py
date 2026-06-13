@@ -10,9 +10,7 @@ Security invariants (INIT-1 / INIT-2):
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-
 
 _GITIGNORE_TEMPLATE = """\
 # Ferrum / environment secrets — never commit real .env files

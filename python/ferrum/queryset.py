@@ -45,7 +45,7 @@ class QuerySet(Generic[_M]):
     # Chaining methods (return new QuerySet)
     # ------------------------------------------------------------------
 
-    def filter(self, **kwargs: Any) -> QuerySet[_M]:
+    def filter(self, **kwargs: Any) -> QuerySet[_M]:  # noqa: ANN401
         """Add equality filter(s). Returns a new QuerySet."""
         qs = self._clone()
         for field, value in kwargs.items():
@@ -102,7 +102,7 @@ class QuerySet(Generic[_M]):
         """
         raise NotImplementedError("danger_delete_all() implementation pending connection layer")
 
-    async def update(self, **kwargs: Any) -> int:
+    async def update(self, **kwargs: Any) -> int:  # noqa: ANN401
         """Update matching rows. Requires at least one filter.
 
         Raises:
@@ -116,7 +116,7 @@ class QuerySet(Generic[_M]):
             )
         raise NotImplementedError("update() implementation pending connection layer")
 
-    async def danger_update_all(self, **kwargs: Any) -> int:
+    async def danger_update_all(self, **kwargs: Any) -> int:  # noqa: ANN401
         """Update ALL rows in the table without a filter."""
         raise NotImplementedError("danger_update_all() implementation pending connection layer")
 
@@ -128,7 +128,7 @@ class QuerySet(Generic[_M]):
         """Fetch all matching rows."""
         raise NotImplementedError("all() implementation pending connection layer")
 
-    async def get(self, **kwargs: Any) -> _M:
+    async def get(self, **kwargs: Any) -> _M:  # noqa: ANN401
         """Fetch exactly one matching row or raise."""
         raise NotImplementedError("get() implementation pending connection layer")
 
