@@ -134,7 +134,7 @@ jobs:
           POSTGRES_USER: ferrum_test
           POSTGRES_DB: ferrum_test
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U ferrum_test -d ferrum_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -157,19 +157,29 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Create virtualenv
+        run: python -m venv .venv
+
       - name: Install maturin and dev deps
         run: |
+          . .venv/bin/activate
           pip install maturin
           pip install -e ".[dev]"
 
       - name: Build extension (debug)
-        run: maturin develop
+        run: |
+          . .venv/bin/activate
+          maturin develop
 
       - name: Run unit + property tests
-        run: pytest tests/python/unit tests/python/property -v
+        run: |
+          . .venv/bin/activate
+          pytest tests/python/unit tests/python/property -v
 
       - name: Run integration tests
-        run: pytest tests/python/integration -m integration -v
+        run: |
+          . .venv/bin/activate
+          pytest tests/python/integration -m integration -v
 
   # Service containers (postgres) are Linux-only on GitHub-hosted runners.
   # macOS jobs build the extension and run unit/property tests only.
@@ -196,16 +206,24 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Create virtualenv
+        run: python -m venv .venv
+
       - name: Install maturin and dev deps
         run: |
+          . .venv/bin/activate
           pip install maturin
           pip install -e ".[dev]"
 
       - name: Build extension (debug)
-        run: maturin develop
+        run: |
+          . .venv/bin/activate
+          maturin develop
 
       - name: Run unit + property tests
-        run: pytest tests/python/unit tests/python/property -v
+        run: |
+          . .venv/bin/activate
+          pytest tests/python/unit tests/python/property -v
 
   # ---------------------------------------------------------------------------
   # Security qualification gate (required for release)
@@ -223,7 +241,7 @@ jobs:
           POSTGRES_USER: ferrum_test
           POSTGRES_DB: ferrum_test
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U ferrum_test -d ferrum_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -242,10 +260,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install maturin && pip install -e ".[dev]"
-      - run: maturin develop
-      - name: Run security qualification suite
-        run: pytest tests/python/security -m security -v --tb=short
+      - name: Create virtualenv
+        run: python -m venv .venv
+      - name: Install, build extension, and run security tests
+        run: |
+          . .venv/bin/activate
+          pip install maturin
+          pip install -e ".[dev]"
+          maturin develop
+          pytest tests/python/security -m security -v --tb=short
 
   # ---------------------------------------------------------------------------
   # Docs check: public API changes must have docs diff
