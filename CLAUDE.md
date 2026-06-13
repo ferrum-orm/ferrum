@@ -11,8 +11,8 @@
 ## Start here
 
 1. Read `AGENTS.md` (this repo's authoritative agent contract).
-2. Read `docs/foundation/PRODUCT_REQUIREMENTS.md` and
-   `docs/foundation/ARCHITECTURE_FEASIBILITY_REVIEW.md` before substantial work.
+2. Read `.claude/docs/PRODUCT_REQUIREMENTS.md` and
+   `.claude/docs/ARCHITECTURE.md` before substantial work.
 3. Check `.claude/rules/` for any deeper, file-scoped rules. More specific rules win.
 
 ## What Ferrum is

@@ -63,6 +63,7 @@ Needs:
 - Pydantic v2 model definitions that drive schema and validation.
 - Rust/PyO3-powered SQL generation that emits parameterized queries.
 - Migration plan generation, dry-run output, destructive-operation gates, and apply workflow for supported schema changes.
+- `ferrum init` project scaffolding for the v0.1 quickstart path.
 - Query observability hooks that capture duration, safe SQL context, and failure classification.
 - Security and data protection requirements for SQL compilation, credential redaction, observability defaults, error handling, and migration safety.
 - Documentation that compares Ferrum to SQLAlchemy, Tortoise ORM, and Django ORM.
@@ -86,6 +87,7 @@ Needs:
 - Full Django compatibility, admin UI, or complex prefetch behavior.
 - Sharding, replication control, or connection proxying.
 - Raw SQL passthrough, user-supplied SQL templates, string fragments, or `extra()`-style escape hatches.
+- `ferrum dev-db` or other container lifecycle management commands; v0.1 scaffolds local files but uses standard `docker compose` commands.
 
 ## Non-Goals
 
@@ -97,6 +99,7 @@ Ferrum v0.1 explicitly avoids:
 - Replacing full web frameworks, admin UIs, or auth stacks.
 - Deep relationship loading, polymorphic relations, or automatic prefetch planning.
 - Raw SQL escape hatches or production-exposed query inspection surfaces.
+- Owning local database container lifecycle beyond generated quickstart scaffolding.
 
 ## Security & Data Protection Requirements
 
@@ -174,6 +177,8 @@ Product requirements:
 - Migration dry-run output is mandatory for v0.1 migration workflows and must be available before apply.
 - Destructive migration actions require explicit confirmation before apply. Destructive actions include column drop, table drop, type narrowing, and adding `NOT NULL` to populated columns.
 - Applying migrations against non-development targets requires explicit environment confirmation.
+- Headless CI/CD applies are in v0.1 scope. Non-interactive destructive apply must use a dry-run-scoped confirmation token from the exact target migration plan, never a generic `--force`.
+- Non-interactive non-development apply must include explicit target-environment confirmation in addition to any destructive-plan confirmation.
 - Each migration step must document atomicity expectations and recovery guidance for partial failure states.
 - Unscoped bulk `delete()` or `update()` operations require an explicit danger API rather than default terminal operations.
 
@@ -182,6 +187,9 @@ Acceptance criteria:
 - Destructive migrations fail to apply unless dry-run review and explicit destructive confirmation are present.
 - Type narrowing is classified as destructive and follows the same confirmation path as drops.
 - Non-development migration apply fails without explicit environment confirmation.
+- For CI/CD, `ferrum migrations dry-run --env <target> --format json` exposes an opaque confirmation token bound to the reviewed plan, target environment, and sanitized database identity. `ferrum migrations apply --env <target> --non-interactive --confirm-plan <token> --confirm-environment <target>` succeeds only when the token matches the current plan and target.
+- Non-interactive destructive apply fails when the token is missing, malformed, generated for another target, generated for another plan, or stale after schema drift. Failure output explains that the operator must re-run dry-run and review the new plan.
+- No v0.1 destructive migration path accepts `--force`, `--yes`, or a lone environment variable as sufficient confirmation.
 - Migration failure output states whether the database changed, which step failed, and the documented recovery action.
 - Calling `delete()` or `update()` without filters fails unless the caller uses the named danger API documented for all-record mutations.
 
@@ -254,6 +262,7 @@ Product requirements:
 - Expose dry-run output showing SQL before applying.
 - Apply migrations to PostgreSQL via documented commands or API with safety guards.
 - Require explicit confirmation for destructive actions and non-development targets.
+- Support non-interactive CI/CD apply with a dry-run-scoped confirmation token for destructive actions and explicit target-environment confirmation for non-development targets.
 - Classify field removal, table removal, narrowing type changes, and populated `NOT NULL` additions as destructive.
 - Document per-step atomicity expectations and recovery actions for partial failure states.
 - Migration results are deterministic for the same schema state.
@@ -264,6 +273,7 @@ Acceptance criteria:
 - Field additions/removals/types generate describable schema changes.
 - Dry-run requests return the planned SQL without mutating the database.
 - Destructive migration apply requires explicit confirmation and non-development apply requires explicit environment confirmation.
+- Non-interactive destructive apply succeeds only with a confirmation token from the exact dry-run plan and target; stale or mismatched tokens fail before database mutation.
 - Unsafe or unsupported migration actions fail with explicit guidance.
 
 ### Observability & Failure Visibility
@@ -332,6 +342,25 @@ Acceptance criteria:
 - PostgreSQL `DETAIL` or `HINT` data values are not exposed by default in Ferrum exceptions.
 - Rust/PyO3 internal failures map to catchable Python exceptions without memory addresses, local file paths, or process abort in normal operation.
 
+### Project Initialization & Quickstart Scaffolding
+
+Ferrum v0.1 must reduce first-run setup friction enough to support the under-30-minute prototype promise without expanding into a general local infrastructure manager.
+
+Product requirements:
+
+- `ferrum init` is in v0.1 scope and scaffolds the minimum local project files needed for the documented quickstart.
+- The scaffold includes a Ferrum configuration stub, a secret-free `.env.example`, and a PostgreSQL `docker-compose.yml` suitable for local development.
+- `ferrum init` must be idempotent and must not overwrite existing files unless the developer explicitly confirms or passes an overwrite flag documented for scaffolding only.
+- Generated examples use synthetic values and never write real credentials into repository-tracked files.
+- v0.1 documentation uses standard `docker compose up -d postgres` commands after scaffolding. A dedicated `ferrum dev-db` command is out of scope for v0.1.
+
+Acceptance criteria:
+
+- A new developer can run `ferrum init`, copy `.env.example` to a local ignored env file, start PostgreSQL with the documented `docker compose` command, generate/apply the initial migration, and execute the first async CRUD example.
+- Running `ferrum init` in a directory with existing target files reports the planned file actions and exits without overwriting by default.
+- Generated files contain placeholders or local-only synthetic defaults, not production hostnames, passwords, tokens, or DSNs.
+- Quickstart documentation makes clear that Ferrum owns scaffolding for v0.1, while Docker itself remains operated through standard Docker Compose commands.
+
 ## User Stories
 
 ### Model Definition
@@ -379,6 +408,18 @@ Acceptance criteria:
 - Apply commands record enough state to avoid double-applying.
 - Unsupported schema changes fail with next-action guidance.
 - Destructive operations and non-development applies require explicit confirmation gates.
+- CI/CD applies can provide a dry-run-scoped confirmation token instead of an interactive prompt, and mismatched tokens fail before mutation.
+
+### First-Run Initialization
+
+As an async Python developer evaluating Ferrum, I want a project scaffold that gives me a local PostgreSQL configuration and starter files, so that I can reach the first working query without designing setup glue first.
+
+Acceptance criteria:
+
+- `ferrum init` creates or previews the documented v0.1 scaffold.
+- Existing files are not overwritten silently.
+- The generated scaffold supports the quickstart path with standard `docker compose` commands.
+- No generated file includes real credentials or user PII.
 
 ### Observability
 
@@ -395,6 +436,7 @@ Acceptance criteria:
 ## Success Criteria
 
 - A new developer can go from Ferrum documentation to a running FastAPI/Starlette prototype with async PostgreSQL CRUD in under 30 minutes.
+- The under-30-minute path includes `ferrum init` scaffolding plus standard Docker Compose commands, not a Ferrum-owned database lifecycle service.
 - The v0.1 API supports the CRUD, filter, order, limit, and migration paths needed by a simple service.
 - Documentation clearly describes when to choose Ferrum over SQLAlchemy, Tortoise ORM, or Django ORM.
 - Benchmarks cover query compilation, execution, and hydration baselines without regressions during release qualification.
@@ -428,6 +470,8 @@ Scope:
 - Async QuerySet CRUD, filter, order, limit, and list.
 - Rust-powered SQL generation via PyO3.
 - Migration planning, dry-run, and apply workflow for supported fields.
+- CI/CD-safe non-interactive migration apply confirmation for destructive plans.
+- `ferrum init` quickstart scaffolding without `ferrum dev-db` lifecycle management.
 - Query timing and error classification hooks.
 - Security/data-protection requirements for SQL compilation, observability, errors, credentials, and migration safety.
 - Documentation for positioning and quickstart.
@@ -476,13 +520,6 @@ Outcome:
 
 - Establish Ferrum as a dependable ORM choice for async Python teams running PostgreSQL-backed services in production.
 
-## Dependencies
-
-- Chief Architect review for Rust/PyO3 engine boundary, concurrency model, migration architecture, and PostgreSQL connection strategy.
-- Product Designer review for documentation architecture, onboarding, and developer experience flows.
-- Security Engineer re-review of this amended PRD before architecture sign-off, especially query inspection, observability payloads, and migration output.
-- Engineering input on benchmark targets, supported Pydantic v2 subset, and migration safety guarantees.
-
 ## Risks & Tradeoffs
 
 - PostgreSQL-first focus improves correctness but delays SQLite or MySQL teams.
@@ -499,6 +536,8 @@ Outcome:
 Resolved for v0.1:
 
 - Migration command set: v0.1 must support project initialization, migration generation, mandatory dry-run/preview, and guarded apply. Rollback is not a v0.1 Must-have; recovery guidance can use forward migrations and documented manual intervention for early releases.
+- Non-interactive destructive migration confirmation: headless CI/CD destructive apply is in v0.1 scope, but only through a dry-run-scoped confirmation token paired with explicit target-environment confirmation for non-development targets. Generic `--force`, `--yes`, and env-var-only bypasses are out of scope.
+- Quickstart scaffolding: `ferrum init` is in v0.1 scope because it directly supports the under-30-minute prototype outcome. `ferrum dev-db` is not in v0.1 scope; generated `docker-compose.yml` plus documented `docker compose` commands are sufficient.
 - Relationship scope: no relationship helper is strategically required for the v0.1 activation path. v0.1 examples should use scalar fields and explicit foreign-key IDs only. Common one-to-many and many-to-one helpers move to v0.2.
 - Observability scope: hooks must include query start, success, failure, SQL context, hydration failure, and migration diagnostics with Tier A safe-for-APM defaults. Full SQL inspection is explicit local-dev opt-in and bound-value inspection is unsafe local-dev only.
 - Positioning: Ferrum should be positioned as a general async Python ORM with FastAPI and Starlette as the primary activation examples, and Django migration as a secondary adoption story.
@@ -515,6 +554,3 @@ Still open for architecture:
 - No raw SQL escape hatches or production-exposed query inspection surfaces.
 - No architecture decisions beyond the product constraints documented here.
 
-## Handoff Notes
-
-Product requirements are ready for Product Designer review to define the documentation/onboarding story, developer-local query inspection UX, safe SQL-context language, and migration preview experience. After design sign-off and Security Engineer re-review, Chief Architect should validate the Rust/PyO3 boundary, async concurrency guarantees, SQL compilation safety model, centralized error sanitization, hook payload schema, and migration tooling before engineering ramps implementation.

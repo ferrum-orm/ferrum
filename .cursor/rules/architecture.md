@@ -2,7 +2,7 @@
 
 > Architecture-level invariants and security gates that bound every change. These are
 > release-qualification gates, not suggestions. See `AGENTS.md` §2–§5 and the docs in
-> `docs/foundation/`.
+> `.claude/docs/`.
 
 ## Boundary discipline
 

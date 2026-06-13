@@ -1,11 +1,7 @@
 # Ferrum Data Modeling
 
-**Status:** Proposed — pending CEO/board approval
 **Version:** v0.1 data model contract
-**Inputs:** [ARCHITECTURE.md](./ARCHITECTURE.md), [PRODUCT_REQUIREMENTS.md](./PRODUCT_REQUIREMENTS.md), [ARCHITECTURE_FEASIBILITY_REVIEW.md](./ARCHITECTURE_FEASIBILITY_REVIEW.md), [SECURITY_REVIEW_PRD.md](./SECURITY_REVIEW_PRD.md)
-**Issue:** GUY-70
-**Blocked by:** GUY-69 (ARCHITECTURE.md — done)
-**Date:** 2026-06-13
+**Inputs:** [ARCHITECTURE.md](./ARCHITECTURE.md), [PRODUCT_REQUIREMENTS.md](./PRODUCT_REQUIREMENTS.md), [SECURITY.md](./SECURITY.md)
 
 ---
 
@@ -30,7 +26,7 @@ Documenting the relationship *contract* now (without building loaders) satisfies
 
 - **Single Responsibility** — the model is the single source of truth; metadata is derived, never duplicated.
 - **Least Astonishment** — field/constraint/index declaration mirrors Pydantic v2 + Django mental models.
-- **Schema Evolution** — additive-by-default; metadata is introspectable so the migration planner ([MIGRATIONS.md](./MIGRATIONS.md), GUY-73) can diff it deterministically.
+- **Schema Evolution** — additive-by-default; metadata is introspectable so the migration planner ([MIGRATIONS.md](./MIGRATIONS.md)) can diff it deterministically.
 - **Defense in Depth** — every identifier a user can name (field, column, operator, sort) is an allowlist entry built at class-definition time; nothing reaches Rust as a runtime string.
 - **Data Gravity** — type mapping and codecs are defined once, close to the wire format.
 - **Evolutionary Architecture** — relationship and custom-codec seams are reserved without speculative machinery.
@@ -91,7 +87,7 @@ Ferrum hooks model construction through Pydantic v2's `ModelMetaclass`. The chos
 
 ### 2.3 Manager / `objects` entry point
 
-Each model exposes `objects` — a `Manager` that returns fresh `QuerySet` instances bound to the model's metadata. The manager holds **no mutable per-request state**; it is a factory. QuerySet semantics are owned by [QUERY_ENGINE.md](./QUERY_ENGINE.md) (GUY-72); this document only fixes that `objects` is the metadata-bound query entry point and that `ModelMetadata` is what the QuerySet carries into the Rust IR.
+Each model exposes `objects` — a `Manager` that returns fresh `QuerySet` instances bound to the model's metadata. The manager holds **no mutable per-request state**; it is a factory. QuerySet semantics are owned by [QUERY_ENGINE.md](./QUERY_ENGINE.md); this document only fixes that `objects` is the metadata-bound query entry point and that `ModelMetadata` is what the QuerySet carries into the Rust IR.
 
 ### 2.4 Reserved / abstract models
 
@@ -246,7 +242,7 @@ class Account(Model):
 - Emitted only by the migration planner during DDL generation, never on the hot query path.
 - Subject to the same no-raw-SQL-on-the-data-path invariant: a `CHECK` expression participates in DDL only; it is never a query escape hatch (PRD SQL Compilation Safety; ARCHITECTURE §11).
 
-Engineers must constrain `Check.expr` to reference only declared columns of the model and an allowlisted operator/function set; an expression referencing unknown identifiers fails at definition time. (Detailed DDL emission and the destructive-change classification for constraints live in [MIGRATIONS.md](./MIGRATIONS.md), GUY-73.)
+Engineers must constrain `Check.expr` to reference only declared columns of the model and an allowlisted operator/function set; an expression referencing unknown identifiers fails at definition time. (Detailed DDL emission and the destructive-change classification for constraints live in [MIGRATIONS.md](./MIGRATIONS.md).)
 
 ### 5.3 Foreign-key constraints (v0.1 nuance)
 
@@ -376,7 +372,7 @@ class User(Model):
 
 Rules:
 
-- Validation failures reference the **offending field** and constraint, and **never echo the submitted value** by default (PRD Error Handling; SECURITY_REVIEW_PRD). The error mapper (ARCHITECTURE §8.8) enforces this; model authors must not log raw input in validators.
+- Validation failures reference the **offending field** and constraint, and **never echo the submitted value** by default (PRD Error Handling; [SECURITY.md](./SECURITY.md)). The error mapper (ARCHITECTURE §8.8) enforces this; model authors must not log raw input in validators.
 - `before_save` is **async** (`async def`) — it runs in the host event loop and may `await`. This honors the async-first invariant: no blocking pre-save callback on the I/O path.
 - Pre-save runs in Python *before* the IR is built, so a hook can still reject or transform the instance before any SQL exists (Defense in Depth).
 
@@ -503,30 +499,22 @@ These map PRD/ARCHITECTURE security gates to the data-model layer. They are rele
 
 ---
 
-## 12. Open Items & Handoff
+## 12. Open Items
 
-| Item | Owner | Blocks |
-|------|-------|--------|
-| Formal ADR records (incl. ADR-003 hydration) in `DECISIONS.md` | ChiefArchitect ([GUY-74](/GUY/issues/GUY-74)) | ADR sign-off |
-| Constraint/index DDL emission + destructive classification detail | [MIGRATIONS.md](./MIGRATIONS.md) ([GUY-73](/GUY/issues/GUY-73)) | migration impl |
-| QuerySet IR field/operator binding to this metadata | [QUERY_ENGINE.md](./QUERY_ENGINE.md) ([GUY-72](/GUY/issues/GUY-72)) | query impl |
-| SecurityEngineer review of identifier/expression allowlisting (DM-1, DM-2) | SecurityEngineer | release qualification |
-| CEO/board approval of data-model contract | CEO | model implementation start |
+- Formal ADR records (incl. ADR-003 hydration) — see [ARCHITECTURE.md §12](./ARCHITECTURE.md).
+- Constraint/index DDL emission and destructive-change classification — see [MIGRATIONS.md](./MIGRATIONS.md).
+- QuerySet IR field/operator binding to this metadata — see [QUERY_ENGINE.md](./QUERY_ENGINE.md).
+- SecurityEngineer review of identifier/expression allowlisting (DM-1, DM-2) is required at v0.1 release qualification.
 
-### Acceptance criteria coverage (GUY-70)
+### Acceptance criteria
 
 - **Model definition is entirely Python-native with no schema duplication** — §2 (Pydantic v2 base, derived metadata).
 - **Relationships support async traversal** — §7.3 (explicit `await` traversal contract; no implicit sync load). v0.1 ships explicit FK ids per PRD scope; async-traversal rule fixed for v0.2.
 - **Constraints and indexes are declarative and introspectable** — §4 (introspectable `ModelMetadata`), §5, §6.
 - **Field system is type-safe with Pydantic v2** — §3 (type-driven derivation, closed type map, definition-time rejection).
-- **Document committed to `/docs/foundation/DATA_MODELING.md`** — this file.
 
-### Engineer handoff
+### Implementation guidance
 
-Implementation of the data-model layer may begin once this document and `DECISIONS.md` are approved. Recommended slice order aligns with [ARCHITECTURE §17](./ARCHITECTURE.md): build `ModelMetadata` + metaclass + field derivation first (it is the input to both the Rust IR and the migration planner), with the §10 security gates test-covered from the first slice.
+Recommended slice order aligns with [ARCHITECTURE §17](./ARCHITECTURE.md): build `ModelMetadata` + metaclass + field derivation first (it is the input to both the Rust IR and the migration planner), with the §10 security gates test-covered from the first slice.
 
 **Do not implement (architecture/scope guard):** relationship descriptors, lazy/prefetch loaders, composite primary keys, custom field codecs, or any implicit synchronous database access. These are deferred seams (§7, §3.4), not v0.1 work.
-
----
-
-*Produced by Chief Architect for GUY-70. Pending CEO/board data-model approval.*

@@ -1,11 +1,7 @@
 # Ferrum Query Engine
 
-**Status:** Proposed — pending CEO/board approval
 **Version:** v0.1 query-engine contract
-**Inputs:** [ARCHITECTURE.md](./ARCHITECTURE.md), [DATA_MODELING.md](./DATA_MODELING.md), [PRODUCT_REQUIREMENTS.md](./PRODUCT_REQUIREMENTS.md), [ARCHITECTURE_FEASIBILITY_REVIEW.md](./ARCHITECTURE_FEASIBILITY_REVIEW.md), [SECURITY_REVIEW_PRD.md](./SECURITY_REVIEW_PRD.md)
-**Issue:** GUY-72
-**Blocked by:** GUY-70 (DATA_MODELING.md — done)
-**Date:** 2026-06-13
+**Inputs:** [ARCHITECTURE.md](./ARCHITECTURE.md), [DATA_MODELING.md](./DATA_MODELING.md), [PRODUCT_REQUIREMENTS.md](./PRODUCT_REQUIREMENTS.md), [ARCHITECTURE.md](./ARCHITECTURE.md), [SECURITY.md](./SECURITY.md)
 
 ---
 
@@ -567,35 +563,14 @@ Every value above travels in `bound_params`; every identifier is an allowlist-re
 
 ---
 
-## 12. Open Items & Handoff
+## 12. Open Items
 
-| Item | Owner | Blocks |
-|------|-------|--------|
-| Formal ADR records (esp. ADR-002 IR contract, ADR-003 hydration) in `DECISIONS.md` | ChiefArchitect ([GUY-74](/GUY/issues/GUY-74)) | ADR sign-off (this doc consumes ADR-002/003) |
-| Migration DDL emission (separate compile path) | [MIGRATIONS.md](./MIGRATIONS.md) ([GUY-73](/GUY/issues/GUY-73)) | migration impl (parallel; shares the AST-in-Rust principle) |
-| SecurityEngineer review of compiler/encoder/danger-guard/hook schema (QE-1,2,3,6,7,8) | SecurityEngineer | release qualification |
-| CEO/board approval of query-engine contract | CEO | query implementation start |
+- Formal ADR records (esp. ADR-002 IR contract, ADR-003 hydration) in the ADRs in [ARCHITECTURE.md §12](./ARCHITECTURE.md).
+- Migration DDL emission (separate compile path) — see [MIGRATIONS.md](./MIGRATIONS.md); parallel track sharing the AST-in-Rust principle.
+- Security review of compiler/encoder/danger-guard/hook schema (QE-1,2,3,6,7,8) required before release qualification.
 
-### Acceptance criteria coverage (GUY-72)
+### Implementation guidance
 
-- **QuerySet design (lazy evaluation, chaining, result types)** — §3 (lazy/immutable builder, chainable methods, terminal coroutines, result-type contract).
-- **Filter system (field lookups: `__eq`, `__contains`, `__in`, `__gt`, `__lt`, etc.)** — §4 (closed lookup allowlist with Django-API parity, predicate-tree IR, fail-before-SQL).
-- **SQL generation strategy (AST-based vs string templates — justified)** — §5 (AST-in-Rust chosen; structural injection-safety rationale; alternatives in §11).
-- **Query compilation pipeline (Python IR → Rust SQL builder → parameterized SQL)** — §6 (explicit Stage 0–5 boundaries, GIL/cancellation ownership, IR contract shape).
-- **Async execution path (asyncpg driver interface)** — §7 (executor interface, transactions, cancellation at Stage 3, sanitized failure mapping).
-- **Optimization opportunities (batching, prefetch_related, explain)** — §8 (plan cache, select/prefetch, EXPLAIN, streaming, bulk/aggregation — all identified as seams, none built).
-- **Filter lookups match Django's API surface** — §4.2 (operator table).
-- **SQL generation is safe against injection (parameterized only)** — §5.1, §5.2, §9 (QE-2/QE-3), structural identifier+value separation.
-- **Query compilation pipeline has clear stage boundaries** — §6.1–§6.3.
-- **Optimization hooks identified even if not implemented in v0.1** — §8.
-- **Document committed to `/docs/foundation/QUERY_ENGINE.md`** — this file.
-
-### Engineer handoff
-
-Implementation of the query path may begin once this document and `DECISIONS.md` (ADR-002, ADR-003) are approved, following the slice order in [ARCHITECTURE.md §17](./ARCHITECTURE.md): `ferrum-core` IR types + compile unit tests first (Stages 1–2 with the §9 security tests), then the PyO3 boundary, then the Python lazy builder (Stage 0) and read path (`filter` → `all`, Stages 3–5), then write path + danger API.
+Implementation of the query path should follow the slice order in [ARCHITECTURE.md §17](./ARCHITECTURE.md): `ferrum-core` IR types + compile unit tests first (Stages 1–2 with the §9 security tests), then the PyO3 boundary, then the Python lazy builder (Stage 0) and read path (`filter` → `all`, Stages 3–5), then write path + danger API.
 
 **Do not implement (architecture/scope guard):** relationship loaders, `select_related`/`prefetch_related`, result caching, `explain()` outside a local-dev gate, server-side-cursor streaming, bulk ops, aggregation/group-by, or any raw-SQL escape hatch. These are deferred seams (§8), not v0.1 work.
-
----
-
-*Produced by Chief Architect for GUY-72. Pending CEO/board query-engine approval.*
