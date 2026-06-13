@@ -1,0 +1,108 @@
+name: Nightly
+
+on:
+  schedule:
+    # Run at 02:00 UTC every day.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Full matrix including all macOS × Python cells
+  full-matrix:
+    name: Full matrix (${{ matrix.os }} / py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ferrum_test
+          POSTGRES_USER: ferrum_test
+          POSTGRES_DB: ferrum_test
+        ports:
+          - 5432:5432
+
+    env:
+      DATABASE_URL: postgresql://ferrum_test:ferrum_test@localhost:5432/ferrum_test
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install maturin && pip install -e ".[dev]"
+      - run: maturin develop
+      - run: pytest tests/python/ -m "not benchmark" -v
+
+  # Windows sdist smoke
+  windows-sdist:
+    name: Windows sdist smoke
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install maturin
+      - run: maturin build --sdist -o dist/
+      - run: pip install dist/*.tar.gz
+
+  # Dependency vulnerability check
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      - run: cargo deny check
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit pydantic asyncpg
+      - run: pip-audit
+
+  # Benchmark run (non-blocking; opens an issue on regression > 10%)
+  benchmarks:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install maturin && pip install -e ".[dev]"
+      - run: maturin develop --release
+      - name: Rust criterion benchmarks
+        run: cargo bench --workspace 2>&1 | tee bench-rust.txt
+      - name: Python benchmarks
+        run: pytest tests/python/ -m benchmark --benchmark-json=bench-python.json 2>&1 | tee bench-python.txt
+        continue-on-error: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            bench-rust.txt
+            bench-python.json

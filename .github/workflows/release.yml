@@ -1,0 +1,142 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build abi3 wheels with cibuildwheel + maturin
+  # ---------------------------------------------------------------------------
+  build-wheels:
+    name: Build wheels (${{ matrix.platform }})
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runs-on: ubuntu-latest
+            cibw-archs: x86_64
+          - platform: linux-aarch64
+            runs-on: ubuntu-latest
+            cibw-archs: aarch64
+          - platform: macos-arm64
+            runs-on: macos-latest
+            cibw-archs: arm64
+          - platform: macos-x86_64
+            runs-on: macos-13
+            cibw-archs: x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU (for aarch64 cross-compile)
+        if: matrix.cibw-archs == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+
+      - uses: pypa/cibuildwheel@v2
+        env:
+          CIBW_BUILD: "cp311-* cp312-* cp313-*"
+          CIBW_ARCHS: ${{ matrix.cibw-archs }}
+          CIBW_BEFORE_ALL: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+          CIBW_ENVIRONMENT: 'PATH="$HOME/.cargo/bin:$PATH"'
+          CIBW_BUILD_FRONTEND: "build[uv]"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.platform }}
+          path: wheelhouse/*.whl
+
+  # ---------------------------------------------------------------------------
+  # Build sdist
+  # ---------------------------------------------------------------------------
+  build-sdist:
+    name: Build sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - run: pip install maturin
+      - run: maturin sdist --out dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  # ---------------------------------------------------------------------------
+  # Smoke-install each wheel
+  # ---------------------------------------------------------------------------
+  smoke-install:
+    name: Smoke install (${{ matrix.python-version }})
+    needs: [build-wheels]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-linux-x86_64
+          path: wheels/
+          merge-multiple: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install wheels/*.whl
+      - run: python -c "import ferrum; print(ferrum.__version__)"
+
+  # ---------------------------------------------------------------------------
+  # Security gate on the built wheel (not just dev build)
+  # ---------------------------------------------------------------------------
+  security-gate-wheel:
+    name: Security gate (wheel)
+    needs: [smoke-install]
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ferrum_test
+          POSTGRES_USER: ferrum_test
+          POSTGRES_DB: ferrum_test
+        ports:
+          - 5432:5432
+    env:
+      DATABASE_URL: postgresql://ferrum_test:ferrum_test@localhost:5432/ferrum_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-linux-x86_64
+          path: wheels/
+          merge-multiple: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install wheels/*.whl pytest pytest-asyncio
+      - name: Run security qualification on the wheel
+        run: pytest tests/python/security -m security -v
+
+  # ---------------------------------------------------------------------------
+  # Publish to PyPI (manual environment gate)
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish to PyPI
+    needs: [security-gate-wheel, build-sdist]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write  # Trusted Publishing (OIDC) — no long-lived PyPI token (§7.3)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
