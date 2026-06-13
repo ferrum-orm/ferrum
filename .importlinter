@@ -1,0 +1,51 @@
+[importlinter]
+root_packages = ferrum
+include_external_packages = True
+
+# Contract 1: CLI must not be imported by core query-path modules.
+[importlinter:contract:cli-isolation]
+name = CLI and contrib are not imported by core query modules
+type = forbidden
+source_modules =
+    ferrum.models
+    ferrum.queryset
+    ferrum.connection
+    ferrum.hooks
+    ferrum.errors
+    ferrum.migrations
+forbidden_modules =
+    ferrum.cli
+    ferrum.contrib
+    typer
+    rich
+    fastapi
+    starlette
+
+# Contract 2: contrib must not be imported by core.
+[importlinter:contract:contrib-isolation]
+name = contrib is not imported by core
+type = forbidden
+source_modules =
+    ferrum.models
+    ferrum.queryset
+    ferrum.connection
+    ferrum.hooks
+    ferrum.errors
+    ferrum.migrations
+    ferrum.cli
+forbidden_modules =
+    ferrum.contrib
+
+# Contract 3: core must not import CLI.
+[importlinter:contract:core-does-not-import-cli]
+name = core query path does not import CLI
+type = layers
+layers =
+    ferrum.cli
+    ferrum.contrib
+    ferrum.migrations
+    ferrum.hooks
+    ferrum.errors
+    ferrum.connection
+    ferrum.queryset
+    ferrum.models
