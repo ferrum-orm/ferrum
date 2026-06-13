@@ -8,6 +8,13 @@ repos:
 
   - repo: local
     hooks:
+      - id: ty
+        name: ty
+        language: system
+        entry: ty check python/ferrum
+        types: [python]
+        pass_filenames: false
+
       - id: rustfmt
         name: rustfmt
         language: system

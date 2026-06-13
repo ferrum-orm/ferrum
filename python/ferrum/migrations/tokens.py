@@ -15,6 +15,7 @@ Security constraints:
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import secrets
 
@@ -31,6 +32,18 @@ def generate_token(plan_digest: str) -> str:
     # visually confirm they are authorizing the right plan.
     digest_prefix = plan_digest[:8]
     return f"{random_part}.{digest_prefix}"
+
+
+def verify_token(plan_json: str, token: str) -> bool:
+    """Verify a migration confirmation token against the plan digest.
+
+    Uses the first 16 hex characters of the SHA-256 digest of the plan JSON
+    as the expected token.  This is a simple single-use guard for the apply
+    confirmation gate; it is not a replacement for the full ``validate_token``
+    / ``generate_token`` HMAC flow used in the CLI.
+    """
+    digest = hashlib.sha256(plan_json.encode()).hexdigest()[:16]
+    return hmac.compare_digest(token, digest)
 
 
 def validate_token(token: str, plan_digest: str) -> bool:

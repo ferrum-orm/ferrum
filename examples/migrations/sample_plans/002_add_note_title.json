@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "002_add_note_title",
+  "ops": [
+    {
+      "kind": "add_column",
+      "table": "note",
+      "name": "title",
+      "sql_type": "TEXT",
+      "not_null": true,
+      "default": "''",
+      "primary_key": false
+    }
+  ],
+  "destructive": false,
+  "requires_confirmation": false
+}

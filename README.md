@@ -45,7 +45,8 @@ class User(Model):
 
 
 user = await User.objects.create(
-    email="john@example.com"
+    conn,
+    email="john@example.com",
 )
 
 users = await (
@@ -53,7 +54,7 @@ users = await (
     .filter(is_active=True)
     .order_by("-id")
     .limit(10)
-    .all()
+    .all(conn)
 )
 ```
 
@@ -68,7 +69,7 @@ No synchronous compatibility layer.
 Ferrum is designed around modern async Python applications.
 
 ```python
-users = await User.objects.all()
+users = await User.objects.all(conn)
 ```
 
 ### Pydantic Native
@@ -92,7 +93,7 @@ users = await (
     User.objects
     .filter(email__contains="@gmail.com")
     .order_by("-created_at")
-    .all()
+    .all(conn)
 )
 ```
 
@@ -169,6 +170,14 @@ This allows Ferrum to maintain a Pythonic API without sacrificing performance.
 Ferrum is currently in active development.
 
 The API is not yet stable and breaking changes should be expected until the first public release.
+
+## Examples
+
+Runnable samples live under [`examples/`](examples/):
+
+- [`examples/simple/`](examples/simple/) — async CRUD script (no web framework)
+- [`examples/migrations/`](examples/migrations/) — CLI, plan generation, apply, and forward fix-ups
+- [`examples/fastapi_quickstart/`](examples/fastapi_quickstart/) — FastAPI integration
 
 ## Contributing
 

@@ -1,0 +1,153 @@
+# Ferrum development tasks (mise)
+# Mirrors CI jobs so local verification matches the gate.
+#
+# Smallest-verification convention (PROJECT_STRUCTURE.md §8.1):
+#   Rust-only change:       mise run test-rust lint-rust
+#   Python-only change:     mise run dev test-python-unit
+#   Extension/boundary:     mise run dev test-integration test-security
+#   Full local CI parity:   mise run ci-local
+
+# Python and Rust: use system installs (cargo, python3 on PATH).
+# Only project-local CLI tools are pinned here; enable_tools prevents
+# global mise python/rust from overriding PATH in this directory.
+[settings]
+enable_tools = ["ruff", "ty", "uv"]
+
+[tools]
+ruff = "latest"
+ty = "latest"
+uv = "latest"
+
+# ---------------------------------------------------------------------------
+# Setup
+# ---------------------------------------------------------------------------
+
+[tasks.setup]
+description = "Sync Python dev dependencies into the project venv"
+run = "uv sync --extra dev"
+
+# ---------------------------------------------------------------------------
+# Build
+# ---------------------------------------------------------------------------
+
+[tasks.dev]
+description = "Build and install the extension (debug)"
+run = "uv run maturin develop"
+
+[tasks.dev-release]
+description = "Build and install the extension (release)"
+run = "uv run maturin develop --release"
+
+# ---------------------------------------------------------------------------
+# Linting
+# ---------------------------------------------------------------------------
+
+[tasks.lint-rust]
+description = "Rust fmt + clippy"
+run = [
+  "cargo fmt --all --check",
+  "cargo clippy --workspace --all-targets -- -D warnings",
+]
+
+[tasks.lint-python]
+description = "Ruff lint + format check"
+run = [
+  "ruff check python/ tests/",
+  "ruff format --check python/ tests/",
+]
+
+[tasks.lint]
+description = "Run Rust and Python linters"
+depends = ["lint-rust", "lint-python"]
+run = "true"
+
+# ---------------------------------------------------------------------------
+# Type checking
+# ---------------------------------------------------------------------------
+
+[tasks.type-python]
+description = "Type-check python/ferrum with ty"
+run = "ty check python/ferrum"
+
+# ---------------------------------------------------------------------------
+# Rust checks
+# ---------------------------------------------------------------------------
+
+[tasks.check-rust]
+description = "cargo check --workspace"
+run = "cargo check --workspace"
+
+[tasks.boundary]
+description = "Ensure ferrum-core and ferrum-sql do not depend on pyo3/tokio"
+run = [
+  "bash -c 'echo \"Checking ferrum-core: no pyo3/tokio...\"; cargo tree -p ferrum-core --edges normal | grep -E \"pyo3|tokio\" && echo FAIL && exit 1 || echo OK'",
+  "bash -c 'echo \"Checking ferrum-sql: no pyo3/tokio...\"; cargo tree -p ferrum-sql --edges normal | grep -E \"pyo3|tokio\" && echo FAIL && exit 1 || echo OK'",
+]
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+[tasks.test-rust]
+description = "Run ferrum-core and ferrum-sql unit tests"
+run = "cargo test -p ferrum-core -p ferrum-sql"
+
+[tasks.test-python-unit]
+description = "Run Python unit and property tests"
+run = "uv run pytest tests/python/unit tests/python/property -v"
+
+[tasks.test-integration]
+description = "Run integration tests (requires PostgreSQL)"
+depends = ["dev"]
+run = "uv run pytest tests/python/integration -m integration -v"
+
+[tasks.test-security]
+description = "Run security qualification tests"
+depends = ["dev"]
+run = "uv run pytest tests/python/security -m security -v"
+
+[tasks.test-property]
+description = "Run property-based tests only"
+run = "uv run pytest tests/python/property -m property -v"
+
+[tasks.all-tests]
+description = "dev + rust + python unit + security tests"
+depends = ["dev", "test-rust", "test-python-unit", "test-security"]
+run = "true"
+
+# ---------------------------------------------------------------------------
+# Import boundary
+# ---------------------------------------------------------------------------
+
+[tasks.import-boundary]
+description = "Enforce Python import boundaries (import-linter)"
+run = "uv run lint-imports"
+
+# ---------------------------------------------------------------------------
+# Full local CI parity
+# ---------------------------------------------------------------------------
+
+[tasks.ci-local]
+description = "Run every required PR gate locally"
+depends = [
+  "lint",
+  "check-rust",
+  "boundary",
+  "test-rust",
+  "type-python",
+  "import-boundary",
+  "all-tests",
+]
+run = "true"
+
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
+
+[tasks.clean]
+description = "Remove build artifacts and caches"
+run = [
+  "cargo clean",
+  "rm -rf target/ dist/ wheelhouse/ .pytest_cache/ .ruff_cache/",
+  "bash -c 'find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true'",
+]

@@ -13,4 +13,24 @@ Security invariants (MIG-1 through MIG-8):
 - Non-development applies require environment confirmation.
 - Confirmation tokens are never emitted to argv or public logs.
 - Token replay after apply is rejected.
+
+Public API (stable):
+- ``apply(conn, plan_json, ...)`` — apply or dry-run a Rust-generated plan JSON.
+- ``MigrationResult`` — return value of ``apply()``.
+- ``_op_to_sql`` — convert a plan operation dict to DDL SQL (internal but testable).
 """
+
+import ferrum.migrations.loader as loader
+import ferrum.migrations.operations as operations
+from ferrum.migrations.base import Migration
+from ferrum.migrations.orchestrator import MigrationResult, _op_to_sql, apply, compute_plan
+
+__all__ = [
+    "Migration",
+    "MigrationResult",
+    "_op_to_sql",
+    "apply",
+    "compute_plan",
+    "loader",
+    "operations",
+]

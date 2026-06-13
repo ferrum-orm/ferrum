@@ -54,8 +54,17 @@ pub enum Operation {
     },
     Update {
         assignments: Vec<(FieldRef, BindValue)>,
+        /// When `true`, the Rust compiler skips the `MissingFilter` guard.
+        /// Set only by `QuerySet.danger_update_all()` — never by `.update()`.
+        #[serde(default)]
+        danger: bool,
     },
-    Delete,
+    Delete {
+        /// When `true`, the Rust compiler skips the `MissingFilter` guard.
+        /// Set only by `QuerySet.danger_delete_all()` — never by `.delete()`.
+        #[serde(default)]
+        danger: bool,
+    },
 }
 
 /// A reference to a field, validated against the model metadata allowlist.
@@ -82,13 +91,20 @@ pub struct OrderBy {
     pub direction: SortDirection,
 }
 
-/// Sort direction — only these two values are allowed; anything else is a
-/// `CompileError::InvalidSortDirection`.
+/// Sort direction — only `Asc` and `Desc` are valid; anything else deserialized
+/// from Python/JSON becomes `Unknown`, which the compiler rejects with
+/// `CompileError::InvalidSortDirection` before any SQL is produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SortDirection {
     Asc,
     Desc,
+    /// Catch-all for unrecognized direction strings arriving from Python/JSON.
+    /// Valid Rust code never constructs this; it is produced only by serde
+    /// when the JSON value is not `"asc"` or `"desc"`. The compiler rejects it
+    /// before emitting any SQL text (Defense in Depth, SQL-1).
+    #[serde(other)]
+    Unknown,
 }
 
 /// A bound parameter value carried out-of-band from SQL identifiers.

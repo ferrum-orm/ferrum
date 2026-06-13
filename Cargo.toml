@@ -3,6 +3,7 @@ members = [
     "crates/ferrum-core",
     "crates/ferrum-sql",
     "crates/ferrum-pyo3",
+    "crates/ferrum-migrate",
 ]
 resolver = "2"
 
@@ -27,6 +28,16 @@ thiserror = "2"
 
 # Testing & property-based
 proptest = "1"
+
+# `panic = "unwind"` is required for `ferrum-pyo3` (`cdylib`) so that
+# `std::panic::catch_unwind` can intercept Rust panics and convert them to
+# catchable Python exceptions rather than aborting the interpreter process.
+# This is the default but we set it explicitly (ARCHITECTURE.md §6.2, ERR-2).
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

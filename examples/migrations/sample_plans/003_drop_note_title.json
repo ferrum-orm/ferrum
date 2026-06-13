@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "name": "003_drop_note_title",
+  "ops": [
+    {
+      "kind": "drop_column",
+      "table": "note",
+      "column": "title"
+    }
+  ],
+  "destructive": true,
+  "requires_confirmation": true
+}
