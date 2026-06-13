@@ -1,7 +1,7 @@
 //! Structured error types for the Ferrum core engine.
 //!
 //! All errors carry structured fields (model name, field name, operator, category)
-//! rather than formatted strings — no trace blobs, no raw DETAIL/HINT from PostgreSQL.
+//! rather than formatted strings — no trace blobs, no raw DETAIL/HINT from `PostgreSQL`.
 
 use thiserror::Error;
 

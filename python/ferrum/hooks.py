@@ -20,6 +20,7 @@ Security invariants:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import time
 from collections.abc import Callable
@@ -71,9 +72,8 @@ def _redact(payload: HookPayload) -> HookPayload:
     level = _obs_level()
     safe: HookPayload = {k: v for k, v in payload.items() if k in _TIER_A_KEYS}
 
-    if level in ("B", "C"):
-        if "sql_normalized" in payload:
-            safe["sql_normalized"] = payload["sql_normalized"]
+    if level in ("B", "C") and "sql_normalized" in payload:
+        safe["sql_normalized"] = payload["sql_normalized"]
 
     if level == "C":
         if "sql_text" in payload:
@@ -106,14 +106,9 @@ def dispatch(payload: HookPayload) -> None:
     """
     safe = _redact(payload)
     for hook in _HOOKS:
-        try:
-            hook(safe)
-        except Exception:  # noqa: BLE001
+        with contextlib.suppress(Exception):
             # A crashing hook must never break the query path.
-            pass
-
-
-import contextlib  # noqa: E402 — import here to avoid circular at module level
+            hook(safe)
 
 
 class QueryTimer:

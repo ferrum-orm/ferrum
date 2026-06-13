@@ -19,6 +19,7 @@ from typing import Any
 
 class OperationClass(Enum):
     """Classification of a migration operation by safety profile."""
+
     SAFE = "safe"
     DESTRUCTIVE = "destructive"
     NON_TRANSACTIONAL = "non_transactional"
@@ -35,6 +36,7 @@ class PlannedOperation:
 @dataclass
 class MigrationPlan:
     """The output of a dry-run pass. Required as input to ``apply()``."""
+
     operations: list[PlannedOperation] = field(default_factory=list)
     digest: str = ""
     dry_run_completed: bool = False
@@ -42,8 +44,7 @@ class MigrationPlan:
 
     def __post_init__(self) -> None:
         self.has_destructive = any(
-            op.classification == OperationClass.DESTRUCTIVE
-            for op in self.operations
+            op.classification == OperationClass.DESTRUCTIVE for op in self.operations
         )
 
 
@@ -80,6 +81,7 @@ async def apply(
     """
     if not plan.dry_run_completed:
         from ferrum.errors import FerrumMigrationError
+
         raise FerrumMigrationError(
             "Cannot apply migration: dry_run() has not been completed. "
             "Call dry_run() first and pass the returned plan to apply()."

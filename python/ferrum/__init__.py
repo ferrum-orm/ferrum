@@ -8,16 +8,17 @@ from __future__ import annotations
 
 __version__ = "0.1.0"
 __all__ = [
+    "FerrumCompileError",
+    "FerrumConnectionError",
+    "FerrumError",
+    "FerrumIntegrityError",
+    "FerrumNotFoundError",
     "Model",
     "QuerySet",
     "connect",
-    "FerrumError",
-    "FerrumCompileError",
-    "FerrumNotFoundError",
-    "FerrumIntegrityError",
-    "FerrumConnectionError",
 ]
 
+from ferrum.connection import connect
 from ferrum.errors import (
     FerrumCompileError,
     FerrumConnectionError,
@@ -27,4 +28,3 @@ from ferrum.errors import (
 )
 from ferrum.models import Model
 from ferrum.queryset import QuerySet
-from ferrum.connection import connect

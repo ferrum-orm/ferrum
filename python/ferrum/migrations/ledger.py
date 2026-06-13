@@ -7,7 +7,6 @@ environment — never bound values or credentials (CRED-1).
 
 from __future__ import annotations
 
-
 LEDGER_TABLE = "ferrum_migrations"
 
 CREATE_LEDGER_SQL = f"""

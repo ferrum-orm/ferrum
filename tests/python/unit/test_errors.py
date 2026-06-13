@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from ferrum.errors import (
     FerrumCompileError,
     FerrumConnectionError,

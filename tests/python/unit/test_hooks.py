@@ -6,8 +6,6 @@ LOG-2: Tier B/C must not activate from generic DEBUG=1.
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 import ferrum.hooks as hooks
@@ -21,18 +19,20 @@ class TestTierAEnforcement:
         fn = received.append
         register_hook(fn)
         try:
-            dispatch({
-                "event": "query",
-                "model": "User",
-                "table": "users",
-                "operation": "select",
-                "duration_ms": 1.5,
-                "status": "ok",
-                # Must be stripped:
-                "sql_text": "SELECT * FROM users WHERE id = $1",
-                "bound_params": ["42"],
-                "secret": "should not appear",
-            })
+            dispatch(
+                {
+                    "event": "query",
+                    "model": "User",
+                    "table": "users",
+                    "operation": "select",
+                    "duration_ms": 1.5,
+                    "status": "ok",
+                    # Must be stripped:
+                    "sql_text": "SELECT * FROM users WHERE id = $1",
+                    "bound_params": ["42"],
+                    "secret": "should not appear",
+                }
+            )
             assert len(received) == 1
             payload = received[0]
             assert "sql_text" not in payload

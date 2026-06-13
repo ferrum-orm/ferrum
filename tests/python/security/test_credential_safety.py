@@ -9,13 +9,12 @@ from __future__ import annotations
 import pytest
 
 from ferrum.errors import FerrumConnectionError
-from ferrum.hooks import HookPayload, _TIER_A_KEYS, dispatch, register_hook, unregister_hook
-
+from ferrum.hooks import _TIER_A_KEYS, HookPayload, dispatch, register_hook, unregister_hook
 
 pytestmark = pytest.mark.security
 
 _FAKE_DSN = "postgresql://admin:supersecret@db.internal:5432/prod"
-_FAKE_PASSWORD = "supersecret"
+_FAKE_PASSWORD = "supersecret"  # noqa: S105 — intentional fake credential for security tests
 
 
 class TestCredentialSafety:
@@ -38,17 +37,19 @@ class TestCredentialSafety:
         fn = received.append
         register_hook(fn)
         try:
-            dispatch({
-                "event": "query",
-                "status": "ok",
-                "model": "User",
-                "table": "users",
-                "operation": "select",
-                "duration_ms": 0.5,
-                # Accidentally included — must be stripped by redaction layer
-                "dsn": _FAKE_DSN,
-                "password": _FAKE_PASSWORD,
-            })
+            dispatch(
+                {
+                    "event": "query",
+                    "status": "ok",
+                    "model": "User",
+                    "table": "users",
+                    "operation": "select",
+                    "duration_ms": 0.5,
+                    # Accidentally included — must be stripped by redaction layer
+                    "dsn": _FAKE_DSN,
+                    "password": _FAKE_PASSWORD,
+                }
+            )
             assert received
             payload = received[0]
             for v in payload.values():

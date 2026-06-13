@@ -61,11 +61,10 @@ def check_environment_gate(
     Raises:
         FerrumMigrationError: Declaration absent or mismatched.
     """
-    if target_environment in _NON_DEV_ENVIRONMENTS:
-        if declared_environment != target_environment:
-            raise FerrumMigrationError(
-                f"Applying to '{target_environment}' requires "
-                f"--environment {target_environment} to be passed explicitly. "
-                f"Got: '{declared_environment}'. "
-                "This guard prevents accidental cross-environment applies."
-            )
+    if target_environment in _NON_DEV_ENVIRONMENTS and declared_environment != target_environment:
+        raise FerrumMigrationError(
+            f"Applying to '{target_environment}' requires "
+            f"--environment {target_environment} to be passed explicitly. "
+            f"Got: '{declared_environment}'. "
+            "This guard prevents accidental cross-environment applies."
+        )

@@ -21,7 +21,7 @@ use crate::{
 /// The output of a successful compilation pass.
 #[derive(Debug, Clone)]
 pub struct CompiledQuery {
-    /// Parameterized SQL text (PostgreSQL `$N` placeholders).
+    /// Parameterized SQL text (`PostgreSQL` `$N` placeholders).
     pub sql_text: String,
 
     /// Bound parameters in placeholder order. Never contains SQL identifiers.

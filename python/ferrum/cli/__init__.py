@@ -11,4 +11,5 @@ from __future__ import annotations
 def main() -> None:
     """Entry point for the ``ferrum`` CLI command."""
     from ferrum.cli.app import app
+
     app()

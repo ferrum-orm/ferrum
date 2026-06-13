@@ -38,9 +38,11 @@ def app() -> None:
 
     if args.command == "init":
         from ferrum.cli.init import run_init
+
         run_init(name=args.name)
     elif args.command == "migrations":
         from ferrum.cli.migrations_cmd import run_migrations
+
         run_migrations(args)
     else:
         parser.print_help()

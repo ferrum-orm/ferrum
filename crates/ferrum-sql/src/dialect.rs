@@ -1,13 +1,13 @@
-//! PostgreSQL dialect configuration: placeholder style, identifier quoting, type names.
+//! `PostgreSQL` dialect configuration: placeholder style, identifier quoting, type names.
 
-/// Render a positional parameter placeholder for PostgreSQL.
-/// PostgreSQL uses `$1`, `$2`, …
+/// Render a positional parameter placeholder for `PostgreSQL`.
+/// `PostgreSQL` uses `$1`, `$2`, …
 #[must_use]
 pub fn placeholder(position: usize) -> String {
     format!("${position}")
 }
 
-/// Quote an identifier (table or column name) for PostgreSQL.
+/// Quote an identifier (table or column name) for `PostgreSQL`.
 /// Doubles any embedded double-quotes to prevent injection via metadata names.
 /// Identifiers come exclusively from model metadata allowlists — this is a
 /// defense-in-depth measure, not the primary guard.
