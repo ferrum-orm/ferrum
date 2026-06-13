@@ -1,18 +1,13 @@
 # Ferrum Architecture
 
-**Status:** Proposed — pending CEO approval  
 **Version:** v0.1 architecture  
-**Inputs:** [PRODUCT_REQUIREMENTS.md](./PRODUCT_REQUIREMENTS.md), [ARCHITECTURE_FEASIBILITY_REVIEW.md](./ARCHITECTURE_FEASIBILITY_REVIEW.md), [SECURITY_REVIEW_PRD.md](./SECURITY_REVIEW_PRD.md), [PRODUCT_DESIGN_REVIEW.md](../design/PRODUCT_DESIGN_REVIEW.md)  
-**Issue:** GUY-69  
-**Date:** 2026-06-13
+**Inputs:** [PRODUCT_REQUIREMENTS.md](./PRODUCT_REQUIREMENTS.md), [SECURITY.md](./SECURITY.md), [PRODUCT_DESIGN.md](./PRODUCT_DESIGN.md)
 
 ---
 
 ## 1. Purpose
 
 This document defines how Ferrum is structured before implementation begins. It is the authoritative architecture contract for v0.1: component boundaries, async execution model, package layout, integration contracts, security invariants, and the ADR decisions engineers must implement against.
-
-Engineers must not start implementation until this document and the six ADRs in Section 12 are approved.
 
 ---
 
@@ -288,7 +283,7 @@ ferrum/                          # repository root
 | Linux manylinux aarch64 | Wheel | ARM server adoption |
 | macOS arm64 | Wheel | Developer laptops |
 | macOS x86_64 | Wheel | Legacy dev machines |
-| Windows | sdist only | Defer wheel matrix cost to v0.2 (CEO approval pending) |
+| Windows | sdist only | Defer wheel matrix cost to v0.2 |
 
 Tooling: `maturin` for local/extension builds; `cibuildwheel` for release matrix.
 
@@ -332,9 +327,10 @@ Tooling: `maturin` for local/extension builds; `cibuildwheel` for release matrix
 
 ### 8.6 Migration Orchestrator (Python + Rust)
 
-- Rust: schema diff → migration plan + SQL statements.
-- Python: dry-run output, destructive classification, confirmation gates, apply sequencing.
+- Rust: schema diff → migration plan + SQL statements; emits the canonical plan digest used for confirmation-token binding.
+- Python: dry-run output, destructive classification, confirmation gates, apply sequencing, and confirmation-token emit/validate (ADR-007).
 - Transactional wrapper per migration step (ADR-004); non-transactional exceptions documented per step.
+- Non-interactive destructive/non-dev apply is authorized only by a live-state-bound dry-run token (`--confirm-plan`) plus `--confirm-environment`; no generic `--force`/`--yes`/env-var-only bypass exists (ADR-007).
 
 ### 8.7 Hook Dispatcher & Redaction Layer (Python)
 
@@ -393,7 +389,7 @@ await User.objects.create(email="...")
 
 ## 10. Persistence & Data Model (Overview)
 
-Detailed field-level modeling is specified in `DATA_MODELING.md` (GUY-70). This section defines architectural persistence boundaries.
+Detailed field-level modeling is specified in `./DATA_MODELING.md`. This section defines architectural persistence boundaries.
 
 ### 10.1 Application Data
 
@@ -470,6 +466,11 @@ Layer 6: Migration gates (Python orchestrator)
 | MIG-1 | Dry-run before apply | Migration orchestrator | Apply without dry-run fails |
 | MIG-2 | Destructive confirmation gate | Migration orchestrator | Drop without confirm fails |
 | MIG-5 | Unscoped bulk mutation danger API | QuerySet guards | `delete()` without filter fails |
+| MIG-6 | Token unforgeable; replay after successful apply fails (ADR-007) | Live-state-bound, single-use/ledger token | Replay token post-apply → fail before mutation |
+| MIG-7 | Token marked sensitive; CI uses secret injection (ADR-007) | Migration CLI docs + `migration_dry_run` hook | Docs/hook classify token sensitive; no token in public-log examples |
+| MIG-8 | Token via secret channel (env/stdin), not argv; not an env-var *bypass* (ADR-007) | Migration apply CLI | Token readable from stdin/secret-env; no `--force`/`--yes`/env-only bypass exists |
+| INIT-1 | Generated compose binds Postgres to `127.0.0.1` (ADR-008) | `ferrum init` compose template | Generated `docker-compose.yml` pins `127.0.0.1`, not `0.0.0.0` |
+| INIT-2 | `.gitignore` excludes `.env`; init write-path allowlist (ADR-008) | `ferrum init` scaffold | Generated `.gitignore` ignores `.env`; init refuses writes outside cwd allowlist |
 
 **SecurityEngineer notification:** SQL compilation, migration apply, hook payload schema, and TLS/`sslmode` connection hardening require SecurityEngineer review before v0.1 release qualification.
 
@@ -477,13 +478,13 @@ Layer 6: Migration gates (Python orchestrator)
 
 - DSN parsed in Python; password held in memory only for pool creation.
 - Diagnostics allowlist: host, port, database, username, error category — never password or full DSN.
-- TLS/`sslmode` documented in connection ADR follow-up (architecture-phase deliverable per feasibility review).
+- TLS/`sslmode` documented in connection ADR follow-up (architecture-phase deliverable; see Open Items §16).
 
 ---
 
 ## 12. Architecture Decision Records (ADRs)
 
-These six decisions must be resolved before engineering implementation. Default leanings are proposals pending formal sign-off in `DECISIONS.md`.
+These decisions govern engineering implementation. ADR-001–006 are foundational architecture decisions; ADR-007 and ADR-008 cover the CLI/migration product contract and security review. ADR bodies and decisions are the authoritative record (see §12).
 
 ### ADR-001: PostgreSQL Driver Placement
 
@@ -493,8 +494,6 @@ These six decisions must be resolved before engineering implementation. Default 
 
 **Rationale:** Avoids dual-runtime complexity (Blast Radius), simplest cancellation model, smallest native dependency surface. Strangler-friendly: Rust can absorb driver later if benchmarks demand.
 
-**Status:** Proposed — CEO cost review for packaging implications.
-
 ### ADR-002: QuerySet IR Contract
 
 **Decision:** Typed, versioned `QuerySetIR` struct boundary; values out-of-band from identifiers.
@@ -502,8 +501,6 @@ These six decisions must be resolved before engineering implementation. Default 
 **Alternatives:** Dict-based IR; SQL compilation in Python.
 
 **Rationale:** Structural parameterization guarantee (Defense in Depth); Evolutionary Architecture for v0.2 relationships.
-
-**Status:** Proposed.
 
 ### ADR-003: Hydration Semantics
 
@@ -514,8 +511,6 @@ These six decisions must be resolved before engineering implementation. Default 
 **Rationale:** Performance (Doherty threshold); DB is source of truth for stored types.
 
 **Caveat:** Custom validators with side effects are skipped — document and offer opt-in full validation if needed.
-
-**Status:** Proposed.
 
 ### ADR-004: Migration Transactionality
 
@@ -529,7 +524,68 @@ These six decisions must be resolved before engineering implementation. Default 
 
 **Recovery:** Failure output states whether DB changed, which step failed, and documented recovery action.
 
-**Status:** Proposed.
+**Related:** Confirmation gating for non-interactive apply is specified in ADR-007. ADR-004 governs *how* statements execute (transactionality); ADR-007 governs *whether* a destructive/non-dev apply is authorized to run.
+
+### ADR-007: Non-Interactive Migration Confirmation Token
+
+**Context:** `./PRODUCT_REQUIREMENTS.md` §Migration Safety puts headless CI/CD destructive apply in v0.1 scope, but **only** through a dry-run-scoped confirmation token. Security criteria (see `./SECURITY.md`) with residual-risk criteria are folded into the architecture here.
+
+**Decision:** Destructive or non-development migration apply is authorized non-interactively only by an **opaque confirmation token** emitted by a prior `dry-run`, bound to (a) the exact reviewed plan, (b) the target environment, and (c) the sanitized database identity. The CLI contract is fixed by the PM decision:
+
+- `ferrum migrations dry-run --env <target> --format json` emits the token.
+- `ferrum migrations apply --env <target> --non-interactive --confirm-plan <token> --confirm-environment <target>` applies only when the token matches the current plan **and** target.
+- Non-development apply requires `--confirm-environment` even when the plan is non-destructive (dual gate).
+
+**Token mechanism (architecture, preserving product invariants):**
+
+- The token is a deterministic binding over the canonicalized plan, normalized target identity, and a server-derived dry-run state marker. Validation re-derives the binding from live database/plan state at apply time and rejects on any mismatch. Concretely: `token = HMAC-or-hash(canonical_plan_digest ‖ target_env ‖ sanitized_db_identity ‖ dry_run_state_marker)`.
+- Validation is a pure, cheap comparison relative to plan generation; **correctness over deploy speed** — drift detection always wins (CAP framing: prefer apply unavailability over applying a stale/inconsistent plan).
+- The token carries **no secrets**: no password, full DSN, bind value, or row data. Database identity in the binding is the same allowlist used for connection diagnostics (host, port, database, username) — never the password.
+
+**Failure modes (all fail *before* mutation, with re-run-dry-run guidance):** missing token · malformed token · token for another target · token for another plan · token stale after schema drift.
+
+**Folds in security residual-risk criteria (release-qualification):**
+
+| ID | Criterion | Architecture enforcement point |
+|----|-----------|--------------------------------|
+| MIG-6 | Token unforgeable without live dry-run state; replay after a successful apply fails | Bind `dry_run_state_marker` to pre-apply schema state; advance/consume marker on successful apply so the same token cannot re-authorize (single-use / ledger-bound) |
+| MIG-7 | Dry-run docs mark the token as a sensitive capability; CI examples use secret injection, not public logs | Migration CLI docs + `migration_dry_run` hook classify token as sensitive; docs show secret-store injection |
+| MIG-8 | Apply accepts the token via a secret channel (env/stdin) to avoid `ps`/argv leakage — distinct from the **banned** env-var-only *bypass* | CLI accepts `--confirm-plan` value via stdin or a named secret env reference; the env var supplies the *token*, never a destructive *bypass* |
+
+**Anti-bypass invariant:** There is no generic `--force`, `--yes`, or env-var-only destructive bypass. MIG-8's secret channel transports the dry-run-derived token only; it never substitutes for a token. Any implementation that lets apply proceed destructively without a matching live-state token is an architecture defect, not an implementation shortcut.
+
+**Alternatives considered:**
+
+| Alternative | Why rejected |
+|-------------|--------------|
+| Generic `--force` / `--yes` flag | PM- and Security-banned; normalizes unsafe bypass (Defense in Depth) |
+| Env-var-only confirmation (e.g. `FERRUM_CONFIRM=1`) | No binding to plan/target; trivially set in CI; banned by contract |
+| Long-lived signed token (no live-state binding) | Replayable after drift or after a prior apply (MIG-6 violation) |
+| Interactive prompt only (no headless path) | Blocks the in-scope automated CI/CD deploy outcome |
+
+### ADR-008: `ferrum init` CLI Scaffold Scope
+
+**Context:** `ferrum init` is in v0.1 scope as a Must-have for the under-30-minute prototype outcome; `ferrum dev-db` / Ferrum-managed container lifecycle is explicitly excluded.
+
+**Decision:** `ferrum init` scaffolds **local files only** — a Ferrum config stub, a secret-free `.env.example`, and a local PostgreSQL `docker-compose.yml`. Ferrum does not own Docker lifecycle in v0.1; quickstart docs use standard `docker compose up -d postgres`. There is no `ferrum dev-db` command.
+
+**Scaffold safety contract (preserves product invariants + folds in SecurityEngineer criteria):**
+
+- **No silent overwrite:** running in a directory with existing target files previews planned actions and exits without writing; overwrite requires explicit confirmation or a scaffolding-only overwrite flag.
+- **Secret-free output:** generated files contain placeholders or local-only synthetic defaults — never production hostnames, real credentials, tokens, DSNs, or PII.
+
+| ID | Criterion | Architecture enforcement point |
+|----|--------------------------|--------------------------------|
+| INIT-1 | Generated `docker-compose.yml` binds Postgres to `127.0.0.1` | Compose template pins the published port to `127.0.0.1:5432:5432`, not `0.0.0.0` |
+| INIT-2 | Generated `.gitignore` excludes `.env`; init writes are confined to a documented cwd allowlist | Scaffold ships a `.gitignore` that ignores `.env`; init writes only to the documented relative paths under cwd (no traversal/absolute targets) |
+
+**Alternatives considered:**
+
+| Alternative | Why rejected |
+|-------------|--------------|
+| `ferrum dev-db` managed container lifecycle | Out of v0.1 scope (YAGNI); standard `docker compose` is sufficient for quickstart |
+| No scaffold command (manual setup) | Misses the under-30-minute first-query outcome (Least Astonishment for newcomers) |
+| Scaffold real/shared DSN defaults | Credential sprawl / secret-commit risk (Defense in Depth) |
 
 ### ADR-005: Packaging Targets & CI Matrix
 
@@ -537,9 +593,7 @@ These six decisions must be resolved before engineering implementation. Default 
 
 **Alternatives:** Full Windows wheels; pure-Python fallback without Rust.
 
-**Rationale:** Balances addressable audience vs CI cost (CEO escalation).
-
-**Status:** Proposed — requires CEO approval.
+**Rationale:** Balances addressable audience vs CI cost; packaging/CI matrix decision still open.
 
 ### ADR-006: Centralized Error & Hook Boundary
 
@@ -548,8 +602,6 @@ These six decisions must be resolved before engineering implementation. Default 
 **Alternatives:** Per-component error formatting; hook consumers responsible for redaction.
 
 **Rationale:** Defense in Depth — one hardened layer (Observability First).
-
-**Status:** Proposed.
 
 ---
 
@@ -626,27 +678,15 @@ v0.1 defines extension seams without implementing full plugin machinery (YAGNI).
 
 ---
 
-## 16. Open Items & Escalations
+## 16. Open Items
 
-| Item | Owner | Blocks implementation? |
-|------|-------|------------------------|
-| CEO approval: packaging/CI matrix (ADR-005) | CEO | No — can start with Linux/macOS dev builds |
-| PM: non-interactive destructive migration contract | ProductManager | Yes for CI/CD apply path |
-| PM: `ferrum init` / CLI quickstart scope | ProductManager | No for core ORM |
-| SecurityEngineer: threat model + TLS docs | SecurityEngineer | Yes for release qualification |
-| `DATA_MODELING.md` (GUY-70) | ChiefArchitect | Yes for model implementation |
-| `PROJECT_STRUCTURE.md` (GUY-71) | ChiefArchitect | Yes for repo scaffolding |
-| `DECISIONS.md` formal ADR records | ChiefArchitect | Yes for ADR sign-off |
+- **Packaging/CI matrix (ADR-005):** final wheel targets not yet locked; implementation can proceed with Linux/macOS dev builds.
+- **TLS/`sslmode` connection hardening:** connection security docs and `sslmode` defaults still needed; blocks release qualification.
+- **ADR records to be finalized:** ADR-001–ADR-008 bodies live in §12; a separate formal record (e.g. `DECISIONS.md`) has not yet been produced.
 
 ---
 
 ## 17. Engineer Handoff
-
-Implementation may begin when:
-
-1. This document is approved by the CEO (or approval waived with documented rationale).
-2. ADR-001, ADR-002, and ADR-006 are recorded in `DECISIONS.md`.
-3. `DATA_MODELING.md` and `PROJECT_STRUCTURE.md` land.
 
 **First implementation slices (recommended order):**
 
@@ -658,14 +698,10 @@ Implementation may begin when:
 6. Write path (`create`, `update`, `delete` + danger API).
 7. Migration planner + dry-run + apply gates.
 
-**Do not implement until architecture-approved:**
+**Out of scope for v0.1:**
 
 - Relationship loaders or prefetch
 - Sync API wrappers
 - Raw SQL escape hatches
 - Multi-database drivers
 - Production HTTP query inspection
-
----
-
-*Produced by Chief Architect for GUY-69. Pending CEO architecture approval.*

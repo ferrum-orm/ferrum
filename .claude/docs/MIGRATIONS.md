@@ -1,11 +1,7 @@
 # Ferrum Migrations
 
-**Status:** Proposed — pending CEO/board approval
 **Version:** v0.1 migration contract
-**Inputs:** [DATA_MODELING.md](./DATA_MODELING.md), [ARCHITECTURE.md](./ARCHITECTURE.md), [PRODUCT_REQUIREMENTS.md](./PRODUCT_REQUIREMENTS.md), [ARCHITECTURE_FEASIBILITY_REVIEW.md](./ARCHITECTURE_FEASIBILITY_REVIEW.md), [SECURITY_REVIEW_PRD.md](./SECURITY_REVIEW_PRD.md)
-**Issue:** [GUY-73](/GUY/issues/GUY-73)
-**Blocked by:** [GUY-70](/GUY/issues/GUY-70) (DATA_MODELING.md — done)
-**Date:** 2026-06-13
+**Inputs:** [DATA_MODELING.md](./DATA_MODELING.md), [ARCHITECTURE.md](./ARCHITECTURE.md), [PRODUCT_REQUIREMENTS.md](./PRODUCT_REQUIREMENTS.md), [ARCHITECTURE.md](./ARCHITECTURE.md), [SECURITY.md](./SECURITY.md)
 
 ---
 
@@ -49,7 +45,7 @@ It binds to and does **not** restate the data-model contract. The single source 
 
 Engineers **must not** build these in v0.1 (they are deferred seams, not work):
 
-- Down-migrations as the *primary* recovery mechanism. v0.1 recovery is **transactional auto-rollback within a step** plus **forward fix-up migrations** ([ARCHITECTURE_FEASIBILITY_REVIEW.md §8](./ARCHITECTURE_FEASIBILITY_REVIEW.md): "PRD defers rollback to forward-migrations + manual recovery"). Per-operation inverse semantics are still **defined** (§6) because they are what the transactional wrapper rolls back to and what a future down-migration would reuse — but no standalone `migrate down N` command ships in v0.1.
+- Down-migrations as the *primary* recovery mechanism. v0.1 recovery is **transactional auto-rollback within a step** plus **forward fix-up migrations** ([ARCHITECTURE.md §8](./ARCHITECTURE.md): "PRD defers rollback to forward-migrations + manual recovery"). Per-operation inverse semantics are still **defined** (§6) because they are what the transactional wrapper rolls back to and what a future down-migration would reuse — but no standalone `migrate down N` command ships in v0.1.
 - Automatic data migrations / backfills beyond DDL (e.g. populating a new `NOT NULL` column from a computed expression). A `RunPython`-style data-op shape is reserved in §5.5 as a forward contract only.
 - Automatic squash tooling. Squashing is a **manual, opt-in** operation in v0.1 (§2.3).
 - Any non-PostgreSQL dialect. The planner and emitter are PostgreSQL-specific ([ARCHITECTURE.md §15.2](./ARCHITECTURE.md)).
@@ -80,7 +76,7 @@ models change ──► makemigrations ──► migration file (auto-generated,
 
 ### 2.2 What is auto-detected (v0.1)
 
-The diff engine (§3) detects and emits operations for all of the following, satisfying the GUY-73 acceptance criterion *"auto-detection covers add/remove/alter column and index changes"*:
+The diff engine (§3) detects and emits operations for all of the following:
 
 | Change class | Auto-detected operations | Destructive? |
 |--------------|--------------------------|--------------|
@@ -343,7 +339,7 @@ For transactional migrations, recovery is simply **re-run after fixing the cause
 v0.1 has **two** distinct rollback meanings; conflating them is the trap:
 
 1. **Transactional auto-rollback (shipped, primary).** PostgreSQL `ROLLBACK` undoes a failed transactional migration completely (§6.2). This is the real recovery mechanism for the common path. It needs no inverse operations — the database engine reverts.
-2. **Operation inverse (defined, used by #1 and reserved for v0.2 down-migrations).** Every operation defines its structural inverse (§5.2). In v0.1 this inverse is what a future `migrate down` would emit and is documented per operation so the contract is complete — but **no standalone down-migration command ships in v0.1** ([ARCHITECTURE_FEASIBILITY_REVIEW.md §8](./ARCHITECTURE_FEASIBILITY_REVIEW.md): rollback deferred to forward-migrations + manual recovery). To undo a *committed* migration in v0.1, the operator writes a **forward fix-up migration** (e.g. a new migration that re-adds a column). This is deliberate: forward-only history is simpler to reason about and avoids the "down-migration that loses data on the way down" footgun.
+2. **Operation inverse (defined, used by #1 and reserved for v0.2 down-migrations).** Every operation defines its structural inverse (§5.2). In v0.1 this inverse is what a future `migrate down` would emit and is documented per operation so the contract is complete — but **no standalone down-migration command ships in v0.1** ([ARCHITECTURE.md §8](./ARCHITECTURE.md): rollback deferred to forward-migrations + manual recovery). To undo a *committed* migration in v0.1, the operator writes a **forward fix-up migration** (e.g. a new migration that re-adds a column). This is deliberate: forward-only history is simpler to reason about and avoids the "down-migration that loses data on the way down" footgun.
 
 **Why not ship down-migrations in v0.1:** down-migrations imply they restore prior state, but a down of `DropColumn` cannot restore data (§5.2). Shipping them would create a false safety signal (Least Astonishment violation). v0.1's honest contract: transactions protect you mid-migration; forward fix-ups + the destructive gate protect you across migrations.
 
@@ -488,7 +484,7 @@ These map PRD/ARCHITECTURE/SECURITY gates to the migration layer. All are releas
 | CRED-1 / CRED-3 | No DSN/password/bound value/row data in ledger, dry-run, or apply output | Ledger (§4.2) + dry-run emitter | Fixture-DSN scan over ledger rows + dry-run/apply output → no secret substring |
 | MIG-LEDGER | Ledger commits atomically with its migration (transactional path) | Apply (§6.1) | Force failure mid-migration → no orphan ledger row; force success → exactly one row |
 
-**SecurityEngineer notification.** The destructive classifier (§3.4), the plan digest / token binding the apply gate consumes (§7.2), the non-transactional partial-state reporting (§6.4), and the ledger secret-free guarantee (§4.2) require SecurityEngineer review at v0.1 release qualification. This is the **migration-apply threat-model deliverable** SecurityEngineer assigned to the Chief Architect ([SECURITY_REVIEW_PRD.md](./SECURITY_REVIEW_PRD.md): "Threat model SQL compilation + migration apply paths → Chief Architect → Architecture phase"); this document is its migration half.
+**Security review.** The destructive classifier (§3.4), the plan digest / token binding the apply gate consumes (§7.2), the non-transactional partial-state reporting (§6.4), and the ledger secret-free guarantee (§4.2) are release-qualification gates covering the migration-apply threat model. See [SECURITY.md](./SECURITY.md) for the full gate definitions.
 
 ---
 
@@ -510,38 +506,14 @@ These map PRD/ARCHITECTURE/SECURITY gates to the migration layer. All are releas
 
 ---
 
-## 11. Open Items & Handoff
+## 11. Open Items
 
-| Item | Owner | Blocks |
-|------|-------|--------|
-| Formal ADR records (ADR-004 transactionality, ADR-007 token) finalized in `DECISIONS.md` | ChiefArchitect ([GUY-74](/GUY/issues/GUY-74)) | ADR sign-off |
-| QuerySet IR ↔ planner reuse of canonical metadata (shared canonicalization code path) | [QUERY_ENGINE.md](./QUERY_ENGINE.md) ([GUY-72](/GUY/issues/GUY-72)) | impl coordination |
-| SecurityEngineer review of classifier + token digest + ledger secret-free + partial-state reporting (§9) | SecurityEngineer | release qualification |
-| CEO/board approval of migration contract | CEO | migration implementation start |
+- ADR-004 (transactionality) and ADR-007 (confirmation token) are pending formal finalization in the ADRs in [ARCHITECTURE.md §12](./ARCHITECTURE.md).
+- QuerySet IR ↔ planner reuse of canonical metadata (shared canonicalization code path) — see [QUERY_ENGINE.md](./QUERY_ENGINE.md) for coordination.
+- Security review of classifier + token digest + ledger secret-free + partial-state reporting (§9) is a release-qualification gate.
 
-### Acceptance criteria coverage (GUY-73)
+### Implementation notes
 
-- **Auto-detection covers add/remove/alter column and index changes** — §2.2 (detection table), §3.3 (algorithm), §3.4 (classification).
-- **Rollback is always defined for each operation type** — §5.2 (inverse column for every operation), §6.3 (rollback semantics; transactional auto-rollback + per-op inverse + forward fix-up policy).
-- **Migration history table design is specified** — §4 (`ferrum_migrations` DDL, columns, invariants, atomicity).
-- **Conflict detection approach is documented** — §8 (DAG, multi-head detection, merge migration resolution).
-- **Document committed to `/docs/foundation/MIGRATIONS.md`** — this file.
-
-### Required-sections coverage (GUY-73)
-
-- Migration philosophy (auto-detect vs manual, squashing) — §2.
-- Schema diffing algorithm — §3.
-- Migration file format (Python operations) — §5.
-- Forward & rollback execution semantics — §6.
-- Migration history tracking — §4.
-- Conflict detection — §8.
-
-### Engineer handoff
-
-Implementation of the migration layer may begin once this document and `DECISIONS.md` are approved, and after the data-model layer ([DATA_MODELING.md](./DATA_MODELING.md)) lands — the planner's **target** input is `ModelMetadata`, so the metadata builder is the upstream dependency. Recommended slice order aligns with [ARCHITECTURE.md §17](./ARCHITECTURE.md): **(1)** introspector + canonical schema normalization, **(2)** pure diff/classifier with the §9 gates test-covered from the first slice, **(3)** file format + `makemigrations`, **(4)** ledger + transactional executor, **(5)** dry-run + ADR-007 token, **(6)** conflict detection + merge.
+Implementation of the migration layer depends on the data-model layer ([DATA_MODELING.md](./DATA_MODELING.md)) — the planner's **target** input is `ModelMetadata`, so the metadata builder is the upstream dependency. Recommended slice order aligns with [ARCHITECTURE.md §17](./ARCHITECTURE.md): **(1)** introspector + canonical schema normalization, **(2)** pure diff/classifier with the §9 gates test-covered from the first slice, **(3)** file format + `makemigrations`, **(4)** ledger + transactional executor, **(5)** dry-run + ADR-007 token, **(6)** conflict detection + merge.
 
 **Do not implement (architecture/scope guard):** standalone down-migration command, data-migration/backfill runner (§5.5), automatic squash triggers, any non-PostgreSQL dialect path, or any destructive apply path that bypasses the dry-run/token gate. These are deferred seams or banned bypasses, not v0.1 work.
-
----
-
-*Produced by Chief Architect for [GUY-73](/GUY/issues/GUY-73). Pending CEO/board migration-contract approval.*

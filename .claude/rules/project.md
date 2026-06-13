@@ -14,10 +14,10 @@ persistence — with **no synchronous compatibility layer**.
 ## Read before substantial work
 
 - `AGENTS.md` — authoritative agent contract.
-- `docs/foundation/PRODUCT_REQUIREMENTS.md` — v0.1 product contract.
-- `docs/foundation/ARCHITECTURE_FEASIBILITY_REVIEW.md` — architecture verdict, invariants, ADRs.
-- `docs/foundation/SECURITY_REVIEW_PRD.md` — release-qualification security gates.
-- `docs/design/PRODUCT_DESIGN_REVIEW.md` — developer-experience decisions.
+- `.claude/docs/PRODUCT_REQUIREMENTS.md` — v0.1 product contract.
+- `.claude/docs/ARCHITECTURE.md` — architecture contract: invariants, boundaries, ADRs.
+- `.claude/docs/SECURITY.md` — release-qualification security gates.
+- `.claude/docs/PRODUCT_DESIGN.md` — developer-experience decisions.
 
 ## Non-negotiable invariants
 

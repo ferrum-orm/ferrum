@@ -15,10 +15,10 @@ PostgreSQL-backed persistence without a synchronous compatibility layer.
 
 Read these before doing substantial work — they are the product and architecture contract:
 
-- `docs/foundation/PRODUCT_REQUIREMENTS.md` — the v0.1 product contract (scope, security, acceptance criteria).
-- `docs/foundation/ARCHITECTURE_FEASIBILITY_REVIEW.md` — the architecture verdict, invariants, and the ADRs that must exist.
-- `docs/foundation/SECURITY_REVIEW_PRD.md` — security requirements that are release-qualification gates.
-- `docs/design/PRODUCT_DESIGN_REVIEW.md` — developer-experience and onboarding decisions.
+- `.claude/docs/PRODUCT_REQUIREMENTS.md` — the v0.1 product contract (scope, security, acceptance criteria).
+- `.claude/docs/ARCHITECTURE.md` — the architecture contract: invariants, component boundaries, and the ADRs.
+- `.claude/docs/SECURITY.md` — security requirements that are release-qualification gates.
+- `.claude/docs/PRODUCT_DESIGN.md` — developer-experience and onboarding decisions.
 - `README.md` — the external pitch and the API shape we are committing to.
 
 ## 2. Non-negotiable architectural constraints
@@ -110,12 +110,13 @@ hard-code a choice that forecloses it.** If your task depends on an undecided AD
 
 ## 6. Repository layout (current and planned)
 
-- `docs/foundation/` — PRD, architecture feasibility review, security review. Authoritative.
-- `docs/design/` — product design review.
-- `.cursor/` — Cursor agent config: `rules/`, `skills/`, `commands/`, `plans/` (plans use the
-  `*.plan.md` suffix). Set up by the workspace-structure task.
-- `.claude/` — Claude Code agent config: `rules/`, `skills/`, `commands/`, `plans/` (plans use
-  plain `*.md`).
+- `.claude/docs/` — authoritative project documentation: PRD, architecture, data model, migrations,
+  query engine, project structure, security, product design. Single source of truth.
+- `.claude/` — Claude Code agent config: `agents/`, `docs/`, `rules/`, `skills/`, `commands/`,
+  `plans/` (plans use plain `*.md`).
+- `.cursor/` — Cursor agent config mirroring `.claude/` for `agents/`, `rules/`, `skills/`,
+  `commands/`, `plans/` (plans use the `*.plan.md` suffix). Documentation is not mirrored here —
+  `.claude/docs/` is the single source.
 - Production source (Python package + Rust crate) is **not yet implemented** and must not be
   added by workspace-setup or documentation tasks.
 

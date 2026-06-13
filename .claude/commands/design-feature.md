@@ -12,8 +12,8 @@ respects the contract and does not pre-empt open ADRs.
 You are designing a feature for Ferrum (async Python ORM, Rust core, Pydantic v2, PostgreSQL).
 Before proposing code:
 
-1. **Ground in the contract.** Read the relevant parts of `docs/foundation/PRODUCT_REQUIREMENTS.md`
-   and `docs/foundation/ARCHITECTURE_FEASIBILITY_REVIEW.md`. State which requirement this serves.
+1. **Ground in the contract.** Read the relevant parts of `.claude/docs/PRODUCT_REQUIREMENTS.md`
+   and `.claude/docs/ARCHITECTURE.md`. State which requirement this serves.
 2. **Place it on the boundary.** Decide what lives in Python (ergonomics, async, I/O,
    orchestration) vs Rust (pure compilation/hydration). Justify the split.
 3. **Define the public surface.** Async API signatures, model/QuerySet impact, and the IR changes

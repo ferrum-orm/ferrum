@@ -1,10 +1,7 @@
 # Ferrum Project Structure
 
-**Status:** Approved (CEO board approval `e69b1ccb`, 2026-06-13)
 **Version:** v0.1
-**Inputs:** [ARCHITECTURE.md](./ARCHITECTURE.md), [PRODUCT_REQUIREMENTS.md](./PRODUCT_REQUIREMENTS.md), [ARCHITECTURE_FEASIBILITY_REVIEW.md](./ARCHITECTURE_FEASIBILITY_REVIEW.md), [SECURITY_REVIEW_PRD.md](./SECURITY_REVIEW_PRD.md)
-**Issue:** GUY-71
-**Date:** 2026-06-13
+**Inputs:** [ARCHITECTURE.md](./ARCHITECTURE.md), [PRODUCT_REQUIREMENTS.md](./PRODUCT_REQUIREMENTS.md), [SECURITY.md](./SECURITY.md)
 
 ---
 
@@ -14,7 +11,7 @@ This document defines the physical structure of the Ferrum repository before imp
 
 It is subordinate to [ARCHITECTURE.md](./ARCHITECTURE.md). Where this document and the architecture differ, the architecture wins and this document must be corrected. This document does **not** re-decide architecture; it makes the architecture's component boundaries concrete on disk and in CI.
 
-**Scope guard (YAGNI):** This is a structure contract, not source. No production ORM source is created by this task. Directory trees below are the target scaffold engineers create when implementation is approved.
+**Scope guard (YAGNI):** This is a structure contract, not source. No production ORM source is created by this task. Directory trees below are the target scaffold engineers create when implementation begins.
 
 ---
 
@@ -44,7 +41,8 @@ ferrum/                              # repository root
 ├── README.md
 ├── LICENSE                          # Apache-2.0
 ├── CHANGELOG.md
-├── AGENTS.md / CLAUDE.md            # agent contracts
+├── AGENTS.md                        # authoritative agent contract
+├── CLAUDE.md                        # Claude Code guidance
 │
 ├── crates/                          # Rust workspace members
 │   ├── ferrum-core/                 # pure engine: IR, compile, hydrate, migrate-plan
@@ -71,12 +69,28 @@ ferrum/                              # repository root
 │
 ├── benches/                         # criterion (Rust) + pytest-benchmark harness configs
 │
-├── docs/
-│   ├── foundation/                  # PRD, architecture, this document, decisions
-│   ├── design/                      # product design review
-│   └── guides/                      # quickstart, hook integration, migration safety
-│
 ├── examples/                        # runnable FastAPI/Starlette example apps
+│
+├── .claude/                         # Claude Code workspace
+│   ├── docs/                        # project documentation (single source of truth)
+│   │   ├── ARCHITECTURE.md
+│   │   ├── DATA_MODELING.md
+│   │   ├── MIGRATIONS.md
+│   │   ├── PRODUCT_DESIGN.md
+│   │   ├── PRODUCT_REQUIREMENTS.md
+│   │   ├── PROJECT_STRUCTURE.md     # this file
+│   │   ├── QUERY_ENGINE.md
+│   │   └── SECURITY.md
+│   ├── rules/                       # file-scoped agent rules
+│   ├── skills/                      # reusable skill definitions
+│   ├── commands/                    # custom slash commands
+│   └── plans/                       # scratch working plans (plain *.md)
+│
+├── .cursor/                         # Cursor IDE workspace (mirrors .claude/ except docs)
+│   ├── rules/
+│   ├── skills/
+│   ├── commands/
+│   └── plans/                       # plans use *.plan.md suffix
 │
 └── .github/
     └── workflows/                   # CI/CD pipelines (see §7)
@@ -90,7 +104,7 @@ The task brief names `ferrum`, `ferrum-cli`, and `ferrum-contrib`. For v0.1 thes
 - **Evolutionary seam preserved:** `cli/` and `contrib/` are already isolated subpackages with their own dependencies declared as optional extras (`ferrum[cli]`, `ferrum[fastapi]`). If a future release needs independent cadence, they can be promoted to separate distributions without moving code — the import path and ownership boundary already exist.
 - **CLI dependency isolation:** `ferrum.cli` and `ferrum.contrib` must not be imported by the core query path; enforced by an import-linter contract in CI (§6.4) so the core stays dependency-light.
 
-This is a structural decision, not an architecture change; it refines ARCHITECTURE.md §7 (which placed `cli/` inside the package) and is recorded for `DECISIONS.md` (GUY-74).
+This is a structural decision, not an architecture change; it refines ARCHITECTURE.md §7 (which placed `cli/` inside the package) and is recorded for `DECISIONS.md`.
 
 ---
 
@@ -111,11 +125,11 @@ python/ferrum/
 │   ├── __init__.py
 │   ├── orchestrator.py    # dry-run, classification, apply sequencing
 │   ├── ledger.py          # migration history table access (append-only)
-│   ├── tokens.py          # ADR-007 confirmation-token emit/validate (no secrets)
+│   ├── tokens.py          # confirmation-token emit/validate (no secrets)
 │   └── gates.py           # destructive + non-dev confirmation gates
 ├── cli/
 │   ├── __init__.py        # `ferrum` console-script entrypoint (argparse/typer)
-│   ├── init.py            # ADR-008 scaffold (local files only; 127.0.0.1; .gitignore .env)
+│   ├── init.py            # scaffold (local files only; 127.0.0.1; .gitignore .env)
 │   └── migrations_cmd.py  # dry-run / apply wrappers over migrations.orchestrator
 ├── contrib/
 │   ├── __init__.py
@@ -125,15 +139,15 @@ python/ferrum/
 
 ### 4.1 Package & Module Ownership
 
-| Module | Owner (role) | Responsibility | Must NOT |
-|--------|--------------|----------------|----------|
-| `models`, `queryset` | Backend Engineer | Public API surface, IR construction | Build SQL strings; touch I/O |
-| `connection` | Backend Engineer + SecurityEngineer review | Pool, DSN, TLS, redacted diagnostics | Log DSN/password |
-| `hooks` | Backend Engineer + SecurityEngineer review | Tier A/B/C dispatch & redaction | Emit bound values by default |
-| `errors` | Backend Engineer + SecurityEngineer review | SQLSTATE/PyO3 → Ferrum taxonomy | Echo row data / DETAIL/HINT |
-| `migrations/*` | Backend Engineer + SecurityEngineer review | Dry-run, gates, token, apply | Apply without dry-run/token |
-| `cli/*` | Backend Engineer | Console scripts, init scaffold | Import core query path internals as a dependency |
-| `contrib/*` | Backend Engineer | Framework glue | Be imported by core modules |
+| Module | Responsibility | Must NOT |
+|--------|----------------|----------|
+| `models`, `queryset` | Public API surface, IR construction | Build SQL strings; touch I/O |
+| `connection` | Pool, DSN, TLS, redacted diagnostics | Log DSN/password |
+| `hooks` | Tier A/B/C dispatch & redaction | Emit bound values by default |
+| `errors` | SQLSTATE/PyO3 → Ferrum taxonomy | Echo row data / DETAIL/HINT |
+| `migrations/*` | Dry-run, gates, token, apply | Apply without dry-run/token |
+| `cli/*` | Console scripts, init scaffold | Import core query path internals as a dependency |
+| `contrib/*` | Framework glue | Be imported by core modules |
 
 ### 4.2 Optional Extras
 
@@ -178,17 +192,17 @@ crates/
 
 ### 5.1 Crate Responsibilities & Ownership
 
-| Crate | Published | Owner | Responsibility | Hard constraints |
-|-------|-----------|-------|----------------|------------------|
-| `ferrum-core` | No (internal) | Backend Engineer (Rust) | IR types, validation, hydration payloads, migration plan + digest | No `pyo3`, no `tokio`, no I/O, no `unsafe` without justification |
-| `ferrum-sql` | No (internal) | Backend Engineer (Rust) | PostgreSQL-dialect SQL emission from validated AST | Parameterized output only; never interpolate user values |
-| `ferrum-pyo3` | Yes (as `ferrum._native` in the wheel) | Backend Engineer + SecurityEngineer review | Type conversion, `Result`→Python exception, panic→catchable exception | No business logic; no I/O; `panic = "unwind"` + catch wrapper |
+| Crate | Published | Responsibility | Hard constraints |
+|-------|-----------|----------------|------------------|
+| `ferrum-core` | No (internal) | IR types, validation, hydration payloads, migration plan + digest | No `pyo3`, no `tokio`, no I/O, no `unsafe` without justification |
+| `ferrum-sql` | No (internal) | PostgreSQL-dialect SQL emission from validated AST | Parameterized output only; never interpolate user values |
+| `ferrum-pyo3` | Yes (as `ferrum._native` in the wheel) | Type conversion, `Result`→Python exception, panic→catchable exception | No business logic; no I/O; `panic = "unwind"` + catch wrapper |
 
 ### 5.2 Why split `ferrum-sql` from `ferrum-core` (and the ADR-002 caveat)
 
 - **Single Responsibility:** allowlist validation (security-critical, dialect-agnostic) is a different concern from SQL string emission (dialect-specific). Splitting lets the validator be fuzzed and audited independently of textual SQL.
 - **Evolutionary Architecture:** the v0.1 non-goal of multi-backend (ARCHITECTURE.md §15.2) becomes a *future crate swap* (`ferrum-mysql`) rather than a rewrite — the dialect seam already exists.
-- **ADR-002 is not pre-empted:** the **IR boundary shape** (the typed contract that crosses PyO3) is owned by ADR-002 and remains undecided in detail. This split is an *internal* Rust organization decision below that boundary; if ADR-002 lands a different module decomposition, `ferrum-sql` may be merged into `ferrum-core` as a module with no change to the Python API or the wheel. Recorded as an open structural note for `DECISIONS.md` (GUY-74).
+- **ADR-002 is not pre-empted:** the **IR boundary shape** (the typed contract that crosses PyO3) is owned by ADR-002 and remains undecided in detail. This split is an *internal* Rust organization decision below that boundary; if ADR-002 lands a different module decomposition, `ferrum-sql` may be merged into `ferrum-core` as a module with no change to the Python API or the wheel. Recorded as an open structural note for `DECISIONS.md`.
 
 ### 5.3 Workspace Conventions
 
@@ -249,7 +263,7 @@ A dedicated `tests/python/security/` package, run as a required CI job, with one
 | MIG-1/2/5/6/7/8 | Apply without dry-run fails; drop without confirm fails; unscoped `delete()` fails; token replay after apply fails; token never in argv/public logs |
 | INIT-1/2 | Generated compose pins `127.0.0.1`; generated `.gitignore` excludes `.env`; init refuses writes outside cwd allowlist |
 
-This suite gates release qualification and **must** be green before any tagged release. SecurityEngineer owns review of its completeness.
+This suite gates release qualification and **must** be green before any tagged release. The security qualification suite requires SecurityEngineer review of its completeness before v0.1 release.
 
 ### 6.4 Architecture-Fitness Checks
 
@@ -306,7 +320,7 @@ Triggered on a version tag (`v*`). Implements ADR-005 packaging.
 | Security gate | rerun `pytest -m security` on a built wheel (not just dev build) | confirms qualification holds for the shipped artifact |
 | Publish | trusted publishing (OIDC) to PyPI | gated on all prior stages + a manual release approval environment |
 
-**Secrets posture (Defense in Depth):** publish uses PyPI Trusted Publishing (OIDC), so no long-lived PyPI token lives in CI. The ADR-007 migration confirmation token is never produced or consumed in CI workflows in this repo; any future deploy pipeline that applies migrations injects it via a secret channel (env/stdin), never argv or logs (MIG-7/8).
+**Secrets posture (Defense in Depth):** publish uses PyPI Trusted Publishing (OIDC), so no long-lived PyPI token lives in CI. The migration confirmation token is never produced or consumed in CI workflows in this repo; any future deploy pipeline that applies migrations injects it via a secret channel (env/stdin), never argv or logs (MIG-7/8).
 
 ### 7.4 `nightly.yml` — Scheduled drift & cost control
 
@@ -356,7 +370,7 @@ Mirroring AGENTS.md §7, the local commands map to the smallest proof of a chang
 | init scaffold safety | `cli/init.py` + INIT-1/2 tests (§6.3) |
 | Reproducible builds | pinned `rust-toolchain.toml`, committed `Cargo.lock`, pinned CI action versions |
 
-**SecurityEngineer notification:** the `connection`, `hooks`, `errors`, and `migrations/*` modules, the `ferrum-pyo3` crate, and the `security-qual` CI job require SecurityEngineer review before v0.1 release qualification.
+The `connection`, `hooks`, `errors`, and `migrations/*` modules, the `ferrum-pyo3` crate, and the `security-qual` CI job require SecurityEngineer review before v0.1 release qualification.
 
 ---
 
@@ -364,7 +378,7 @@ Mirroring AGENTS.md §7, the local commands map to the smallest proof of a chang
 
 | Risk | Consequence | Mitigation |
 |------|-------------|------------|
-| Wheel matrix cost creep | Slow/expensive CI (cost escalation) | Reduced PR matrix; full matrix only nightly/release; ADR-005 CEO cost gate |
+| Wheel matrix cost creep | Slow/expensive CI | Reduced PR matrix; full matrix only nightly/release; ADR-005 governs scope |
 | Extension/stub drift (`_native.pyi`) | Type checks pass but runtime breaks | `mypy` checks stub against a generated reference in CI; integration tests exercise the real extension |
 | Crate-split churn if ADR-002 differs | Rework of `ferrum-sql` boundary | Split is internal-only; Python API and wheel unaffected; flagged for DECISIONS.md |
 | Security suite rot | Gate passes while a control regresses | One test per requirement ID; SecurityEngineer owns completeness review per release |
@@ -372,24 +386,16 @@ Mirroring AGENTS.md §7, the local commands map to the smallest proof of a chang
 
 ---
 
-## 11. Open Items & Handoff
+## 11. Open Items
 
-| Item | Owner | Blocks implementation? |
-|------|-------|------------------------|
-| CEO approval of this structure (+ ADR-005 cost) | CEO | Wheel/CI matrix scope only; dev builds can start |
-| `ferrum-sql` vs in-`core` module decision | ChiefArchitect → `DECISIONS.md` (GUY-74) | No (internal; Python API stable) |
-| Single-distribution vs split distributions | ChiefArchitect → `DECISIONS.md` (GUY-74) | No |
-| CLI UX library choice (`typer` vs argparse) | Backend Engineer | No (base CLI works on stdlib) |
-| `DATA_MODELING.md` (GUY-70) | ChiefArchitect | Yes for model implementation |
-| SecurityEngineer review of security-qual completeness | SecurityEngineer | Yes for release qualification |
+- **`ferrum-sql` vs in-`core` module decision** — internal Rust organization; Python API stable either way. Record outcome in `DECISIONS.md`.
+- **Single-distribution vs split distributions** — no blocker; evolutionary seam already exists. Record outcome in `DECISIONS.md`.
+- **CLI UX library choice (`typer` vs argparse)** — no blocker; base CLI works on stdlib.
+- **SecurityEngineer review of security-qual completeness** — required before release qualification.
 
-### 11.1 What Engineers Can Start After Approval
+### 11.1 What Engineers Can Start (when implementation begins)
 
 1. Scaffold the Cargo workspace (`crates/ferrum-core`, `ferrum-sql`, `ferrum-pyo3`) with empty modules + `cargo test` skeletons.
 2. Scaffold `python/ferrum/` package skeleton with `py.typed`, `_native.pyi`, and `pyproject.toml` maturin config.
 3. Stand up `ci.yml` with the §7.1 jobs (initially allowed to be near-empty but wired) so every later PR is gated.
 4. Implement in the order recommended by ARCHITECTURE.md §17 (core IR + compile tests first).
-
----
-
-*Produced by Chief Architect for GUY-71. Subordinate to ARCHITECTURE.md (GUY-69). Approved via CEO board approval `e69b1ccb` (2026-06-13). No production source created by this task.*

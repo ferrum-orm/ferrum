@@ -216,3 +216,26 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- Ferrum / Rust / maturin / PyO3 ---
+target/
+*.pyd
+*.dylib
+
+# --- Local secrets & env (init scaffold ships .env.example only) ---
+.env.*
+!.env.example
+*.pem
+credentials.json
+secrets.json
+
+# --- IDE & OS ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# --- Cursor local agent state (not shared config) ---
+.cursor/hooks/state/
