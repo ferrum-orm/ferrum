@@ -38,12 +38,13 @@ cli = [
 fastapi = []  # uses the host's FastAPI; no extra deps needed
 dev = [
     "ferrum[cli]",
+    "maturin>=1.7,<2",
     "pytest>=8",
     "pytest-asyncio>=0.23",
     "hypothesis>=6.100",
     "pytest-benchmark>=4",
-    "mypy>=1.10",
     "ruff>=0.4",
+    "ty>=0.0.49",
     "import-linter>=2",
     "testcontainers[postgres]>=4",
     "pip-audit>=2",
@@ -65,6 +66,7 @@ Documentation = "https://ferrumdb.github.io/ferrum"
 # Python source package is in python/; the built extension is injected as ferrum._native
 python-source = "python"
 module-name = "ferrum._native"
+manifest-path = "crates/ferrum-pyo3/Cargo.toml"
 # abi3 wheel targeting CPython 3.11+ (ADR-005)
 features = ["pyo3/abi3-py311"]
 
@@ -100,24 +102,17 @@ ignore = [
 "tests/**" = ["S101", "ANN"]  # asserts and missing annotations are fine in tests
 
 # ---------------------------------------------------------------------------
-# mypy
+# ty
 # ---------------------------------------------------------------------------
-[tool.mypy]
-python_version = "3.11"
-strict = true
-warn_return_any = true
-warn_unused_configs = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-disallow_any_generics = true
-disallow_untyped_defs = true
-no_implicit_optional = true
-show_error_codes = true
-mypy_path = "python"
+[tool.ty.environment]
+python-version = "3.11"
+extra-paths = ["python"]
 
-[[tool.mypy.overrides]]
-module = ["asyncpg.*", "testcontainers.*"]
-ignore_missing_imports = true
+[tool.ty.src]
+include = ["python/ferrum"]
+
+[tool.ty.analysis]
+allowed-unresolved-imports = ["asyncpg.**", "testcontainers.**"]
 
 # ---------------------------------------------------------------------------
 # pytest

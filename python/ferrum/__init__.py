@@ -9,22 +9,38 @@ from __future__ import annotations
 __version__ = "0.1.0"
 __all__ = [
     "FerrumCompileError",
+    "FerrumConfigError",
     "FerrumConnectionError",
+    "FerrumDatabaseError",
     "FerrumError",
     "FerrumIntegrityError",
+    "FerrumMigrationError",
+    "FerrumMultipleObjectsError",
     "FerrumNotFoundError",
+    "FerrumSchemaError",
+    "MigrationResult",
     "Model",
+    "ModelConfig",
     "QuerySet",
+    "clear_hooks",
     "connect",
+    "register_hook",
 ]
 
 from ferrum.connection import connect
 from ferrum.errors import (
     FerrumCompileError,
+    FerrumConfigError,
     FerrumConnectionError,
+    FerrumDatabaseError,
     FerrumError,
     FerrumIntegrityError,
+    FerrumMigrationError,
+    FerrumMultipleObjectsError,
     FerrumNotFoundError,
+    FerrumSchemaError,
 )
-from ferrum.models import Model
+from ferrum.hooks import clear_hooks, register_hook
+from ferrum.migrations import MigrationResult
+from ferrum.models import Model, ModelConfig
 from ferrum.queryset import QuerySet

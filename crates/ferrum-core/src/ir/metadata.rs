@@ -62,3 +62,14 @@ pub enum FieldType {
     Json,
     Bytes,
 }
+
+impl ModelMetadata {
+    /// A stable Tier A observability key: `"<operation>:<model_name>"`.
+    ///
+    /// Used in `query_start` / `query_success` hook events before or after
+    /// compilation. Contains no bound values, no user input, and no credentials.
+    #[must_use]
+    pub fn query_fingerprint(&self, operation: &str) -> String {
+        format!("{}:{}", operation, self.model_name)
+    }
+}

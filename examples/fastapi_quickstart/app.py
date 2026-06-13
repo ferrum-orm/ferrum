@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 
 from fastapi import FastAPI, HTTPException
 
@@ -24,6 +24,7 @@ from ferrum.contrib.fastapi import ferrum_lifespan
 # Model definition
 # ---------------------------------------------------------------------------
 
+
 class User(ferrum.Model):
     id: int
     email: str
@@ -33,6 +34,7 @@ class User(ferrum.Model):
 # ---------------------------------------------------------------------------
 # Application lifespan
 # ---------------------------------------------------------------------------
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -47,6 +49,7 @@ app = FastAPI(title="Ferrum Quickstart", lifespan=lifespan)
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
 
 @app.get("/users", response_model=list[User])
 async def list_users() -> list[User]:

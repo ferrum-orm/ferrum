@@ -171,3 +171,23 @@ A change is done only when all of the following hold:
 Do not implement a feature that bypasses architecture review. If you find implementation
 proceeding without an approved architecture for the affected area, stop and flag it to the
 ChiefArchitect.
+
+## Learned User Preferences
+
+- Prefer `mise.toml` tasks over `Makefile`; the project task runner is mise.
+- Use `ruff` for Python linting and formatting; do not introduce flake8 or pylint.
+- Use `ty` for Python type-checking; do not use or restore mypy.
+- Do not install or pin Python or Rust versions via mise — use whatever is installed on the system.
+- Prefer parallel sub-agent execution when implementing large features; wave-based delegation is the expected pattern.
+
+## Learned Workspace Facts
+
+- Task runner: `mise run <task>`; tasks defined in `mise.toml` at repo root.
+- Python deps managed with `uv`; `uv sync --extra dev` installs dev extras including maturin.
+- `maturin` must be listed under `[project.optional-dependencies] dev` in `pyproject.toml`, not only under `[build-system] requires`.
+- The PyO3 extension crate is at `crates/ferrum-pyo3/Cargo.toml`; `pyproject.toml` sets `manifest-path = "crates/ferrum-pyo3/Cargo.toml"` so maturin does not look at the workspace root.
+- `rustfmt.toml` must use only stable-rustfmt options; nightly-only keys (`imports_granularity`, `group_imports`) break `cargo fmt --check` under the pinned stable toolchain.
+- `.importlinter` `root_packages` must use multi-line list syntax, not an inline string.
+- CI gates checked locally: `ruff check`, `ruff format --check`, `mise run type-python` (ty), `cargo check`, `cargo clippy`, `cargo fmt --all --check`, `import-boundary`.
+- Agent team lives in both `.cursor/agents/` and `.claude/agents/`; roles: CEO, ChiefArchitect, ProductManager, BackendEngineer, SecurityEngineer, DevOpsEngineer, CodeReviewer, QAEngineer.
+- Paperclip orchestration API coordinates multi-agent work; agents follow the Paperclip heartbeat skill and work only on assigned issues.

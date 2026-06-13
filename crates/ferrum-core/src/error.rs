@@ -30,13 +30,26 @@ pub enum CompileError {
 
     #[error("malformed IR: {reason}")]
     MalformedIr { reason: String },
+
+    /// Unscoped mutation guard: UPDATE and DELETE must have at least one filter.
+    /// Callers must use the danger API (`danger_update_all` / `danger_delete_all`)
+    /// to bypass this (see AGENTS.md §3 and §5 MIG-5).
+    #[error("operation '{operation}' on model '{model}' requires at least one filter; use the danger API for unscoped mutations")]
+    MissingFilter { model: String, operation: String },
 }
 
 /// Errors produced by the row-hydration stage.
 #[derive(Debug, Error)]
 pub enum HydrateError {
+    /// A non-nullable column is absent from the result row (column not projected).
     #[error("column '{column}' missing from result set for model '{model}'")]
     MissingColumn { model: String, column: String },
+
+    /// A non-nullable column is present in the row but carries a NULL value.
+    /// This indicates a schema/DB constraint violation rather than a missing
+    /// projection — kept as a distinct variant so callers can triage the root cause.
+    #[error("non-nullable column '{column}' on model '{model}' contains NULL")]
+    NullNonNullable { model: String, column: String },
 
     #[error(
         "type mismatch for column '{column}' on model '{model}': expected {expected}, got {got}"
