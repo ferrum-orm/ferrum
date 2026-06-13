@@ -14,13 +14,38 @@ use crate::error::PlanError;
 /// A single migration operation in the plan.
 #[derive(Debug, Clone)]
 pub enum MigrationOp {
-    CreateTable { table: String, sql: String },
-    AddColumn { table: String, column: String, sql: String },
-    DropColumn { table: String, column: String, sql: String },
-    AlterColumnType { table: String, column: String, sql: String },
-    DropTable { table: String, sql: String },
-    CreateIndex { table: String, index: String, sql: String, concurrent: bool },
-    Raw { sql: String },
+    CreateTable {
+        table: String,
+        sql: String,
+    },
+    AddColumn {
+        table: String,
+        column: String,
+        sql: String,
+    },
+    DropColumn {
+        table: String,
+        column: String,
+        sql: String,
+    },
+    AlterColumnType {
+        table: String,
+        column: String,
+        sql: String,
+    },
+    DropTable {
+        table: String,
+        sql: String,
+    },
+    CreateIndex {
+        table: String,
+        index: String,
+        sql: String,
+        concurrent: bool,
+    },
+    Raw {
+        sql: String,
+    },
 }
 
 /// The output of a migration plan pass.

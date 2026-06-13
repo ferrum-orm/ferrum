@@ -38,7 +38,9 @@ pub enum HydrateError {
     #[error("column '{column}' missing from result set for model '{model}'")]
     MissingColumn { model: String, column: String },
 
-    #[error("type mismatch for column '{column}' on model '{model}': expected {expected}, got {got}")]
+    #[error(
+        "type mismatch for column '{column}' on model '{model}': expected {expected}, got {got}"
+    )]
     TypeMismatch {
         model: String,
         column: String,

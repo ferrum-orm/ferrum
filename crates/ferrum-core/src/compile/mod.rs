@@ -38,10 +38,7 @@ pub struct CompiledQuery {
 ///
 /// # Errors
 /// See [`CompileError`] variants.
-pub fn compile(
-    metadata: &ModelMetadata,
-    ir: &QuerySetIR,
-) -> Result<CompiledQuery, CompileError> {
+pub fn compile(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<CompiledQuery, CompileError> {
     if ir.version != IR_VERSION {
         return Err(CompileError::IrVersionMismatch {
             expected: IR_VERSION,
@@ -51,13 +48,14 @@ pub fn compile(
 
     // Validate all field references in filters before touching SQL.
     for filter in &ir.filters {
-        let field_meta = metadata
-            .fields
-            .get(filter.field.index)
-            .ok_or_else(|| CompileError::UnknownField {
-                model: metadata.model_name.clone(),
-                field: filter.field.name.clone(),
-            })?;
+        let field_meta =
+            metadata
+                .fields
+                .get(filter.field.index)
+                .ok_or_else(|| CompileError::UnknownField {
+                    model: metadata.model_name.clone(),
+                    field: filter.field.name.clone(),
+                })?;
 
         if !field_meta.allowed_operators.contains(&filter.operator) {
             return Err(CompileError::UnsupportedOperator {
@@ -96,7 +94,7 @@ mod tests {
     use super::*;
     use crate::ir::{
         metadata::{FieldMeta, FieldType},
-        Filter, FieldRef, BindValue, Operation, OrderBy, SortDirection, QuerySetIR,
+        BindValue, FieldRef, Filter, Operation, OrderBy, QuerySetIR, SortDirection,
     };
 
     fn make_metadata() -> ModelMetadata {
@@ -129,8 +127,14 @@ mod tests {
             model_name: model_name.into(),
             operation: Operation::Select {
                 fields: vec![
-                    FieldRef { name: "id".into(), index: 0 },
-                    FieldRef { name: "email".into(), index: 1 },
+                    FieldRef {
+                        name: "id".into(),
+                        index: 0,
+                    },
+                    FieldRef {
+                        name: "email".into(),
+                        index: 1,
+                    },
                 ],
             },
             filters: vec![],
@@ -154,7 +158,10 @@ mod tests {
         let meta = make_metadata();
         let mut ir = base_ir("User");
         ir.filters.push(Filter {
-            field: FieldRef { name: "nonexistent".into(), index: 99 },
+            field: FieldRef {
+                name: "nonexistent".into(),
+                index: 99,
+            },
             operator: "eq".into(),
             value: BindValue::Int(1),
         });
@@ -167,8 +174,11 @@ mod tests {
         let meta = make_metadata();
         let mut ir = base_ir("User");
         ir.filters.push(Filter {
-            field: FieldRef { name: "id".into(), index: 0 },
-            operator: "regex".into(),  // not in allowed_operators
+            field: FieldRef {
+                name: "id".into(),
+                index: 0,
+            },
+            operator: "regex".into(), // not in allowed_operators
             value: BindValue::Int(1),
         });
         let err = compile(&meta, &ir).unwrap_err();
@@ -180,12 +190,18 @@ mod tests {
         let meta = make_metadata();
         let mut ir = base_ir("User");
         ir.filters.push(Filter {
-            field: FieldRef { name: "email".into(), index: 1 },
+            field: FieldRef {
+                name: "email".into(),
+                index: 1,
+            },
             operator: "eq".into(),
             value: BindValue::Text("test@example.com".into()),
         });
         ir.order_by.push(OrderBy {
-            field: FieldRef { name: "id".into(), index: 0 },
+            field: FieldRef {
+                name: "id".into(),
+                index: 0,
+            },
             direction: SortDirection::Asc,
         });
         assert!(compile(&meta, &ir).is_ok());

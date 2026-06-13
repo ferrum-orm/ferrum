@@ -46,9 +46,15 @@ pub struct QuerySetIR {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Operation {
-    Select { fields: Vec<FieldRef> },
-    Insert { values: Vec<(FieldRef, BindValue)> },
-    Update { assignments: Vec<(FieldRef, BindValue)> },
+    Select {
+        fields: Vec<FieldRef>,
+    },
+    Insert {
+        values: Vec<(FieldRef, BindValue)>,
+    },
+    Update {
+        assignments: Vec<(FieldRef, BindValue)>,
+    },
     Delete,
 }
 

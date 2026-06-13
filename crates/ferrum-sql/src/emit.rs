@@ -5,9 +5,13 @@
 //!
 //! Placeholder: emitters will be implemented as IR compilation lands in ferrum-core.
 
-use std::fmt::Write as _;
-use ferrum_core::{compile::CompiledQuery, error::CompileError, ir::{ModelMetadata, QuerySetIR}};
 use crate::dialect;
+use ferrum_core::{
+    compile::CompiledQuery,
+    error::CompileError,
+    ir::{ModelMetadata, QuerySetIR},
+};
+use std::fmt::Write as _;
 
 /// Emit a SELECT statement from a validated IR.
 ///
@@ -31,9 +35,11 @@ pub fn emit_select(
             })
             .collect::<Vec<_>>()
             .join(", "),
-        _ => return Err(CompileError::MalformedIr {
-            reason: "emit_select called with non-Select operation".into(),
-        }),
+        _ => {
+            return Err(CompileError::MalformedIr {
+                reason: "emit_select called with non-Select operation".into(),
+            })
+        }
     };
 
     let mut bound_params = Vec::new();
@@ -142,8 +148,14 @@ mod tests {
             model_name: "User".into(),
             operation: Operation::Select {
                 fields: vec![
-                    FieldRef { name: "id".into(), index: 0 },
-                    FieldRef { name: "email".into(), index: 1 },
+                    FieldRef {
+                        name: "id".into(),
+                        index: 0,
+                    },
+                    FieldRef {
+                        name: "email".into(),
+                        index: 1,
+                    },
                 ],
             },
             filters: vec![],
@@ -164,10 +176,16 @@ mod tests {
             version: IR_VERSION,
             model_name: "User".into(),
             operation: Operation::Select {
-                fields: vec![FieldRef { name: "id".into(), index: 0 }],
+                fields: vec![FieldRef {
+                    name: "id".into(),
+                    index: 0,
+                }],
             },
             filters: vec![Filter {
-                field: FieldRef { name: "email".into(), index: 1 },
+                field: FieldRef {
+                    name: "email".into(),
+                    index: 1,
+                },
                 operator: "eq".into(),
                 value: BindValue::Text("x@example.com".into()),
             }],
@@ -189,11 +207,17 @@ mod tests {
             version: IR_VERSION,
             model_name: "User".into(),
             operation: Operation::Select {
-                fields: vec![FieldRef { name: "id".into(), index: 0 }],
+                fields: vec![FieldRef {
+                    name: "id".into(),
+                    index: 0,
+                }],
             },
             filters: vec![],
             order_by: vec![OrderBy {
-                field: FieldRef { name: "id".into(), index: 0 },
+                field: FieldRef {
+                    name: "id".into(),
+                    index: 0,
+                },
                 direction: SortDirection::Desc,
             }],
             limit: Some(10),

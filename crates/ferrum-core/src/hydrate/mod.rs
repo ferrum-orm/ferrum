@@ -9,9 +9,9 @@
 //! - Column names are resolved against `ModelMetadata::fields` allowlists.
 //! - No user-supplied data reaches identifier positions here.
 
+use crate::{error::HydrateError, ir::ModelMetadata};
 use std::collections::HashMap;
 use std::hash::BuildHasher;
-use crate::{error::HydrateError, ir::ModelMetadata};
 
 /// A single hydrated row: column name → decoded value.
 pub type RowPayload = HashMap<String, HydratedValue>;

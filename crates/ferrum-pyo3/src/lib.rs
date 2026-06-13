@@ -39,27 +39,17 @@ pyo3::create_exception!(ferrum_native, FerrumCompileError, PyRuntimeError);
 ///   `FerrumCompileError` — if IR is invalid (unknown field, bad operator, version mismatch).
 ///   `FerrumInternalError` — if a Rust panic occurs (should never happen in normal use).
 #[pyfunction]
-fn compile_query(
-    py: Python<'_>,
-    metadata_json: &str,
-    ir_json: &str,
-) -> PyResult<Py<PyAny>> {
+fn compile_query(py: Python<'_>, metadata_json: &str, ir_json: &str) -> PyResult<Py<PyAny>> {
     // Deserialize inputs — JSON is the interim serialization until ADR-002 finalizes
     // the binary IR contract.
-    let metadata: ferrum_core::ir::ModelMetadata =
-        serde_json::from_str(metadata_json).map_err(|e| {
-            PyRuntimeError::new_err(format!("metadata deserialization error: {e}"))
-        })?;
+    let metadata: ferrum_core::ir::ModelMetadata = serde_json::from_str(metadata_json)
+        .map_err(|e| PyRuntimeError::new_err(format!("metadata deserialization error: {e}")))?;
 
-    let ir: ferrum_core::ir::QuerySetIR =
-        serde_json::from_str(ir_json).map_err(|e| {
-            PyRuntimeError::new_err(format!("IR deserialization error: {e}"))
-        })?;
+    let ir: ferrum_core::ir::QuerySetIR = serde_json::from_str(ir_json)
+        .map_err(|e| PyRuntimeError::new_err(format!("IR deserialization error: {e}")))?;
 
     // Run compilation — synchronous, GIL held (sub-millisecond, CPU-bound).
-    let result = std::panic::catch_unwind(|| {
-        ferrum_sql::emit::emit_select(&metadata, &ir)
-    });
+    let result = std::panic::catch_unwind(|| ferrum_sql::emit::emit_select(&metadata, &ir));
 
     match result {
         Ok(Ok(compiled)) => {
@@ -77,7 +67,9 @@ fn compile_query(
         Ok(Err(compile_err)) => {
             // Structured compile error → catchable Python exception.
             // The error message contains model/field/operator names — no user values.
-            Err(FerrumCompileError::new_err(format!("compile error: {compile_err}")))
+            Err(FerrumCompileError::new_err(format!(
+                "compile error: {compile_err}"
+            )))
         }
         Err(_panic_payload) => {
             // Rust panic → sanitized FerrumInternalError; no address/path leak.
@@ -92,7 +84,13 @@ fn compile_query(
 #[pymodule]
 fn ferrum_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compile_query, m)?)?;
-    m.add("FerrumInternalError", py.get_type_bound::<FerrumInternalError>())?;
-    m.add("FerrumCompileError", py.get_type_bound::<FerrumCompileError>())?;
+    m.add(
+        "FerrumInternalError",
+        py.get_type_bound::<FerrumInternalError>(),
+    )?;
+    m.add(
+        "FerrumCompileError",
+        py.get_type_bound::<FerrumCompileError>(),
+    )?;
     Ok(())
 }
