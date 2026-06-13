@@ -2,389 +2,374 @@
 
 ## Vision
 
-Ferrum is an async-first ORM for modern Python services that combines Django-style ergonomics, Pydantic v2-native data models, and a Rust-powered SQL engine exposed through PyO3.
+Ferrum is an async-first ORM for modern Python services that combines Django-inspired ergonomics, Pydantic v2-native models, and a Rust-powered SQL engine exposed through PyO3. It exists to avoid the productivity vs. async vs. type-safety trade-offs that FastAPI, Starlette, and other async framework teams currently accept when wiring persistence layers.
 
-Ferrum exists because Python backend teams still make an uncomfortable tradeoff when choosing an ORM:
+## Problem Statement
 
-- SQLAlchemy is powerful and mature, but its model is lower-level than many product teams want for day-to-day CRUD and query composition.
-- Tortoise ORM is async-oriented, but does not provide the same performance ambition, migration experience, or Pydantic v2-native model contract Ferrum is targeting.
-- Django ORM has excellent developer experience and migrations, but is not async-first and is tied to the Django application model.
-
-Ferrum differentiates by being deliberately narrow at first: async-only, PostgreSQL-only, Pydantic v2-native, and optimized for Python web applications where predictable query behavior, typed models, and productive migrations matter more than broad database coverage.
-
-## Product Principles
-
-- Async-first means no synchronous API, compatibility wrapper, or mixed execution model in v0.1.
-- Pydantic v2-native means application models are validation and serialization models, not duplicate ORM-only schemas.
-- Familiar does not mean clone: Ferrum should borrow Django QuerySet ergonomics where useful while staying idiomatic for async Python.
-- Product value comes from correctness, debuggability, and performance together; a fast ORM that hides failures is not successful.
-- v0.1 should prove the core loop before expanding surface area.
+Async Python teams need a persistence layer that feels familiar enough to move fast, respects their async runtime, and keeps validation/DB schemas aligned. Current choices force compromises: SQLAlchemy feels lower-level, Tortoise lacks the same type guarantees and production positioning, and Django ORM is tied to a synchronous, monolithic framework. Ferrum's job is to prove a focused async PostgreSQL path that keeps developer delight and operational clarity in one package.
 
 ## Target Audience
 
-### Primary Persona: Async Python API Developer
+### Primary Persona: Async Python Service Developer
 
-As a FastAPI or Starlette developer, I want a model and query API that fits async request handlers naturally, so that I can build PostgreSQL-backed services without dropping into low-level SQL for common workflows.
-
-Needs:
-
-- Awaitable CRUD and query operations.
-- Pydantic v2 model compatibility for request, response, and persistence boundaries.
-- Clear errors when queries, models, or migrations are invalid.
-- Predictable behavior under concurrent web traffic.
-
-### Secondary Persona: Team Migrating From Django ORM
-
-As a backend team migrating from Django to an async service stack, I want familiar QuerySet and migration concepts, so that my team can keep proven product development workflows while moving to FastAPI or Starlette.
+As a FastAPI or Starlette developer, I want an ORM that executes with `async`/`await`, so my route handlers never mix sync blocking calls with database work.
 
 Needs:
 
-- QuerySet-style filtering, ordering, limiting, and retrieval.
-- Migration workflow inspired by Django, without requiring Django.
-- Documentation that maps common Django ORM habits to Ferrum equivalents.
+- Awaitable CRUD, query, and migration APIs.
+- Pydantic v2 model definitions that double as validation/serialization schemas.
+- Predictable PostgreSQL behavior and failure messages.
+- Clear guidance for concurrent request workloads and observability hooks.
 
-### Secondary Persona: Performance-Sensitive Platform Team
+### Secondary Persona: Django ORM Migrator
 
-As a platform engineer supporting Python services, I want ORM behavior that is observable and has explicit performance boundaries, so that teams can use Ferrum in production without hidden latency, pool, or query-plan surprises.
+As a team migrating from Django, I want familiar QuerySet and migration semantics so that productivity carries over without adopting the entire framework.
 
 Needs:
 
-- Instrumentable query execution.
-- Clear failure modes for connection, transaction, validation, and migration errors.
-- Benchmarkable performance claims.
+- Chainable filters, ordering, limits, and retrieval that echo Django QuerySets.
+- A migration workflow inspired by Django but framework-agnostic.
+- Explicit documentation highlighting differences from Django ORM.
 
-## Goals for v0.1
+### Tertiary Persona: Platform/Performance Lead
 
-Ferrum v0.1 must make the core developer loop credible:
+As a platform engineer, I want observable database behavior and measurable performance so the team can trust Ferrum in production.
 
-- Define a Pydantic v2-native model and map it to a PostgreSQL table.
-- Perform async CRUD operations through a QuerySet-style API.
-- Compose basic filters, ordering, limits, and retrieval operations.
-- Generate and execute PostgreSQL SQL through the Rust-powered engine.
-- Provide enough migration capability to initialize and evolve simple schemas.
-- Surface validation, query, connection, and migration errors clearly.
-- Document the intended product position versus SQLAlchemy, Tortoise ORM, and Django ORM.
+Needs:
+
+- Structured hooks for query timing, execution outcomes, and migration diagnostics.
+- Benchmarks and instrumentation examples that stay within async request budgets.
+- Scope clarity before teams say yes to adoption.
+
+## Jobs To Be Done
+
+- When building an async PostgreSQL API, teams hire Ferrum to turn typed Python models into safe database reads and writes without leaving their async runtime.
+- When migrating from Django ORM workflows, teams hire Ferrum to keep developer productivity while adopting FastAPI or Starlette.
+- When operating production services, teams hire Ferrum to make database access observable, debuggable, and predictable under load.
+
+## Product Principles
+
+- **Async-first.** No synchronous compatibility wrappers or hidden blocking behavior in v0.1; every core API is awaitable.
+- **Pydantic v2 native.** Model definitions are the single source of truth for validation, serialization, and persistence.
+- **Narrow scope, high leverage.** PostgreSQL-only, Django-inspired ergonomics, Rust engine performance, and observability hooks before broad database coverage.
+- **Outcome over output.** Success is measured by prototype activation, diagnosable failures, and repeatable benchmarks, not feature count.
+
+## Goals for v0.1 (MoSCoW)
+
+### Must-have
+
+- Async PostgreSQL CRUD using a QuerySet-style API.
+- Pydantic v2 model definitions that drive schema and validation.
+- Rust/PyO3-powered SQL generation that emits parameterized queries.
+- Basic migration plan generation and apply workflow for supported schema changes.
+- Query observability hooks that capture duration, SQL context, and failure classification.
+- Documentation that compares Ferrum to SQLAlchemy, Tortoise ORM, and Django ORM.
+
+### Should-have
+
+- Common filter operators (exact, contains, comparisons, null checks, boolean logic).
+- Clear error messages with field/query/model context without leaking secrets.
+- Migration dry-run output and reviewable SQL.
+- Benchmarks that surface async query and hydration performance baselines.
+
+### Could-have
+
+- FastAPI or Starlette starter examples that stitch models, migrations, and async routes.
+- A lightweight transaction helper API if it does not delay the CRUD foundation.
+- Structured OpenTelemetry instrumentation beyond simple hooks.
+
+### Won't-have (v0.1)
+
+- Synchronous APIs, sync wrappers, or SQLite adapters.
+- MySQL, MariaDB, or multi-database targets.
+- Full Django compatibility, admin UI, or complex prefetch behavior.
+- Sharding, replication control, or connection proxying.
 
 ## Non-Goals
 
-The following are explicitly out of scope for v0.1:
+Ferrum v0.1 explicitly avoids:
 
-- Synchronous ORM support.
-- Multiple database backends.
-- SQLite support.
-- MySQL, MariaDB, CockroachDB, or other PostgreSQL-compatible dialect support.
-- Django application integration.
-- Admin UI.
-- Full relationship coverage beyond what is required for basic model persistence.
-- Advanced query optimization, caching, or automatic prefetch planning.
-- Multi-tenant framework features.
-- Visual schema designer.
-
-These exclusions apply the MoSCoW lens: async PostgreSQL CRUD, Pydantic v2 models, and basic migrations are Must-have; broader compatibility is Won't-have for v0.1 because it slows validation of the primary job.
+- Sync engines or blocking compatibility layers.
+- Multi-database targeting (PostgreSQL only).
+- SQLite or framework-specific adapters.
+- Replacing full web frameworks, admin UIs, or auth stacks.
+- Deep relationship loading, polymorphic relations, or automatic prefetch planning.
 
 ## Core Features
 
-### Async QuerySet API
+### Async QuerySet and CRUD
 
-Ferrum must expose an awaitable QuerySet-style API for creating, reading, updating, deleting, filtering, ordering, limiting, counting, and fetching model instances.
+Ferrum must expose an awaitable QuerySet-style API for create, read, update, delete, filter, order, limit, and retrieve operations.
 
-Example product intent:
+Product requirements:
 
-```python
-users = await User.objects.filter(is_active=True).order_by("-created_at").limit(10).all()
-```
-
-Acceptance criteria:
-
-- All database operations are awaitable.
-- Common read paths support `filter`, `order_by`, `limit`, `offset`, `first`, `get`, `all`, and `count`.
-- Common write paths support `create`, model save, update, and delete semantics.
-- Query errors identify the model, field, and operation involved where possible.
-- No sync alternative is documented or exposed.
-
-### Pydantic v2-Native Models
-
-Ferrum models must be defined using Pydantic v2-compatible typing and validation semantics.
+- Terminal operations (`create`, `get`, `first`, `all`, `count`, `update`, `delete`) execute only when awaited.
+- Chain methods (`filter`, `exclude`, `order_by`, `limit`, `offset`) are composable without hitting the database.
+- No synchronous alias or blocking helper is introduced in v0.1.
 
 Acceptance criteria:
 
-- A model definition is sufficient to describe persisted fields for simple tables.
-- Field types use Python type hints and Pydantic v2 validation behavior.
-- Model instances can be used naturally at API boundaries without requiring duplicate DTO classes for common cases.
-- Validation failures are distinguishable from database and query failures.
+- Developers can `await Model.objects.create(...)` to insert and hydrate a typed model.
+- Queries with filters, ordering, and limits execute when awaited and return typed results.
+- Unsupported fields/operators raise actionable errors before or during SQL compilation.
+- Execution failures surface model/query context without leaking raw row data.
 
-### Rust-Powered SQL Engine via PyO3
+### Pydantic v2 Native Models
 
-Ferrum must route performance-sensitive SQL generation and result handling through a Rust-powered engine exposed to Python via PyO3.
+Model definitions align with Pydantic v2 so validation, serialization, and persistence share the same schema.
+
+Product requirements:
+
+- Field definitions use Python type hints and Pydantic v2 validation semantics.
+- Defaults, optional fields, and validators behave consistently with Pydantic v2.
+- Ferrum metadata (tables, columns) wraps Pydantic without requiring duplicate schema declarations.
 
 Acceptance criteria:
 
-- Query compilation produces PostgreSQL SQL and bind parameters from the Python QuerySet representation.
-- Generated SQL is inspectable in development or debugging workflows.
-- Engine failures preserve actionable context when crossing the Python/Rust boundary.
-- Product documentation avoids promising unsupported database dialects.
+- Supported scalar fields derive PostgreSQL column metadata from a single model definition.
+- Invalid input raises field-specific validation errors before generating SQL.
+- Developers do not need separate persistence schemas for supported v0.1 models.
+- Model hydration returns typed Pydantic instances by default.
+
+### Rust-Powered SQL Engine (Via PyO3)
+
+Ferrum routes performance-sensitive SQL generation and hydration through a Rust core exposed via PyO3.
+
+Product requirements:
+
+- The Rust engine compiles QuerySet representations into parameterized PostgreSQL SQL.
+- No user input is interpolated into SQL strings.
+- Structured compilation errors bubble up as understandable Python exceptions.
+- Performance trade-offs remain transparent; opaque failures are unacceptable.
+
+Acceptance criteria:
+
+- Supported queries emit parameterized SQL and bound parameter lists.
+- Unsupported query shapes raise structured errors rather than malformed SQL.
+- Concurrent compilation reuses immutable state and never mutates shared request data.
 
 ### Django-Inspired Migrations
 
-Ferrum must provide a migration workflow inspired by Django's schema evolution model, scoped to simple PostgreSQL schema changes in v0.1.
+Ferrum provides a migration workflow inspired by Django while remaining framework-neutral.
+
+Product requirements:
+
+- Generate migration plans from model schema diffs.
+- Expose dry-run output showing SQL before applying.
+- Apply migrations to PostgreSQL via documented commands or API with safety guards.
+- Migration results are deterministic for the same schema state.
 
 Acceptance criteria:
 
-- Developers can initialize migration state for a project.
-- Developers can generate a migration for simple model field additions, removals, and type changes.
-- Developers can apply migrations to a PostgreSQL database.
-- Migration errors identify the migration, operation, and database response.
-- Destructive or ambiguous changes require explicit developer action.
+- New models produce migrations that create expected PostgreSQL tables.
+- Field additions/removals/types generate describable schema changes.
+- Dry-run requests return the planned SQL without mutating the database.
+- Unsafe or unsupported migration actions fail with explicit guidance.
 
-### PostgreSQL-First Connectivity
+### Observability & Failure Visibility
 
-Ferrum must support PostgreSQL as the only v0.1 database target.
+Ferrum must make production failure modes diagnosable and avoid leaking sensitive data.
 
-Acceptance criteria:
+Product requirements:
 
-- Connection configuration is documented for local development and deployed async services.
-- Connection failures produce actionable errors without leaking credentials.
-- The product supports concurrent request workloads typical of FastAPI and Starlette services.
-- SQLite examples, test shortcuts, and fallback modes are not included in user-facing v0.1 documentation.
-
-### Observability and Debuggability
-
-Ferrum must make ORM behavior understandable during development and production diagnosis.
+- Hooks/events for query start, success, failure, SQL inspection, and hydration failure.
+- Default logging avoids raw bound parameter values.
+- Documentation covers failure categories for validation, compilation, connection, execution, and migrations.
+- Concurrency expectations for async queries are explicit so developers know what can be shared.
 
 Acceptance criteria:
 
-- Developers can inspect generated SQL and bind parameters in safe debug contexts.
-- Errors distinguish model validation, query construction, SQL execution, connection, transaction, and migration failures.
-- Product documentation names expected failure modes and recovery paths.
-- Logging or instrumentation hooks are planned before v1.0, even if minimal in v0.1.
+- Developers can record duration and context for each query.
+- Failure classification distinguishes validation, compilation, and execution issues.
+- Concurrent awaits on independent queries do not mutate shared compiled state.
+- Migration failure messages specify whether the database changed before failure.
+
+### PostgreSQL-First Connectivity & Execution
+
+Ferrum throttles scope to PostgreSQL in v0.1 to guarantee correctness and clarity.
+
+Product requirements:
+
+- Connection settings documented for local and deployed environments.
+- Query execution handles PostgreSQL-specific behaviors (timeouts, cancellations).
+- Connection failures surface actionable errors without exposing credentials.
+- No SQLite shortcuts or multi-database fallbacks appear in user-facing docs.
+
+Acceptance criteria:
+
+- Connection configuration works via explicit Python config or env vars.
+- Timeouts, cancellations, and connection drops emit deterministically classified errors.
+- Observability hooks document PostgreSQL behavior for deployments.
 
 ## User Stories
 
 ### Model Definition
 
-As an async Python developer, I want to define a Ferrum model with Python type hints and Pydantic v2 validation, so that one model can support persistence and API serialization for common service workflows.
+As an async Python developer, I want to define database-backed models using Pydantic v2-style annotations, so that validation and persistence schemas stay aligned.
 
 Acceptance criteria:
 
-- Given a simple model with scalar fields, Ferrum can infer persisted fields.
-- Given invalid input, Ferrum returns a validation error before executing an invalid database write.
-- Given a saved row, Ferrum hydrates a typed model instance.
+- Scalar fields declared with Python type annotations appear in derived persistence metadata.
+- Defaults and nullability behave predictably at create time.
+- Validation failures reference the offending field.
+- Unsupported fields raise actionable product-level errors.
 
 ### Async CRUD
 
-As a FastAPI developer, I want to create, retrieve, update, and delete records using awaitable ORM calls, so that database access fits naturally in async route handlers.
+As an async Python developer, I want to create, retrieve, update, and delete records through awaitable ORM calls, so that request handlers stay non-blocking.
 
 Acceptance criteria:
 
-- CRUD examples work without sync wrappers.
-- Each operation documents expected return values and error cases.
-- Concurrent requests do not require application-level serialization around normal ORM calls.
+- `create`, `get`, `first`, `all`, `update`, and `delete` work with `await`.
+- Typed not-found/multiple-result errors exist for `get`.
+- Bulk updates/deletes have documented return values.
+- Unscoped destructive operations require explicit safety calls.
 
 ### Query Composition
 
-As a backend developer, I want to compose filters, ordering, and limits through a QuerySet-style API, so that common product queries remain readable and testable.
+As a backend developer, I want to compose filters, ordering, and limits through a QuerySet-like API, so that common queries feel readable.
 
 Acceptance criteria:
 
-- Queries can be chained without executing until awaited.
-- Unsupported lookups fail early with clear messages.
-- Generated SQL can be inspected for debugging.
+- Chains support the documented operator subset.
+- Ordering handles ascending/descending across supported fields.
+- Limit and offset push down predictably.
+- Invalid filters fail before hitting SQL.
 
-### Migration Workflow
+### Migration Planning
 
-As a team lead migrating from Django ORM, I want migration commands that feel familiar, so that schema changes can be reviewed and applied safely during normal development.
-
-Acceptance criteria:
-
-- Developers can generate and apply simple migrations.
-- Migration output is reviewable before execution.
-- Destructive changes require explicit confirmation or manual edits.
-
-### Production Diagnosis
-
-As a platform engineer, I want Ferrum failures to be categorized and observable, so that service owners can distinguish bad input, bad queries, database outages, and migration drift.
+As a Django-experienced developer, I want schema changes to produce reviewable migration plans, so that database changes can be inspected safely.
 
 Acceptance criteria:
 
-- Error types or messages identify the failing layer.
-- Connection and execution failures do not expose passwords, tokens, or full connection URLs.
-- Debugging guidance includes safe SQL inspection and logging boundaries.
+- Migration generation detects supported model diffs.
+- Dry-run output lists operations and SQL.
+- Apply commands record enough state to avoid double-applying.
+- Unsupported schema changes fail with next-action guidance.
 
-## Prioritization
+### Observability
 
-### Must-Have
+As an operator, I want query timing and errors to be observable, so that production issues can be triaged without exposing sensitive data.
 
-- Async-only QuerySet API.
-- Pydantic v2-native model definitions.
-- PostgreSQL-only execution.
-- Rust-powered SQL generation path via PyO3.
-- Basic CRUD and query composition.
-- Simple migration generation and application.
-- Clear error categories for validation, query, connection, execution, and migration failures.
+Acceptance criteria:
 
-### Should-Have
-
-- SQL inspection for debugging.
-- Transaction support for common service workflows.
-- Documentation mapping Django ORM concepts to Ferrum equivalents.
-- Basic performance benchmarks against representative Python ORM operations.
-
-### Could-Have
-
-- Bulk operations.
-- Relationship conveniences beyond the minimum needed for v0.1 examples.
-- Instrumentation examples for common observability stacks.
-- CLI polish beyond essential migration workflows.
-
-### Won't-Have for v0.1
-
-- Sync support.
-- SQLite support.
-- Multi-database support.
-- Django integration.
-- Admin interface.
-- Advanced query planner features.
+- Hooks describe query start, success, failure, and SQL context.
+- Hook payloads exclude raw parameter values by default.
+- Error categories differentiate validation, compilation, connection, execution, and migration failures.
 
 ## Success Criteria
 
-Ferrum v0.1 is successful when:
+- A new developer can go from Ferrum documentation to a running FastAPI/Starlette prototype with async PostgreSQL CRUD in under 30 minutes.
+- The v0.1 API supports the CRUD, filter, order, limit, and migration paths needed by a simple service.
+- Documentation clearly describes when to choose Ferrum over SQLAlchemy, Tortoise ORM, or Django ORM.
+- Benchmarks cover query compilation, execution, and hydration baselines without regressions during release qualification.
+- Validation, query compilation, and migration planning errors are actionable without referencing Ferrum source code.
+- Observability hooks supply duration, SQL context, and failure category in logs or metrics.
+- At least one end-to-end example demonstrates Pydantic v2 models, async queries, PostgreSQL migrations, and FastAPI or Starlette integration.
 
-- A developer can build a minimal FastAPI or Starlette service backed by PostgreSQL using Ferrum models and async queries.
-- The core README example can be implemented and verified against a real PostgreSQL database.
-- At least three representative CRUD/query workflows are documented end-to-end.
-- Basic migration workflow is documented and works for simple schema changes.
-- Product positioning clearly explains when to choose Ferrum instead of SQLAlchemy, Tortoise ORM, or Django ORM.
-- Performance claims are backed by repeatable benchmarks or removed from public messaging.
-- No v0.1 documentation implies sync, SQLite, or multi-database support.
+## Positioning
 
-Product-level target metrics:
+### Versus SQLAlchemy
 
-- Time-to-first-successful-query in a new sample app: under 15 minutes for an experienced async Python developer.
-- Developer activation: a new user can define a model, run a migration, create a row, and query it from an async route without reading source code.
-- Reliability signal: common invalid model, invalid query, and database connection failures produce distinct actionable errors.
-- Performance signal: query compilation and hydration benchmarks are measured before v1.0 scope expansion.
+Ferrum is narrower and more opinionated; SQLAlchemy stays the flexible, mature choice for complex DB work. Ferrum wins when teams want a Django-like async ORM with Rust-assisted performance and stronger typing.
+
+### Versus Tortoise ORM
+
+Ferrum is more explicit about Pydantic v2, migration direction, observability, and PostgreSQL-first correctness. Tortoise remains a lightweight async ORM; Ferrum wins when type alignment and production discipline matter.
+
+### Versus Django ORM
+
+Ferrum is framework-neutral and async-first. Django ORM stays tied to Django and synchronous execution. Ferrum wins when teams want the ergonomic lessons without the framework dependency.
 
 ## Roadmap
 
-### v0.1: Core Loop
+### v0.1 - Core Async PostgreSQL Loop
 
 Scope:
 
-- PostgreSQL-only async connectivity.
-- Pydantic v2-native model definitions.
-- Basic CRUD.
-- QuerySet-style filtering, ordering, limits, and retrieval.
-- Rust-powered SQL generation path.
-- Simple Django-inspired migration workflow.
-- Initial documentation and examples.
+- PostgreSQL-only async connectivity and execution.
+- Pydantic v2 model definitions.
+- Async QuerySet CRUD, filter, order, limit, and list.
+- Rust-powered SQL generation via PyO3.
+- Migration planning, dry-run, and apply workflow for supported fields.
+- Query timing and error classification hooks.
+- Documentation for positioning and quickstart.
 
-Exit criteria:
+Outcome:
 
-- Core sample app works end-to-end.
-- Non-goals remain enforced in documentation and API surface.
-- Failure categories are clear enough for early adopters to diagnose common issues.
+- Prove a reliable async ORM path for a small production-shaped service.
 
-### v0.2: Service Readiness
+### v0.2 - Service Readiness
 
 Scope:
 
-- Transactions.
-- Relationship basics.
+- Relationship support for common one-to-many/many-to-one patterns.
+- Explicit transaction helper APIs.
 - Bulk operations.
-- Better query inspection and debug tooling.
-- Expanded FastAPI and Starlette examples.
+- Query optimization and instrumentation improvements.
+- Expanded FastAPI/Starlette examples.
 
-Exit criteria:
+Outcome:
 
-- Developers can build a non-trivial service workflow with related models and transactional writes.
-- Debug output supports practical production triage without leaking sensitive values.
+- Make Ferrum viable for more realistic service domains without expanding database scope.
 
-### v0.3: Migration Confidence
-
-Scope:
-
-- Stronger schema diffing.
-- Migration review workflows.
-- Safer handling of destructive changes.
-- CLI maturity for project and migration operations.
-
-Exit criteria:
-
-- Teams can review, apply, and recover from normal schema evolution workflows with confidence.
-- Migration failures are actionable enough for CI and local development.
-
-### v0.4: Observability and Performance
+### v0.3 - Migration Confidence
 
 Scope:
 
-- Benchmark suite.
-- Query timing and instrumentation hooks.
-- Documented performance profiles for common operations.
-- Guidance for connection pooling and concurrent request workloads.
+- Schema diff engine polish.
+- CLI tooling and migration history inspection.
+- Safer diagnostics for destructive operations.
+- Developer workflow polish.
 
-Exit criteria:
+Outcome:
 
-- Public performance claims are backed by repeatable measurements.
-- Production operators have clear guidance for monitoring Ferrum-backed services.
+- Make schema evolution trustworthy enough for teams adopting Ferrum across multiple services.
 
-### v1.0: Production Stability
+### v1.0 - Production Stability
 
 Scope:
 
-- Stable public API.
-- Complete documentation for core workflows.
-- Compatibility policy.
-- Production support guidance.
-- Hardened error taxonomy and migration behavior.
+- Public API stability guarantees.
+- Advanced relationships and migration maturity.
+- Performance benchmarking/gates.
+- Comprehensive documentation and operational guidance.
 
-Exit criteria:
+Outcome:
 
-- Ferrum is ready for production use by teams building async PostgreSQL services.
-- Breaking-change policy is explicit.
-- Core workflows have tests, examples, and documented failure behavior.
+- Establish Ferrum as a dependable ORM choice for async Python teams running PostgreSQL-backed services in production.
 
 ## Dependencies
 
-- Product Designer: translate product requirements into developer experience flows, documentation hierarchy, and onboarding examples.
-- Chief Architect: validate feasibility of the product constraints, especially Python/Rust boundary behavior, SQL engine scope, and migration architecture.
-- Security Engineer: review credential handling, error redaction, migration safety, and SQL inspection guidance.
-- Engineering: estimate and implement only after product requirements, design flow, and architecture review are complete.
+- Chief Architect review for Rust/PyO3 engine boundary, concurrency model, migration architecture, and PostgreSQL connection strategy.
+- Product Designer review for documentation architecture, onboarding, and developer experience flows.
+- Security Engineer review before documenting query inspection, observability payloads, or migration outputs that touch secrets.
+- Engineering input on benchmark targets, supported Pydantic v2 subset, and migration safety guarantees.
 
-## Risks and Tradeoffs
+## Risks & Tradeoffs
 
-### Scope Risk
+- PostgreSQL-first focus improves correctness but delays SQLite or MySQL teams.
+- Async-only positioning differentiates but excludes sync workloads and Django-native scripts.
+- Rust/PyO3 tooling adds packaging, build, and debugging complexity.
+- Django-inspired semantics risk overpromising compatibility.
+- Migration support must be conservative; unsafe behavior damages trust faster than a narrower subset.
+- Observability hooks add early value but can slow the foundation release if scope grows.
 
-Ferrum's value depends on disciplined v0.1 scope. Adding sync support, SQLite, or broad database compatibility too early would dilute the async PostgreSQL job and delay proof of value.
+## Open Questions
 
-### Concurrency Risk
-
-Async ORM users will run Ferrum inside concurrent web request handlers. The product must make connection behavior, transaction boundaries, and failure isolation explicit enough that developers do not accidentally serialize workloads or leak state across requests.
-
-### Performance Risk
-
-The Rust engine is a differentiator only if it improves real ORM bottlenecks. Ferrum should avoid marketing performance claims until query compilation, SQL generation, and hydration are measured against representative workloads.
-
-### Failure Mode Risk
-
-Crossing Python, Rust, and PostgreSQL can make failures opaque. v0.1 must preserve enough context to distinguish validation errors, query construction errors, PyO3 boundary errors, SQL execution errors, connection failures, and migration drift.
-
-### Adoption Risk
-
-Django-inspired APIs can attract developers but also create expectations Ferrum will not meet in v0.1. Documentation must be direct about what is familiar, what is different, and what is intentionally absent.
-
-## Open Product Questions
-
-- What minimum migration command set is required for v0.1: initialize, generate, apply, rollback, or only initialize/generate/apply?
-- Which relationship features, if any, are required before v0.1 can be useful for real sample apps?
-- What observability surface is required in v0.1 versus deferred to v0.4?
+- What minimum migration command set should v0.1 expose (init/generate/apply/rollback)?
+- Which relationship helpers, if any, are strategically required before v0.1 is useful for real sample apps?
+- What subset of observability hooks must land in v0.1 versus v0.4?
 - Should Ferrum position primarily as a FastAPI companion, a general async Python ORM, or a Django migration path?
+- What packaging targets must the Rust/PyO3 engine support in the first release?
 
-## Out-of-Scope Decisions for This Document
+## Scope Exclusions Summary
 
-- Internal Rust module design.
-- PyO3 API shape.
-- Connection pool implementation.
-- SQL AST architecture.
-- Migration file format.
-- Package layout.
-- Visual identity and website design.
+- No synchronous ORM APIs or wrappers in v0.1.
+- No SQLite, MySQL, or multi-database support.
+- No admin interface, advanced relationships, or Django framework dependency.
+- No architecture decisions beyond the product constraints documented here.
+
+## Handoff Notes
+
+Product requirements are ready for Product Designer review to define the documentation/onboarding story, query inspection UX, and migration preview experience. After design sign-off, Chief Architect should validate the Rust/PyO3 boundary, async concurrency guarantees, and migration tooling before engineering ramps implementation. Security Engineer must clear any observability/migration payload that touches secrets before release.
