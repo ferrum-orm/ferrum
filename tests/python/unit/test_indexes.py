@@ -129,3 +129,73 @@ class TestAddIndexSql:
                     "using": "evil",
                 }
             )
+
+    def test_gin_on_text_emits_trgm_opclass(self) -> None:
+        class GINText(ferrum.Model):
+            id: int
+            body: str
+
+            class Meta:
+                indexes: ClassVar[list[ferrum.Index]] = [
+                    ferrum.Index(fields=("body",), using="gin")
+                ]
+
+        plan = compute_plan([GINText], existing_tables={})
+        index_op = next(op for op in plan["ops"] if op["kind"] == "add_index")
+        assert index_op["opclasses"] == ["gin_trgm_ops"]
+        sql = _op_to_sql(index_op)
+        assert '"body" gin_trgm_ops' in sql
+
+    def test_gin_on_tsvector_has_no_opclass(self) -> None:
+        class GINTs(ferrum.Model):
+            id: int
+            search: ferrum.TSVector
+
+            class Meta:
+                indexes: ClassVar[list[ferrum.Index]] = [
+                    ferrum.Index(fields=("search",), using="gin")
+                ]
+
+        plan = compute_plan([GINTs], existing_tables={})
+        index_op = next(op for op in plan["ops"] if op["kind"] == "add_index")
+        assert "opclasses" not in index_op
+        sql = _op_to_sql(index_op)
+        assert '"search"' in sql
+        assert "gin_trgm_ops" not in sql
+
+
+class TestMakemigrationsAddIndexSource:
+    def test_renders_gin_index(self) -> None:
+        from ferrum.cli.makemigrations_cmd import _op_to_source
+
+        line = _op_to_source(
+            {
+                "kind": "add_index",
+                "table": "documents",
+                "name": "idx_documents_title",
+                "columns": ["title"],
+                "unique": False,
+                "using": "gin",
+            }
+        )
+        assert line == (
+            "        ops.AddIndex('documents', 'idx_documents_title', ['title'], using='gin'),"
+        )
+
+    def test_renders_partial_unique_index(self) -> None:
+        from ferrum.cli.makemigrations_cmd import _op_to_source
+
+        line = _op_to_source(
+            {
+                "kind": "add_index",
+                "table": "posts",
+                "name": "idx_posts_created",
+                "columns": ["created_at"],
+                "unique": True,
+                "using": "btree",
+                "where": "published = true",
+            }
+        )
+        assert "unique=True" in line
+        assert "where='published = true'" in line
+        assert "using=" not in line  # btree is omitted (default)

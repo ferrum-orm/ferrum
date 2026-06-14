@@ -194,6 +194,7 @@ class AddIndex(Operation):
         unique: bool = False,
         using: str = "btree",
         where: str | None = None,
+        opclasses: list[str] | None = None,
     ) -> None:
         self.table_name = table_name
         self.index_name = index_name
@@ -201,6 +202,7 @@ class AddIndex(Operation):
         self.unique = unique
         self.using = using
         self.where = where
+        self.opclasses = list(opclasses) if opclasses is not None else None
 
     def to_op_dict(self) -> dict[str, Any]:
         op: dict[str, Any] = {
@@ -213,6 +215,8 @@ class AddIndex(Operation):
         }
         if self.where is not None:
             op["where"] = self.where
+        if self.opclasses is not None:
+            op["opclasses"] = list(self.opclasses)
         return op
 
     @property

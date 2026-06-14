@@ -183,17 +183,14 @@ ChiefArchitect.
 ## Learned Workspace Facts
 
 - Task runner: `mise run <task>`; tasks defined in `mise.toml` at repo root.
-- Python deps managed with `uv`; `uv sync --extra dev` installs dev extras including maturin.
-- `maturin` must be listed under `[project.optional-dependencies] dev` in `pyproject.toml`, not only under `[build-system] requires`.
-- The PyO3 extension crate is at `crates/ferrum-pyo3/Cargo.toml`; `pyproject.toml` sets `manifest-path = "crates/ferrum-pyo3/Cargo.toml"` so maturin does not look at the workspace root.
-- `rustfmt.toml` must use only stable-rustfmt options; nightly-only keys (`imports_granularity`, `group_imports`) break `cargo fmt --check` under the pinned stable toolchain.
-- `.importlinter` `root_packages` must use multi-line list syntax, not an inline string.
-- Full local CI parity: `mise run ci-local` (lint, type-python, test-rust, import-boundary, all-tests).
+- Python deps managed with `uv`; `uv sync --extra dev` installs dev extras including maturin; `maturin` must be under `[project.optional-dependencies] dev`, not only `[build-system] requires`.
+- PyO3 extension crate at `crates/ferrum-pyo3/Cargo.toml`; `pyproject.toml` sets maturin `manifest-path` so maturin does not use the workspace root.
 - Python package at `python/ferrum/`; Rust crates at `crates/ferrum-{core,sql,pyo3,migrate}/`.
-- Scoped verification: Rust-only → `mise run test-rust lint-rust`; Python-only → `mise run test-python-unit`; extension/boundary → `mise run dev` plus integration or security tests.
-- Agent team lives in both `.cursor/agents/` and `.claude/agents/`; roles: CEO, ChiefArchitect, ProductManager, BackendEngineer, SecurityEngineer, DevOpsEngineer, CodeReviewer, QAEngineer.
-- Paperclip orchestration API coordinates multi-agent work; agents follow the Paperclip heartbeat skill and work only on assigned issues.
-- `ferrum-local-tests` sibling project at `../ferrum-local-tests/`; uses `[tool.uv.sources] ferrum = { path = "../ferrum", editable = true }` for editable install.
-- Canonical connection env var is `FERRUM_DATABASE_URL` (not `DATABASE_URL`); `ferrum.connect()` and `ferrum migrate` both read this name.
-- GitHub Actions CI jobs require a virtualenv before `maturin develop`: use `python -m venv .venv && . .venv/bin/activate` before all pip/maturin/pytest steps; bare pip into the runner environment causes "Couldn't find a virtualenv" errors.
-- `ferrum makemigrations` scans `Model.__subclasses__()` at runtime; user projects must import model modules before invoking the CLI (use a wrapper script or `ferrum_conf.py` once that feature lands).
+- Full local CI parity: `mise run ci-local`; scoped verification: Rust-only → `test-rust lint-rust`; Python-only → `test-python-unit`; extension/boundary → `dev` plus integration or security tests.
+- `rustfmt.toml` stable-rustfmt options only; `.importlinter` `root_packages` must use multi-line list syntax.
+- Canonical connection env var is `FERRUM_DATABASE_URL` (not `DATABASE_URL`); library `ferrum.connect()` reads env only — no dotenv in core code.
+- CLI bootstrap (`ferrum.cli.bootstrap`) runs before subcommands: optional `ferrum.toml`, dotenv load (`override=False`), and settings/model import; discovery order is `FERRUM_SETTINGS` → `[ferrum].settings` in `ferrum.toml` → `ferrum_conf.py`.
+- Ferrum CLI is Typer-based and requires the `ferrum[cli]` extra (typer + rich); `ferrum makemigrations` scans `Model.__subclasses__()` so models must be imported via bootstrap settings module.
+- pgvector runtime I/O: after `ferrum.connect()`, call `ferrum.ext.pgvector.register_vector_codecs(conn)` — runs `CREATE EXTENSION IF NOT EXISTS vector` and registers asyncpg codecs.
+- `ferrum-local-tests` sibling project at `../ferrum-local-tests/`; editable install via `[tool.uv.sources] ferrum = { path = "../ferrum", editable = true }`.
+- GitHub Actions CI jobs require a virtualenv before `maturin develop`: `python -m venv .venv && . .venv/bin/activate` before pip/maturin/pytest steps.

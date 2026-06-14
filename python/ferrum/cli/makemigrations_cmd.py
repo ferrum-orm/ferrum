@@ -103,11 +103,30 @@ def _col_source(col: dict[str, Any]) -> str:
     return f"ops.Column({col['name']!r}, {col['sql_type']!r}{extra})"
 
 
+def _index_source(op: dict[str, Any]) -> str:
+    """Render an ``add_index`` plan op as an ``ops.AddIndex(...)`` expression."""
+    flags: list[str] = []
+    if op.get("unique"):
+        flags.append("unique=True")
+    using = op.get("using", "btree")
+    if using != "btree":
+        flags.append(f"using={using!r}")
+    if op.get("where") is not None:
+        flags.append(f"where={op['where']!r}")
+    opclasses = op.get("opclasses")
+    if opclasses:
+        flags.append(f"opclasses={list(opclasses)!r}")
+    extra = (", " + ", ".join(flags)) if flags else ""
+    columns = [repr(c) for c in op.get("columns", [])]
+    cols_arg = ", ".join(columns)
+    return f"ops.AddIndex({op['table']!r}, {op['name']!r}, [{cols_arg}]{extra})"
+
+
 def _op_to_source(op: dict[str, Any]) -> str:
     """Convert a plan op dict to an 8-space-indented Python source line.
 
-    Handles ``create_table`` and ``add_column`` — the only kinds emitted by
-    ``compute_plan`` in v0.1.
+    Handles ``create_table``, ``add_column``, and ``add_index`` — the kinds
+    emitted by ``compute_plan`` in v0.1.
 
     Raises:
         ValueError: if the op kind cannot be rendered to Python source.
@@ -132,6 +151,9 @@ def _op_to_source(op: dict[str, Any]) -> str:
             "primary_key": op.get("primary_key", False),
         }
         return f"        ops.AddColumn({table!r}, {_col_source(col)}),"
+
+    if kind == "add_index":
+        return f"        {_index_source(op)},"
 
     raise ValueError(f"Cannot render op kind {kind!r} to Python source")
 

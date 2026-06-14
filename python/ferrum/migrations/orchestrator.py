@@ -226,7 +226,9 @@ def _op_to_sql(op: dict[str, Any]) -> str:
         unique_kw = "UNIQUE " if op.get("unique") else ""
         name = op["name"]
         table = op["table"]
-        cols = ", ".join(f'"{c}"' for c in op.get("columns", []))
+        columns = list(op.get("columns", []))
+        opclasses = op.get("opclasses")
+        cols = _index_columns_sql(columns, opclasses)
         using = op.get("using", "btree")
         if using not in _INDEX_USING_ALLOWLIST:
             raise FerrumMigrationError(f"Unsupported index access method {using!r}. [FERR-M001]")
@@ -262,6 +264,44 @@ def _print_plan(plan: dict[str, Any]) -> None:
             line += f" {table}"
         print(line)
     print(f"[ferrum migrate] {len(ops)} ops total (not applied)")
+
+
+def _resolve_gin_opclasses(
+    metadata: ModelMetadata,
+    field_names: tuple[str, ...],
+    *,
+    using: str,
+) -> list[str] | None:
+    """Return per-column GIN operator classes when PostgreSQL requires them.
+
+    Plain ``TEXT`` columns need ``gin_trgm_ops`` (``pg_trgm``). ``TSVECTOR`` uses
+    the default operator class and needs no suffix.
+    """
+    if using != "gin":
+        return None
+    field_by_name = {f.name: f for f in metadata.fields}
+    opclasses: list[str] = []
+    any_required = False
+    for field_name in field_names:
+        field_meta = field_by_name[field_name]
+        if field_meta.field_type == "text":
+            opclasses.append("gin_trgm_ops")
+            any_required = True
+        else:
+            opclasses.append("")
+    return opclasses if any_required else None
+
+
+def _index_columns_sql(columns: list[str], opclasses: list[str] | None) -> str:
+    """Format index column list, optionally with per-column operator classes."""
+    parts: list[str] = []
+    for i, column in enumerate(columns):
+        opclass = opclasses[i] if opclasses and i < len(opclasses) else ""
+        if opclass:
+            parts.append(f'"{column}" {opclass}')
+        else:
+            parts.append(f'"{column}"')
+    return ", ".join(parts)
 
 
 def _field_to_col_def(field_meta: FieldMeta, *, is_pk: bool) -> dict[str, Any]:
@@ -339,17 +379,19 @@ def compute_plan(
                     next(f.column_name for f in metadata.fields if f.name == field_name)
                     for field_name in index.fields
                 ]
-                ops.append(
-                    {
-                        "kind": "add_index",
-                        "table": table,
-                        "name": index.name,
-                        "columns": column_names,
-                        "unique": index.unique,
-                        "using": index.using,
-                        "where": index.where,
-                    }
-                )
+                index_op: dict[str, Any] = {
+                    "kind": "add_index",
+                    "table": table,
+                    "name": index.name,
+                    "columns": column_names,
+                    "unique": index.unique,
+                    "using": index.using,
+                    "where": index.where,
+                }
+                opclasses = _resolve_gin_opclasses(metadata, index.fields, using=index.using)
+                if opclasses is not None:
+                    index_op["opclasses"] = opclasses
+                ops.append(index_op)
         else:
             existing_cols = set(existing_tables[table])
             for f in metadata.fields:
