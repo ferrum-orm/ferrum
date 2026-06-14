@@ -19,12 +19,13 @@ import re
 import types as _types
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Any, ClassVar, Union, cast, get_args, get_origin
+from typing import Any, ClassVar, Literal, Union, cast, get_args, get_origin
 from uuid import UUID
 
 from pydantic import BaseModel as _PydanticBaseModel
 from pydantic import ConfigDict
 from pydantic import Field as _PydanticField
+from pydantic_core import core_schema
 
 # ---------------------------------------------------------------------------
 # Type mapping: Python annotation → Ferrum field type string (DATA_MODELING.md §3.2)
@@ -42,6 +43,41 @@ _SUPPORTED_TYPES: dict[type, str] = {
     bytes: "bytes",
     dict: "json",
 }
+
+
+class Vector:
+    """Sentinel type for pgvector ``VECTOR(n)`` columns.
+
+    Use with ``Field(vector_dimensions=n)``::
+
+        embedding: Vector = Field(vector_dimensions=1536)
+    """
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        source: Any,  # noqa: ANN401
+        handler: Any,  # noqa: ANN401
+    ) -> core_schema.CoreSchema:
+        del source, handler
+        return core_schema.list_schema(items_schema=core_schema.float_schema())
+
+
+class TSVector:
+    """Sentinel type for PostgreSQL ``TSVECTOR`` full-text search columns."""
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        source: Any,  # noqa: ANN401
+        handler: Any,  # noqa: ANN401
+    ) -> core_schema.CoreSchema:
+        del source, handler
+        return core_schema.str_schema()
+
+
+_SUPPORTED_TYPES[Vector] = "vector"
+_SUPPORTED_TYPES[TSVector] = "tsvector"
 
 # ---------------------------------------------------------------------------
 # Operator allowlists per Ferrum field type (QUERY_ENGINE.md §4.2)
@@ -71,6 +107,8 @@ _ALLOWED_OPERATORS: dict[str, tuple[str, ...]] = {
     "uuid": ("eq", "in", "is_null", "ne"),
     "bytes": ("eq", "in", "is_null", "ne"),
     "json": ("eq", "is_null"),
+    "vector": ("is_null",),
+    "tsvector": ("match", "is_null"),
 }
 
 
@@ -117,11 +155,34 @@ class FieldMeta:
     unique: bool = False
     db_index: bool = False
     db_default: str | None = None
+    vector_dimensions: int | None = None
 
     @property
     def sql_type(self) -> str:
         """PostgreSQL DDL type string derived from field_type and constraints."""
         return _field_type_to_sql(self)
+
+
+@dataclasses.dataclass(frozen=True)
+class IndexMeta:
+    """Immutable descriptor for a declarative model index (``Meta.indexes``)."""
+
+    name: str
+    fields: tuple[str, ...]
+    unique: bool = False
+    using: str = "btree"
+    where: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class Index:
+    """Declarative index definition for ``class Meta: indexes = [...]``."""
+
+    fields: tuple[str, ...]
+    name: str | None = None
+    unique: bool = False
+    using: str = "btree"
+    where: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -136,6 +197,7 @@ class ModelMetadata:
     table_name: str
     model_name: str
     fields: tuple[FieldMeta, ...]
+    indexes: tuple[IndexMeta, ...] = ()
     allowed_sort_directions: tuple[str, ...] = ("asc", "desc")
     pk_index: int = 0
 
@@ -146,21 +208,24 @@ class ModelMetadata:
         expects (ADR-002 §ModelMetadata.fields). Field ``pk`` is Python-internal
         and is not sent across the boundary.
         """
+        field_payloads: list[dict[str, Any]] = []
+        for f in self.fields:
+            payload: dict[str, Any] = {
+                "name": f.name,
+                "column_name": f.column_name,
+                "field_type": f.field_type,
+                "allowed_operators": list(f.allowed_operators),
+                "nullable": f.nullable,
+            }
+            if f.vector_dimensions is not None:
+                payload["vector_dimensions"] = f.vector_dimensions
+            field_payloads.append(payload)
         return json.dumps(
             {
                 "model_name": self.model_name,
                 "table_name": self.table_name,
                 "pk_index": self.pk_index,
-                "fields": [
-                    {
-                        "name": f.name,
-                        "column_name": f.column_name,
-                        "field_type": f.field_type,
-                        "allowed_operators": list(f.allowed_operators),
-                        "nullable": f.nullable,
-                    }
-                    for f in self.fields
-                ],
+                "fields": field_payloads,
             }
         )
 
@@ -205,6 +270,12 @@ def _field_type_to_sql(field: FieldMeta) -> str:
         return "BYTEA"
     if ft == "json":
         return "JSONB"
+    if ft == "vector":
+        if field.vector_dimensions is None:
+            raise ValueError(f"Vector field {field.name!r} requires vector_dimensions on Field().")
+        return f"VECTOR({field.vector_dimensions})"
+    if ft == "tsvector":
+        return "TSVECTOR"
     return "TEXT"
 
 
@@ -255,6 +326,8 @@ def Field(  # noqa: N802
     db_index: bool = False,
     default: Any = ...,  # noqa: ANN401
     primary_key: bool = False,
+    uuid_generate: Literal["v4", "v7"] | None = None,
+    vector_dimensions: int | None = None,
     **kwargs: Any,  # noqa: ANN401
 ) -> Any:  # noqa: ANN401
     """Ferrum field descriptor with column-level constraints.
@@ -277,7 +350,13 @@ def Field(  # noqa: N802
         "unique": unique,
         "db_index": db_index,
         "primary_key": primary_key,
+        "vector_dimensions": vector_dimensions,
     }
+
+    if uuid_generate == "v4":
+        ferrum_extras["db_default"] = "gen_random_uuid()"
+    elif uuid_generate == "v7":
+        ferrum_extras["db_default"] = "uuid_generate_v7()"
 
     if isinstance(default, str):
         ferrum_extras["db_default"] = default
@@ -358,6 +437,17 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
 
         column_name = ferrum_extras.get("db_column") or name
 
+        db_default = ferrum_extras.get("db_default")
+        if is_pk and db_type == "uuid" and db_default is None:
+            db_default = "gen_random_uuid()"
+
+        vector_dimensions = ferrum_extras.get("vector_dimensions")
+        if db_type == "vector" and vector_dimensions is None:
+            raise ValueError(
+                f"Model {cls.__name__!r} field {name!r}: Vector columns require "
+                "Field(vector_dimensions=n)."
+            )
+
         fields.append(
             FieldMeta(
                 name=name,
@@ -372,14 +462,48 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                 decimal_places=ferrum_extras.get("decimal_places"),
                 unique=bool(ferrum_extras.get("unique", False)),
                 db_index=bool(ferrum_extras.get("db_index", False)),
-                db_default=ferrum_extras.get("db_default"),
+                db_default=db_default,
+                vector_dimensions=vector_dimensions,
             )
         )
+
+    field_names = {f.name for f in fields}
+    indexes: list[IndexMeta] = []
+    if meta_cls is not None:
+        raw_indexes = getattr(meta_cls, "indexes", None) or ()
+        for raw_index in raw_indexes:
+            if isinstance(raw_index, Index):
+                index = raw_index
+            elif isinstance(raw_index, dict):
+                index = Index(**raw_index)
+            else:
+                raise TypeError(
+                    f"Model {cls.__name__!r} Meta.indexes entries must be Index instances."
+                )
+            if not index.fields:
+                raise ValueError(f"Model {cls.__name__!r} Index requires at least one field.")
+            for index_field in index.fields:
+                if index_field not in field_names:
+                    raise ValueError(
+                        f"Model {cls.__name__!r} Index references unknown field {index_field!r}."
+                    )
+            cols_joined = "_".join(index.fields)
+            index_name = index.name or f"idx_{table_name}_{cols_joined}"
+            indexes.append(
+                IndexMeta(
+                    name=index_name,
+                    fields=index.fields,
+                    unique=index.unique,
+                    using=index.using,
+                    where=index.where,
+                )
+            )
 
     return ModelMetadata(
         table_name=table_name,
         model_name=cls.__name__,
         fields=tuple(fields),
+        indexes=tuple(indexes),
         pk_index=pk_index,
     )
 

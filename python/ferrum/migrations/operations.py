@@ -192,20 +192,28 @@ class AddIndex(Operation):
         columns: list[str],
         *,
         unique: bool = False,
+        using: str = "btree",
+        where: str | None = None,
     ) -> None:
         self.table_name = table_name
         self.index_name = index_name
         self.columns = list(columns)
         self.unique = unique
+        self.using = using
+        self.where = where
 
     def to_op_dict(self) -> dict[str, Any]:
-        return {
+        op: dict[str, Any] = {
             "kind": "add_index",
             "table": self.table_name,
             "name": self.index_name,
             "columns": list(self.columns),
             "unique": self.unique,
+            "using": self.using,
         }
+        if self.where is not None:
+            op["where"] = self.where
+        return op
 
     @property
     def classification(self) -> str:

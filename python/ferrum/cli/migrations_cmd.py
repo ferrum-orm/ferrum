@@ -12,42 +12,51 @@ touching the database.
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import os
-import sys
+from pathlib import Path
+
+import typer
 
 
-def run_migrations(args: argparse.Namespace) -> None:
-    """Dispatch to the appropriate migration subcommand."""
-    cmd = getattr(args, "mig_command", None)
-    token = getattr(args, "token", None) or os.environ.get("FERRUM_MIGRATION_TOKEN")
-    if cmd == "dry-run":
-        asyncio.run(
-            _apply(
-                plan_file=getattr(args, "plan_file", None),
-                confirm=False,
-                do_dry_run=True,
-                environment=getattr(args, "environment", "development"),
-                token=token,
-            )
+def migrations_dry_run(
+    *,
+    plan_file: Path | None = None,
+    environment: str = "development",
+) -> None:
+    """Dry-run a migration plan JSON file."""
+    token = os.environ.get("FERRUM_MIGRATION_TOKEN")
+    asyncio.run(
+        _apply(
+            plan_file=str(plan_file) if plan_file is not None else None,
+            confirm=False,
+            do_dry_run=True,
+            environment=environment,
+            token=token,
         )
-    elif cmd == "apply":
-        confirm = getattr(args, "confirm", False) or (token is not None)
-        do_dry_run = getattr(args, "do_dry_run", False)
-        plan_file = getattr(args, "plan_file", None)
-        asyncio.run(
-            _apply(
-                plan_file=plan_file,
-                confirm=confirm,
-                do_dry_run=do_dry_run,
-                environment=args.environment,
-                token=token,
-            )
+    )
+
+
+def migrations_apply(
+    *,
+    plan_file: Path | None = None,
+    token: str | None = None,
+    confirm: bool = False,
+    dry_run: bool = False,
+    environment: str = "development",
+) -> None:
+    """Apply a migration plan JSON file."""
+    resolved_token = token or os.environ.get("FERRUM_MIGRATION_TOKEN")
+    derived_confirm = confirm or (resolved_token is not None)
+    asyncio.run(
+        _apply(
+            plan_file=str(plan_file) if plan_file is not None else None,
+            confirm=derived_confirm,
+            do_dry_run=dry_run,
+            environment=environment,
+            token=resolved_token,
         )
-    else:
-        print("Usage: ferrum migrations <dry-run | apply>")
-        sys.exit(1)
+    )
 
 
 async def _apply(
@@ -67,9 +76,8 @@ async def _apply(
         print(
             "Error: plan_file is required for 'ferrum migrations apply'.\n"
             "Usage: ferrum migrations apply <plan_file> [--confirm] [--dry-run]",
-            file=sys.stderr,
         )
-        sys.exit(1)
+        raise typer.Exit(code=1)
 
     dsn = os.environ.get("FERRUM_DATABASE_URL")
     if dsn is None and not do_dry_run:
@@ -77,16 +85,15 @@ async def _apply(
         print(
             "Error: FERRUM_DATABASE_URL environment variable is not set. "
             "Set it before running 'ferrum migrations apply'. [FERR-C001]",
-            file=sys.stderr,
         )
-        sys.exit(1)
+        raise typer.Exit(code=1)
 
     try:
         with open(plan_file) as fh:
             plan_json = fh.read()
     except OSError as exc:
-        print(f"Error: could not read plan file '{plan_file}': {exc}", file=sys.stderr)
-        sys.exit(1)
+        print(f"Error: could not read plan file '{plan_file}': {exc}")
+        raise typer.Exit(code=1) from None
 
     from ferrum.errors import FerrumMigrationError
     from ferrum.migrations import apply
@@ -112,8 +119,8 @@ async def _apply(
                     conn, plan_json, dry_run=False, confirm=confirm, env=environment, token=token
                 )
         except FerrumMigrationError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            sys.exit(1)
+            print(f"Error: {exc}")
+            raise typer.Exit(code=1) from None
         status = "applied"
 
     print(f"[ferrum migrate] {status} {result.ops_count} ops")

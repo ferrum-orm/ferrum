@@ -35,9 +35,12 @@ cli = [
     "typer>=0.12",
     "rich>=13",
 ]
+dotenv = ["python-dotenv>=1.0"]
+uuid7 = ["uuid6>=2024.1"]
 fastapi = []  # uses the host's FastAPI; no extra deps needed
 dev = [
     "ferrum[cli]",
+    "ferrum[dotenv]",
     "maturin>=1.7,<2",
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -100,6 +103,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "ANN"]  # asserts and missing annotations are fine in tests
+"python/ferrum/cli/app.py" = ["B008"]  # Typer Option/Argument in parameter defaults
 
 # ---------------------------------------------------------------------------
 # ty

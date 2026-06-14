@@ -43,6 +43,10 @@ pub struct FieldMeta {
 
     /// Whether this column may be NULL.
     pub nullable: bool,
+
+    /// pgvector dimensionality (DDL-only metadata; optional).
+    #[serde(default)]
+    pub vector_dimensions: Option<u32>,
 }
 
 /// Ferrum-level type tag for a field. Corresponds to Pydantic / Python types.
@@ -61,6 +65,9 @@ pub enum FieldType {
     Uuid,
     Json,
     Bytes,
+    Vector,
+    #[serde(alias = "tsvector")]
+    TsVector,
 }
 
 impl ModelMetadata {

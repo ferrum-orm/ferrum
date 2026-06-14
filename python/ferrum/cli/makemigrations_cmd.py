@@ -11,11 +11,13 @@ by the sequence of previously generated migrations (static analysis only).
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+import typer
+from rich import print as rprint
 
 if TYPE_CHECKING:
     from ferrum.models import Model
@@ -197,26 +199,17 @@ async def run_makemigrations(
     dest = migrations_dir / filename
     dest.write_text(content, encoding="utf-8")
 
-    print(f"Created {dest}")
+    rprint(f"[green]Created[/green] {dest}")
     return 0
 
 
-def dispatch_makemigrations(args: argparse.Namespace) -> None:
-    """Sync CLI entry-point: parse *args* and delegate to :func:`run_makemigrations`.
-
-    Args:
-        args: Parsed arguments.  Expected attributes:
-
-            - ``.name`` (``str | None``): optional migration slug.
-            - ``.migrations_dir`` (``str | None``): migrations directory;
-              falls back to :func:`loader.migrations_dir_default`.
-            - ``.app_module`` (``str | None``): reserved for future use;
-              currently ignored.
-    """
-    raw_dir = getattr(args, "migrations_dir", None)
-    migrations_dir = Path(raw_dir) if raw_dir else loader.migrations_dir_default()
-    name = getattr(args, "name", None)
-
-    exit_code = asyncio.run(run_makemigrations(migrations_dir, name))
-    if exit_code == 2:
-        sys.exit(2)
+def makemigrations(
+    *,
+    name: str | None = None,
+    migrations_dir: Path | None = None,
+) -> None:
+    """Sync CLI entry-point: delegate to :func:`run_makemigrations`."""
+    path = migrations_dir or loader.migrations_dir_default()
+    exit_code = asyncio.run(run_makemigrations(path, name))
+    if exit_code != 0:
+        raise typer.Exit(code=exit_code)

@@ -113,7 +113,14 @@ _SQL_TYPE_ALLOWLIST: frozenset[str] = frozenset(
         "JSONB",
         "JSON",
         "INET",
+        "VECTOR",
+        "TSVECTOR",
     }
+)
+
+# Index access methods allowed in CREATE INDEX ... USING ...
+_INDEX_USING_ALLOWLIST: frozenset[str] = frozenset(
+    {"btree", "gin", "gist", "hash", "brin", "hnsw", "ivfflat"}
 )
 
 # Default value allowlist — only simple literals permitted.
@@ -126,6 +133,8 @@ _DEFAULT_VALUE_ALLOWLIST: frozenset[str] = frozenset(
         "CURRENT_TIMESTAMP",
         "CURRENT_DATE",
         "CURRENT_TIME",
+        "GEN_RANDOM_UUID()",
+        "UUID_GENERATE_V7()",
         "0",
         "1",
         "''",
@@ -218,7 +227,14 @@ def _op_to_sql(op: dict[str, Any]) -> str:
         name = op["name"]
         table = op["table"]
         cols = ", ".join(f'"{c}"' for c in op.get("columns", []))
-        return f'CREATE {unique_kw}INDEX IF NOT EXISTS "{name}" ON "{table}" ({cols})'
+        using = op.get("using", "btree")
+        if using not in _INDEX_USING_ALLOWLIST:
+            raise FerrumMigrationError(f"Unsupported index access method {using!r}. [FERR-M001]")
+        sql = f'CREATE {unique_kw}INDEX IF NOT EXISTS "{name}" ON "{table}" USING {using} ({cols})'
+        where = op.get("where")
+        if where:
+            sql = f"{sql} WHERE {where}"
+        return sql
 
     if kind == "drop_index":
         name = op["name"]
@@ -315,8 +331,25 @@ def compute_plan(
                             "name": f"idx_{table}_{f.name}",
                             "columns": [f.column_name],
                             "unique": False,
+                            "using": "btree",
                         }
                     )
+            for index in metadata.indexes:
+                column_names = [
+                    next(f.column_name for f in metadata.fields if f.name == field_name)
+                    for field_name in index.fields
+                ]
+                ops.append(
+                    {
+                        "kind": "add_index",
+                        "table": table,
+                        "name": index.name,
+                        "columns": column_names,
+                        "unique": index.unique,
+                        "using": index.using,
+                        "where": index.where,
+                    }
+                )
         else:
             existing_cols = set(existing_tables[table])
             for f in metadata.fields:
@@ -338,6 +371,7 @@ def compute_plan(
                                 "name": f"idx_{table}_{f.name}",
                                 "columns": [f.column_name],
                                 "unique": False,
+                                "using": "btree",
                             }
                         )
 

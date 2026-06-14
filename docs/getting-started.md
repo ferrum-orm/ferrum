@@ -14,6 +14,11 @@ PostgreSQL. Every example here mirrors the runnable demo in
 - Python 3.11+
 - PostgreSQL 14+ (the only supported database in v0.1)
 - The compiled native extension (`ferrum._native`), built via maturin
+- For CLI commands (`ferrum init`, `migrate`, `makemigrations`, …): install the optional
+  CLI extra — `pip install 'ferrum[cli]'` or `pip install 'ferrum[cli,dotenv]'` for automatic
+  `.env` loading via `ferrum.toml`
+- The CLI optional extra for command-line tools: `pip install 'ferrum[cli]'`
+  (or `ferrum[cli,dotenv]` when you also want automatic `.env` loading)
 
 Ferrum's query engine delegates SQL compilation to a Rust core. If the extension is not
 built, terminal query methods raise `FerrumConfigError` with the message:
@@ -51,6 +56,91 @@ docker compose up -d
 The DSN is **never** logged or included in hook payloads. If a connection fails, Ferrum
 reports only host / port / database / username / error category — never the password or
 the full DSN.
+
+---
+
+## 2a. Project config (ferrum.toml and ferrum_conf.py)
+
+### ferrum.toml
+
+`ferrum.toml` is the optional project configuration file.  It is scaffolded automatically
+by `ferrum init` with all keys commented out (so the defaults are always self-documenting).
+**Secrets never go here** — database URLs and passwords belong in `.env`.
+
+```toml
+# ferrum.toml — Ferrum project configuration
+[ferrum]
+# Python module that imports your app's models (enables makemigrations auto-discovery)
+# settings = "ferrum_conf"
+
+# Migrations directory (default: ./migrations)
+# migrations_dir = "migrations"
+
+# Default environment name used by ferrum migrate
+# default_env = "development"
+
+# Path to dotenv file loaded by the CLI (default: .env)
+# env_file = ".env"
+```
+
+Available keys:
+
+| Key              | Default          | Description                                                   |
+|------------------|------------------|---------------------------------------------------------------|
+| `settings`       | `None`           | Python module the CLI imports before running any subcommand.  |
+| `migrations_dir` | `"migrations"`   | Directory (relative to project root) for migration files.     |
+| `default_env`    | `"development"`  | Environment name used by `ferrum migrate`.                    |
+| `env_file`       | `".env"`         | Dotenv file loaded by the CLI (relative to project root).     |
+
+### ferrum_conf.py
+
+`ferrum_conf.py` is the **model-import hook** — the file that tells the Ferrum CLI which
+models exist so that `ferrum makemigrations` can find them.  Create it in the project root:
+
+```python
+# ferrum_conf.py — loaded automatically by the Ferrum CLI
+# Import all model modules here so makemigrations can find them.
+
+import myapp.models          # registers User, Post, etc.
+import myapp.auth.models     # registers Token, Session, etc.
+
+# Optional: call a configure() hook for future extensibility
+# def configure():
+#     pass
+```
+
+The file is **not** scaffolded by `ferrum init` — you write it once for your project.
+Top-level imports are sufficient; if you define a `configure()` callable it will be called
+after the module is imported.
+
+### CLI dotenv auto-load
+
+The Ferrum CLI automatically loads the `.env` file (or the path set in `env_file`) from the
+project root **before** running any subcommand.  This means you do not need to `source .env`
+before running `ferrum migrate`:
+
+```bash
+cp .env.example .env     # fill in FERRUM_DATABASE_URL
+ferrum migrate           # .env is loaded automatically
+```
+
+Requirements:
+- `python-dotenv` must be installed (`pip install ferrum[dotenv]` or add it to your project).
+- Without `python-dotenv`, dotenv loading is silently skipped — no error.
+- Already-set environment variables are **never** overridden (`override=False`), so
+  CI/production values set in the shell always take precedence over `.env`.
+
+### FERRUM_SETTINGS override
+
+The `FERRUM_SETTINGS` environment variable overrides the settings module for the current
+shell session.  Useful in CI or when switching between configurations:
+
+```bash
+FERRUM_SETTINGS=myapp.test_settings ferrum makemigrations
+```
+
+Discovery order: `FERRUM_SETTINGS` env var → `[ferrum].settings` in `ferrum.toml` →
+`ferrum_conf.py` autodiscovery → skip (silently).
 
 ---
 
@@ -246,6 +336,12 @@ Safety gates (each raises `FerrumMigrationError` when unsatisfied):
 
 ### CLI
 
+Install the CLI extra before using command-line tools:
+
+```bash
+pip install 'ferrum[cli,dotenv]'
+```
+
 The same flow is available from the command line:
 
 ```bash
@@ -287,7 +383,81 @@ See [`examples/fastapi_quickstart/`](../examples/fastapi_quickstart/) for the fu
 
 ---
 
-## 10. Error handling
+## 10. UUID primary keys, indexes, and pgvector
+
+### UUID primary keys
+
+Use a ``UUID`` column as the primary key; Ferrum auto-injects
+``DEFAULT gen_random_uuid()`` at metadata build time:
+
+```python
+from uuid import UUID
+from typing import Annotated
+
+class Session(ferrum.Model):
+    id: Annotated[UUID, ferrum.Field(primary_key=True)]
+    user_id: int
+```
+
+For UUIDv7 server-side defaults (requires the ``pg_uuidv7`` extension), pass
+``uuid_generate="v7"``. For Python-side UUIDv7 generation, install the optional extra
+``pip install 'ferrum[uuid7]'`` and use ``from uuid6 import uuid7``.
+
+### Declarative indexes
+
+Define composite, unique, partial, or access-method-specific indexes on ``Meta.indexes``:
+
+```python
+class Post(ferrum.Model):
+    id: int
+    author_id: int
+    body: str
+
+    class Meta:
+        indexes = [
+            ferrum.Index(fields=("author_id", "id")),
+            ferrum.Index(fields=("body",), using="gin", where="active = true"),
+        ]
+```
+
+``compute_plan`` emits ``add_index`` ops after ``create_table``.
+
+### Vector and full-text columns
+
+pgvector ``VECTOR(n)`` and PostgreSQL ``TSVECTOR`` columns use sentinel types:
+
+```python
+class Document(ferrum.Model):
+    id: Annotated[UUID, ferrum.Field(primary_key=True)]
+    embedding: Annotated[ferrum.Vector, ferrum.Field(vector_dimensions=1536)]
+    search_vector: ferrum.TSVector | None = None
+```
+
+KNN search uses ``nearest_to``; full-text search uses the ``match`` filter operator:
+
+```python
+results = await (
+    Document.objects
+    .nearest_to("embedding", query_vector, metric="l2")
+    .limit(10)
+    .all(conn)
+)
+hits = await Document.objects.filter(search_vector__match="python rust orm").all(conn)
+```
+
+When reading/writing real vector values through asyncpg, register codecs explicitly:
+
+```python
+from ferrum.ext.pgvector import register_vector_codecs
+
+async with ferrum.connect() as conn:
+    await register_vector_codecs(conn)
+    ...
+```
+
+---
+
+## 11. Error handling
 
 All exceptions raised to your code subclass `ferrum.FerrumError` and carry a stable
 `code` attribute (`FERR-XXXX`). Catch broadly or specifically:

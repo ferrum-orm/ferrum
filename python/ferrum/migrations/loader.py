@@ -112,5 +112,9 @@ def _topo_sort(modules: dict[str, MigrationModule]) -> list[MigrationModule]:
 
 
 def migrations_dir_default() -> Path:
-    """Return ``Path('migrations')`` relative to cwd — the conventional default."""
-    return Path.cwd() / "migrations"
+    """Return the migrations directory from project config, falling back to cwd/migrations."""
+    from ferrum.config import find_project_root, load_config
+
+    root = find_project_root(Path.cwd())
+    cfg = load_config(root)
+    return root / cfg.migrations_dir

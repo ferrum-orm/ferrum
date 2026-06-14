@@ -19,10 +19,13 @@ __all__ = [
     "FerrumNotFoundError",
     "FerrumSchemaError",
     "Field",
+    "Index",
     "MigrationResult",
     "Model",
     "ModelConfig",
     "QuerySet",
+    "TSVector",
+    "Vector",
     "clear_hooks",
     "connect",
     "register_hook",
@@ -43,5 +46,5 @@ from ferrum.errors import (
 )
 from ferrum.hooks import clear_hooks, register_hook
 from ferrum.migrations import MigrationResult
-from ferrum.models import Field, Model, ModelConfig
+from ferrum.models import Field, Index, Model, ModelConfig, TSVector, Vector
 from ferrum.queryset import QuerySet

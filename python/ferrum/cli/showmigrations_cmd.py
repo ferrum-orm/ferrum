@@ -1,19 +1,17 @@
 """``ferrum showmigrations`` command: list migrations with applied/pending status.
 
-Prints one line per migration file in dependency order:
-
-    [X] 0001_create_note        (applied)
-    [ ] 0002_add_note_title     (pending)
-    [?] 0003_drop_note_title    (no database connection)
+Renders a Rich table with one row per migration file in dependency order.
 
 Always exits 0 — this is an informational command.
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 from pathlib import Path
+
+from rich.console import Console
+from rich.table import Table
 
 from ferrum.connection import connect
 from ferrum.errors import FerrumConfigError
@@ -26,9 +24,14 @@ async def run_showmigrations(migrations_dir: Path) -> int:
     Returns 0 always (informational command).
     """
     modules = loader.scan(migrations_dir)
+    console = Console()
     if not modules:
-        print("No migrations found.")
+        console.print("No migrations found.")
         return 0
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Status", style="dim", width=8)
+    table.add_column("Migration")
 
     try:
         async with connect() as conn:
@@ -36,24 +39,19 @@ async def run_showmigrations(migrations_dir: Path) -> int:
             for module in modules:
                 digest = ledger.compute_digest(module.name, module.path.read_text())
                 applied = await ledger.is_applied(conn, digest)
-                marker = "X" if applied else " "
-                print(f"[{marker}] {module.name}")
+                if applied:
+                    table.add_row("[green][X][/green]", module.name)
+                else:
+                    table.add_row("[yellow][ ][/yellow]", module.name)
     except FerrumConfigError:
         for module in modules:
-            print(f"[?] {module.name}  (no database connection)")
+            table.add_row("[dim][?][/dim]", f"{module.name}  (no database connection)")
 
+    console.print(table)
     return 0
 
 
-def dispatch_showmigrations(args: argparse.Namespace) -> None:
-    """Sync CLI entry-point: parse *args* and delegate to :func:`run_showmigrations`.
-
-    Args:
-        args: Parsed arguments.  Expected attributes:
-
-            - ``.migrations_dir`` (``str | None``): migrations directory;
-              falls back to :func:`loader.migrations_dir_default`.
-    """
-    raw_dir = getattr(args, "migrations_dir", None)
-    migrations_dir = Path(raw_dir) if raw_dir else loader.migrations_dir_default()
-    asyncio.run(run_showmigrations(migrations_dir))
+def showmigrations(*, migrations_dir: Path | None = None) -> None:
+    """Sync CLI entry-point: delegate to :func:`run_showmigrations`."""
+    path = migrations_dir or loader.migrations_dir_default()
+    asyncio.run(run_showmigrations(path))

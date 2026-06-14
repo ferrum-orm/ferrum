@@ -13,10 +13,11 @@ Security invariants:
 
 from __future__ import annotations
 
-import argparse
 import asyncio
-import sys
 from pathlib import Path
+
+import typer
+from rich import print as rprint
 
 from ferrum.connection import connect
 from ferrum.errors import FerrumConfigError, FerrumMigrationError
@@ -88,10 +89,10 @@ async def run_migrate(
 
             for module, digest in unapplied:
                 ops = module.migration.operations
-                print(f"Applying {module.name}...")
+                rprint(f"Applying [bold]{module.name}[/bold]...")
 
                 if dry_run:
-                    print(f"  [dry-run] would apply {len(ops)} operations")
+                    rprint(f"  [dim][dry-run][/dim] would apply {len(ops)} operations")
                     continue
 
                 try:
@@ -119,7 +120,7 @@ async def run_migrate(
                         f"{type(exc).__name__} [FERR-M001]"
                     ) from None
 
-                print("  OK")
+                rprint("  [green]OK[/green]")
 
             return 0
 
@@ -131,24 +132,15 @@ async def run_migrate(
         return 2
 
 
-def dispatch_migrate(args: argparse.Namespace) -> None:
-    """Sync CLI entry-point: parse *args* and delegate to :func:`run_migrate`.
-
-    Args:
-        args: Parsed arguments.  Expected attributes:
-
-            - ``.migrations_dir`` (``str | None``): migrations directory;
-              falls back to :func:`_loader.migrations_dir_default`.
-            - ``.env`` (``str``): target environment (default: ``"development"``).
-            - ``.confirm`` (``bool``): permit destructive operations.
-            - ``.dry_run`` (``bool``): show plan without applying.
-    """
-    raw_dir = getattr(args, "migrations_dir", None)
-    migrations_dir = Path(raw_dir) if raw_dir else _loader.migrations_dir_default()
-    env = getattr(args, "env", "development")
-    confirm = getattr(args, "confirm", False)
-    dry_run = getattr(args, "dry_run", False)
-
-    exit_code = asyncio.run(run_migrate(migrations_dir, env=env, confirm=confirm, dry_run=dry_run))
+def migrate(
+    *,
+    env: str = "development",
+    confirm: bool = False,
+    dry_run: bool = False,
+    migrations_dir: Path | None = None,
+) -> None:
+    """Sync CLI entry-point: delegate to :func:`run_migrate`."""
+    path = migrations_dir or _loader.migrations_dir_default()
+    exit_code = asyncio.run(run_migrate(path, env=env, confirm=confirm, dry_run=dry_run))
     if exit_code != 0:
-        sys.exit(exit_code)
+        raise typer.Exit(code=exit_code)

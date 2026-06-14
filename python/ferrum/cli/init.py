@@ -12,6 +12,27 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from rich.console import Console
+from rich.panel import Panel
+
+_FERRUM_TOML_TEMPLATE = """\
+# Ferrum project configuration.
+# Secrets (database URL etc.) go in .env, not here.
+
+[ferrum]
+# Python module that imports your app's models (enables makemigrations auto-discovery)
+# settings = "ferrum_conf"
+
+# Migrations directory (default: ./migrations)
+# migrations_dir = "migrations"
+
+# Default environment name used by ferrum migrate
+# default_env = "development"
+
+# Path to dotenv file loaded by the CLI (default: .env)
+# env_file = ".env"
+"""
+
 _GITIGNORE_TEMPLATE = """\
 # Ferrum / environment secrets — never commit real .env files
 .env
@@ -22,7 +43,7 @@ _GITIGNORE_TEMPLATE = """\
 _ENV_EXAMPLE_TEMPLATE = """\
 # Copy this file to .env and fill in your values.
 # Never commit .env to version control.
-DATABASE_URL=postgresql://ferrum:changeme@127.0.0.1:5432/ferrum_dev
+FERRUM_DATABASE_URL=postgresql://ferrum:changeme@127.0.0.1:5432/ferrum_dev
 """
 
 _DOCKER_COMPOSE_TEMPLATE = """\
@@ -42,6 +63,14 @@ services:
 volumes:
   pgdata:
 """
+
+_NEXT_STEPS = """\
+1. cp .env.example .env
+2. Edit .env with your credentials
+3. docker compose up -d
+4. maturin develop  # build the Ferrum extension
+5. Create ferrum_conf.py to import your models
+   (enables makemigrations auto-discovery)"""
 
 
 def run_init(*, name: str = ".") -> None:
@@ -68,16 +97,14 @@ def run_init(*, name: str = ".") -> None:
 
     target.mkdir(parents=True, exist_ok=True)
 
+    _write_if_absent(target / "ferrum.toml", _FERRUM_TOML_TEMPLATE)
     _write_if_absent(target / ".gitignore", _GITIGNORE_TEMPLATE)
     _write_if_absent(target / ".env.example", _ENV_EXAMPLE_TEMPLATE)
     _write_if_absent(target / "docker-compose.yml", _DOCKER_COMPOSE_TEMPLATE)
 
-    print(f"Ferrum project scaffolded in {target}")
-    print("Next steps:")
-    print("  1. cp .env.example .env")
-    print("  2. Edit .env with your credentials")
-    print("  3. docker compose up -d")
-    print("  4. maturin develop  # build the Ferrum extension")
+    console = Console()
+    console.print(f"Ferrum project scaffolded in [bold]{target}[/bold]")
+    console.print(Panel(_NEXT_STEPS, title="Next steps", border_style="blue"))
 
 
 def _write_if_absent(path: Path, content: str) -> None:
