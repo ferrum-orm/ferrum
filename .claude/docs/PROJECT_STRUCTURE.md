@@ -128,8 +128,12 @@ python/ferrum/
 │   ├── tokens.py          # confirmation-token emit/validate (no secrets)
 │   └── gates.py           # destructive + non-dev confirmation gates
 ├── cli/
-│   ├── __init__.py        # `ferrum` console-script entrypoint (argparse/typer)
+│   ├── __init__.py        # `ferrum` console-script entrypoint (Typer via ferrum[cli])
+│   ├── app.py             # Typer app: init, migrate, makemigrations, showmigrations
 │   ├── init.py            # scaffold (local files only; 127.0.0.1; .gitignore .env)
+│   ├── migrate_cmd.py     # apply unapplied file migrations
+│   ├── makemigrations_cmd.py
+│   ├── showmigrations_cmd.py
 │   └── migrations_cmd.py  # dry-run / apply wrappers over migrations.orchestrator
 ├── contrib/
 │   ├── __init__.py
@@ -153,7 +157,7 @@ python/ferrum/
 
 | Extra | Pulls in | For |
 |-------|----------|-----|
-| `ferrum[cli]` | `typer`/`rich` (TBD) | richer CLI UX; base CLI works without it |
+| `ferrum[cli]` | `typer`/`rich` | Typer + Rich CLI UX; required for `ferrum` console script |
 | `ferrum[fastapi]` | nothing new (uses host's FastAPI) | `ferrum.contrib.fastapi` helpers |
 | `ferrum[dev]` | test/lint/type toolchain | contributor environment |
 
@@ -390,7 +394,6 @@ The `connection`, `hooks`, `errors`, and `migrations/*` modules, the `ferrum-pyo
 
 - **`ferrum-sql` vs in-`core` module decision** — internal Rust organization; Python API stable either way. Record outcome in `DECISIONS.md`.
 - **Single-distribution vs split distributions** — no blocker; evolutionary seam already exists. Record outcome in `DECISIONS.md`.
-- **CLI UX library choice (`typer` vs argparse)** — no blocker; base CLI works on stdlib.
 - **SecurityEngineer review of security-qual completeness** — required before release qualification.
 
 ### 11.1 What Engineers Can Start (when implementation begins)

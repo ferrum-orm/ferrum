@@ -239,3 +239,4 @@ secrets.json
 
 # --- Cursor local agent state (not shared config) ---
 .cursor/hooks/state/
+*.code-workspace

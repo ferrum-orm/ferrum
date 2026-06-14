@@ -40,6 +40,10 @@ pub struct QuerySetIR {
 
     /// OFFSET row count, if any.
     pub offset: Option<u64>,
+
+    /// Optional pgvector KNN ordering (``QuerySet.nearest_to``).
+    #[serde(default)]
+    pub vector_order_by: Option<VectorOrderBy>,
 }
 
 /// The SQL operation this IR node represents.
@@ -91,6 +95,23 @@ pub struct OrderBy {
     pub direction: SortDirection,
 }
 
+/// pgvector distance metric for KNN ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VectorMetric {
+    L2,
+    Cosine,
+    InnerProduct,
+}
+
+/// KNN vector ordering (``ORDER BY col <-> $n``).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorOrderBy {
+    pub field: FieldRef,
+    pub metric: VectorMetric,
+    pub value: BindValue,
+}
+
 /// Sort direction — only `Asc` and `Desc` are valid; anything else deserialized
 /// from Python/JSON becomes `Unknown`, which the compiler rejects with
 /// `CompileError::InvalidSortDirection` before any SQL is produced.
@@ -126,4 +147,6 @@ pub enum BindValue {
     Bytes(Vec<u8>),
     /// ISO-8601 datetime string — decoded by the DB driver on the Python side.
     Datetime(String),
+    /// pgvector query vector — list of f64 components.
+    FloatArray(Vec<f64>),
 }

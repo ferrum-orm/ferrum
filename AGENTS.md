@@ -193,3 +193,7 @@ ChiefArchitect.
 - Scoped verification: Rust-only → `mise run test-rust lint-rust`; Python-only → `mise run test-python-unit`; extension/boundary → `mise run dev` plus integration or security tests.
 - Agent team lives in both `.cursor/agents/` and `.claude/agents/`; roles: CEO, ChiefArchitect, ProductManager, BackendEngineer, SecurityEngineer, DevOpsEngineer, CodeReviewer, QAEngineer.
 - Paperclip orchestration API coordinates multi-agent work; agents follow the Paperclip heartbeat skill and work only on assigned issues.
+- `ferrum-local-tests` sibling project at `../ferrum-local-tests/`; uses `[tool.uv.sources] ferrum = { path = "../ferrum", editable = true }` for editable install.
+- Canonical connection env var is `FERRUM_DATABASE_URL` (not `DATABASE_URL`); `ferrum.connect()` and `ferrum migrate` both read this name.
+- GitHub Actions CI jobs require a virtualenv before `maturin develop`: use `python -m venv .venv && . .venv/bin/activate` before all pip/maturin/pytest steps; bare pip into the runner environment causes "Couldn't find a virtualenv" errors.
+- `ferrum makemigrations` scans `Model.__subclasses__()` at runtime; user projects must import model modules before invoking the CLI (use a wrapper script or `ferrum_conf.py` once that feature lands).

@@ -17,7 +17,10 @@
 
 use crate::{
     error::CompileError,
-    ir::{BindValue, ModelMetadata, Operation, QuerySetIR, SortDirection, IR_VERSION},
+    ir::{
+        metadata::FieldType, BindValue, ModelMetadata, Operation, QuerySetIR, SortDirection,
+        IR_VERSION,
+    },
 };
 
 /// The output of a successful compilation pass.
@@ -158,6 +161,8 @@ pub fn compile(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<CompiledQuer
         }
     }
 
+    validate_vector_order_by(metadata, ir)?;
+
     // Validation passed. Return empty CompiledQuery — sql_text and bound_params
     // are populated by the SQL emitter in `ferrum-sql::emit`.
     Ok(CompiledQuery {
@@ -166,6 +171,32 @@ pub fn compile(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<CompiledQuer
         param_type_summary: Vec::new(),
         fingerprint: String::new(),
     })
+}
+
+fn validate_vector_order_by(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<(), CompileError> {
+    let Some(vector_order) = &ir.vector_order_by else {
+        return Ok(());
+    };
+    let field_meta = metadata
+        .fields
+        .get(vector_order.field.index)
+        .ok_or_else(|| CompileError::UnknownField {
+            model: metadata.model_name.clone(),
+            field: vector_order.field.name.clone(),
+        })?;
+    if field_meta.field_type != FieldType::Vector {
+        return Err(CompileError::UnsupportedOperator {
+            model: metadata.model_name.clone(),
+            field: vector_order.field.name.clone(),
+            operator: "nearest_to".into(),
+        });
+    }
+    if !matches!(vector_order.value, BindValue::FloatArray(_)) {
+        return Err(CompileError::MalformedIr {
+            reason: "vector_order_by.value must be float_array".into(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -187,6 +218,7 @@ mod tests {
                     field_type: FieldType::Int,
                     allowed_operators: vec!["eq".into(), "gt".into(), "lt".into()],
                     nullable: false,
+                    vector_dimensions: None,
                 },
                 FieldMeta {
                     name: "email".into(),
@@ -194,6 +226,7 @@ mod tests {
                     field_type: FieldType::Text,
                     allowed_operators: vec!["eq".into(), "icontains".into()],
                     nullable: false,
+                    vector_dimensions: None,
                 },
             ],
             pk_index: 0,
@@ -220,6 +253,7 @@ mod tests {
             order_by: vec![],
             limit: None,
             offset: None,
+            vector_order_by: None,
         }
     }
 
@@ -356,6 +390,7 @@ mod tests {
             order_by: vec![],
             limit: None,
             offset: None,
+            vector_order_by: None,
         };
         assert!(compile(&meta, &ir).is_ok());
     }
@@ -379,6 +414,7 @@ mod tests {
             order_by: vec![],
             limit: None,
             offset: None,
+            vector_order_by: None,
         };
         assert!(matches!(
             compile(&meta, &ir).unwrap_err(),
@@ -397,6 +433,7 @@ mod tests {
             order_by: vec![],
             limit: None,
             offset: None,
+            vector_order_by: None,
         };
         assert!(matches!(
             compile(&meta, &ir).unwrap_err(),
@@ -424,6 +461,7 @@ mod tests {
             order_by: vec![],
             limit: None,
             offset: None,
+            vector_order_by: None,
         };
         assert!(matches!(
             compile(&meta, &ir).unwrap_err(),

@@ -47,3 +47,4 @@ layers =
     ferrum.errors
     ferrum.connection
     ferrum.queryset
+    ferrum.config

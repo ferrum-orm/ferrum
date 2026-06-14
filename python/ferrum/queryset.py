@@ -21,7 +21,8 @@ import json
 import time
 import types
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
+from uuid import UUID
 
 import ferrum.hooks as _hooks
 from ferrum.errors import (
@@ -83,6 +84,11 @@ def _encode_bind_value(value: object) -> dict[str, object]:
         return {"type": "bytes", "value": list(value)}
     if isinstance(value, datetime):
         return {"type": "datetime", "value": value.isoformat()}
+    if isinstance(value, UUID):
+        return {"type": "text", "value": str(value)}
+    if isinstance(value, list) and value and all(isinstance(v, (int, float)) for v in value):
+        floats: list[float] = [float(v) for v in value if isinstance(v, (int, float))]
+        return {"type": "float_array", "value": floats}
     return {"type": "text", "value": str(value)}
 
 
@@ -112,6 +118,8 @@ def _decode_bound_param(param_json: str) -> object:
             return datetime.fromisoformat(str(val))
         except (ValueError, TypeError):
             return str(val)
+    if typ == "float_array":
+        return [float(v) for v in val]
     return val
 
 
@@ -152,6 +160,7 @@ class QuerySet(Generic[_M]):
         self._limit: int | None = None
         self._offset: int | None = None
         self._is_filtered: bool = False
+        self._vector_order_by: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------
     # Chaining methods (return new QuerySet — no I/O, no SQL)
@@ -204,6 +213,46 @@ class QuerySet(Generic[_M]):
         """Set OFFSET. Returns a new QuerySet."""
         qs = self._clone()
         qs._offset = count
+        return qs
+
+    def nearest_to(
+        self,
+        field: str,
+        vector: list[float],
+        *,
+        metric: Literal["l2", "cosine", "inner_product"] = "l2",
+    ) -> QuerySet[_M]:
+        """Order results by vector distance (pgvector KNN).
+
+        Appends a ``vector_order_by`` node to the IR, compiled to
+        ``ORDER BY col <-> $n`` (or ``<=>`` / ``<#>`` for other metrics).
+        """
+        metadata = self._get_metadata()
+        if metadata is None:
+            raise FerrumCompileError(
+                f"Model {self._model.__name__!r} has no metadata.",
+                model=self._model.__name__,
+            )
+        field_index = {f.name: i for i, f in enumerate(metadata.fields)}
+        if field not in field_index:
+            raise FerrumCompileError(
+                f"Unknown field {field!r} on model {metadata.model_name!r}.",
+                model=metadata.model_name,
+                field=field,
+            )
+        field_meta = metadata.fields[field_index[field]]
+        if field_meta.field_type != "vector":
+            raise FerrumCompileError(
+                f"nearest_to() requires a vector field; {field!r} is {field_meta.field_type!r}.",
+                model=metadata.model_name,
+                field=field,
+            )
+        qs = self._clone()
+        qs._vector_order_by = {
+            "field": {"index": field_index[field], "name": field},
+            "metric": metric,
+            "value": _encode_bind_value(vector),
+        }
         return qs
 
     # ------------------------------------------------------------------
@@ -295,7 +344,7 @@ class QuerySet(Generic[_M]):
                 }
             )
 
-        return {
+        ir: dict[str, Any] = {
             "version": _IR_VERSION,
             "model_name": metadata.model_name,
             "operation": operation,
@@ -304,6 +353,9 @@ class QuerySet(Generic[_M]):
             "limit": self._limit,
             "offset": self._offset,
         }
+        if self._vector_order_by is not None:
+            ir["vector_order_by"] = self._vector_order_by
+        return ir
 
     def _compile(self) -> dict[str, Any]:
         """Compile the validated IR through the native Rust extension.
@@ -959,6 +1011,9 @@ class QuerySet(Generic[_M]):
         qs._limit = self._limit
         qs._offset = self._offset
         qs._is_filtered = self._is_filtered
+        qs._vector_order_by = (
+            dict(self._vector_order_by) if self._vector_order_by is not None else None
+        )
         return qs
 
     def _get_metadata(self) -> ModelMetadata | None:

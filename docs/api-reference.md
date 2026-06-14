@@ -8,6 +8,7 @@ Everything in `ferrum.__all__`:
 ```python
 from ferrum import (
     Model, ModelConfig, QuerySet,          # modeling + querying
+    Field, Index, Vector, TSVector,        # field types + indexes
     connect,                               # connections
     register_hook, clear_hooks,            # observability
     MigrationResult,                       # migrations
@@ -53,7 +54,9 @@ early).
 | `bool` | `bool` | | `time` | `time` |
 | `float` | `float` | | `UUID` | `uuid` |
 | `Decimal` | `decimal` | | `bytes` | `bytes` |
-| `dict` | `json` | | unknown | `text` (fallback) |
+| `dict` | `json` | | `Vector` | `vector` (requires `Field(vector_dimensions=n)`) |
+| | | | `TSVector` | `tsvector` |
+| | | | unknown | `text` (fallback) |
 
 `T | None` / `Optional[T]` marks the field nullable. The first `int` field named `id`
 becomes the primary key when no explicit PK is set.
@@ -78,7 +81,24 @@ planner. Never carries connection info, bound values, or row data.
 | `to_metadata_json() -> str` | method | Serializes to the JSON shape the native compiler expects. |
 
 `FieldMeta` (frozen): `name`, `column_name`, `python_type_name`, `field_type`,
-`allowed_operators`, `nullable`, `pk`.
+`allowed_operators`, `nullable`, `pk`, plus optional `max_length`, `db_default`,
+`vector_dimensions`, `db_index`, `unique`.
+
+`IndexMeta` (frozen): `name`, `fields`, `unique`, `using`, `where`.
+
+### `class Index`
+
+Declarative index for ``class Meta: indexes = [...]``. Fields: `fields`, optional `name`,
+`unique`, `using` (`"btree"` default; also `"gin"`, `"gist"`, `"hash"`, `"brin"`,
+`"hnsw"`, `"ivfflat"`), and optional partial-index `where`.
+
+### `Field(...)`
+
+Ferrum-specific keyword arguments include `primary_key`, `db_column`, `unique`, `db_index`,
+`max_length`, `uuid_generate` (`"v4"` \| `"v7"`), and `vector_dimensions` (required for
+`Vector` columns). A string `default=` value is stored as a DB-side `db_default` expression.
+
+UUID PK columns auto-receive `db_default = "gen_random_uuid()"` unless overridden.
 
 ---
 
@@ -97,6 +117,7 @@ Lazy, chainable, async query builder. Chaining methods return a **new** `QuerySe
 | `order_by(*fields) -> QuerySet[M]` | `ORDER BY`; prefix a field with `-` for DESC. |
 | `limit(count) -> QuerySet[M]` | Set `LIMIT`. |
 | `offset(count) -> QuerySet[M]` | Set `OFFSET`. |
+| `nearest_to(field, vector, *, metric="l2") -> QuerySet[M]` | pgvector KNN ordering (`l2`, `cosine`, `inner_product`). |
 | `to_ir_json() -> str` | Serialize current state to the ADR-002 v1 IR JSON string (runs allowlist checks). |
 
 #### Terminal coroutines (require `conn: Connection`)
@@ -126,6 +147,8 @@ the connection.
 | `bool` | `eq ne is_null` |
 | `uuid`, `bytes` | `eq ne in is_null` |
 | `json` | `eq is_null` |
+| `vector` | `is_null` (KNN via `nearest_to`) |
+| `tsvector` | `match is_null` |
 
 An unsupported operator for a field raises `FerrumCompileError` before SQL emission.
 

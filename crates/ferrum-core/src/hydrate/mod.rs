@@ -88,6 +88,7 @@ mod tests {
                     field_type: FieldType::Int,
                     allowed_operators: vec!["eq".into()],
                     nullable: false,
+                    vector_dimensions: None,
                 },
                 FieldMeta {
                     name: "title".into(),
@@ -95,6 +96,7 @@ mod tests {
                     field_type: FieldType::Text,
                     allowed_operators: vec!["eq".into(), "icontains".into()],
                     nullable: false,
+                    vector_dimensions: None,
                 },
                 FieldMeta {
                     name: "bio".into(),
@@ -102,6 +104,7 @@ mod tests {
                     field_type: FieldType::Text,
                     allowed_operators: vec!["eq".into()],
                     nullable: true, // nullable column
+                    vector_dimensions: None,
                 },
             ],
             pk_index: 0,

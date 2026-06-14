@@ -171,6 +171,16 @@ Ferrum is currently in active development.
 
 The API is not yet stable and breaking changes should be expected until the first public release.
 
+## Installation
+
+```bash
+pip install ferrum              # core ORM (asyncpg + pydantic)
+pip install 'ferrum[cli]'       # add Typer/Rich CLI tools
+pip install 'ferrum[cli,dotenv]'  # CLI + automatic .env loading
+```
+
+From source, build the native extension with `maturin develop` (or `mise run dev`).
+
 ## Examples
 
 Runnable samples live under [`examples/`](examples/):

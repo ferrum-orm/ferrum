@@ -56,3 +56,26 @@ class TestInitScaffold:
         existing.write_text("# my custom gitignore\n")
         run_init(name=".")
         assert "# my custom gitignore" in existing.read_text()
+
+    def test_scaffolds_ferrum_toml(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        run_init(name=".")
+        ferrum_toml = tmp_path / "ferrum.toml"
+        assert ferrum_toml.exists()
+        content = ferrum_toml.read_text()
+        assert "[ferrum]" in content
+        # All keys are commented out (template is documentation-only)
+        assert "# settings" in content
+        assert "# migrations_dir" in content
+
+    def test_env_example_uses_ferrum_database_url(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        run_init(name=".")
+        env_example = (tmp_path / ".env.example").read_text()
+        assert "FERRUM_DATABASE_URL=" in env_example
+        # Old key must not appear
+        assert "DATABASE_URL=" not in env_example.replace("FERRUM_DATABASE_URL=", "")

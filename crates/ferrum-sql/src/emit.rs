@@ -14,7 +14,7 @@ use crate::dialect;
 use ferrum_core::{
     compile::CompiledQuery,
     error::CompileError,
-    ir::{BindValue, ModelMetadata, QuerySetIR, SortDirection},
+    ir::{BindValue, ModelMetadata, QuerySetIR, SortDirection, VectorMetric},
 };
 use std::fmt::Write as _;
 
@@ -56,12 +56,17 @@ pub fn emit_select(
 
     for filter in &ir.filters {
         let col = dialect::quote_ident(&metadata.fields[filter.field.index].column_name);
-        let placeholder = dialect::placeholder(bound_params.len() + 1);
-        // Only safe operators from the allowlist reach this point.
-        let sql_op = operator_to_sql(&filter.operator);
-        where_clauses.push(format!("{col} {sql_op} {placeholder}"));
-        param_type_summary.push(format!("{}:{}", filter.field.name, filter.operator));
-        bound_params.push(filter.value.clone());
+        let (clause, param) = filter_clause(
+            &col,
+            &filter.operator,
+            bound_params.len() + 1,
+            filter.value.clone(),
+        );
+        where_clauses.push(clause);
+        if let Some(value) = param {
+            param_type_summary.push(format!("{}:{}", filter.field.name, filter.operator));
+            bound_params.push(value);
+        }
     }
 
     let mut sql = format!("SELECT {fields} FROM {table}");
@@ -91,6 +96,13 @@ pub fn emit_select(
         }
         sql.push_str(" ORDER BY ");
         sql.push_str(&order_parts.join(", "));
+    } else if let Some(vector_order) = &ir.vector_order_by {
+        let col = dialect::quote_ident(&metadata.fields[vector_order.field.index].column_name);
+        let op = vector_metric_to_sql(vector_order.metric);
+        let placeholder = dialect::placeholder(bound_params.len() + 1);
+        write!(sql, " ORDER BY {col} {op} {placeholder}").expect("write to String is infallible");
+        param_type_summary.push(format!("{}:nearest_to", vector_order.field.name));
+        bound_params.push(vector_order.value.clone());
     }
 
     // LIMIT and OFFSET are bound parameters — values are never interpolated
@@ -208,11 +220,17 @@ pub fn emit_update(
     let mut where_clauses: Vec<String> = Vec::new();
     for filter in &ir.filters {
         let col = dialect::quote_ident(&metadata.fields[filter.field.index].column_name);
-        let ph = dialect::placeholder(bound_params.len() + 1);
-        let sql_op = operator_to_sql(&filter.operator);
-        where_clauses.push(format!("{col} {sql_op} {ph}"));
-        param_type_summary.push(format!("{}:{}", filter.field.name, filter.operator));
-        bound_params.push(filter.value.clone());
+        let (clause, param) = filter_clause(
+            &col,
+            &filter.operator,
+            bound_params.len() + 1,
+            filter.value.clone(),
+        );
+        where_clauses.push(clause);
+        if let Some(value) = param {
+            param_type_summary.push(format!("{}:{}", filter.field.name, filter.operator));
+            bound_params.push(value);
+        }
     }
 
     let returning = returning_all_fields(metadata);
@@ -252,11 +270,17 @@ pub fn emit_delete(
 
     for filter in &ir.filters {
         let col = dialect::quote_ident(&metadata.fields[filter.field.index].column_name);
-        let ph = dialect::placeholder(bound_params.len() + 1);
-        let sql_op = operator_to_sql(&filter.operator);
-        where_clauses.push(format!("{col} {sql_op} {ph}"));
-        param_type_summary.push(format!("{}:{}", filter.field.name, filter.operator));
-        bound_params.push(filter.value.clone());
+        let (clause, param) = filter_clause(
+            &col,
+            &filter.operator,
+            bound_params.len() + 1,
+            filter.value.clone(),
+        );
+        where_clauses.push(clause);
+        if let Some(value) = param {
+            param_type_summary.push(format!("{}:{}", filter.field.name, filter.operator));
+            bound_params.push(value);
+        }
     }
 
     let sql = format!("DELETE FROM {table} WHERE {}", where_clauses.join(" AND "));
@@ -280,6 +304,39 @@ fn returning_all_fields(metadata: &ModelMetadata) -> String {
         .map(|f| dialect::quote_ident(&f.column_name))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Build a WHERE predicate and optional bound parameter for a filter.
+fn filter_clause(
+    col: &str,
+    operator: &str,
+    param_index: usize,
+    value: BindValue,
+) -> (String, Option<BindValue>) {
+    match operator {
+        "is_null" => (format!("{col} IS NULL"), None),
+        "is_not_null" => (format!("{col} IS NOT NULL"), None),
+        "match" => {
+            let placeholder = dialect::placeholder(param_index);
+            (
+                format!("{col} @@ plainto_tsquery({placeholder})"),
+                Some(value),
+            )
+        }
+        op => {
+            let placeholder = dialect::placeholder(param_index);
+            let sql_op = operator_to_sql(op);
+            (format!("{col} {sql_op} {placeholder}"), Some(value))
+        }
+    }
+}
+
+fn vector_metric_to_sql(metric: VectorMetric) -> &'static str {
+    match metric {
+        VectorMetric::L2 => "<->",
+        VectorMetric::Cosine => "<=>",
+        VectorMetric::InnerProduct => "<#>",
+    }
 }
 
 /// Map a Ferrum operator string to its `PostgreSQL` SQL fragment.
@@ -336,6 +393,7 @@ mod tests {
                     field_type: FieldType::Int,
                     allowed_operators: vec!["eq".into(), "gt".into()],
                     nullable: false,
+                    vector_dimensions: None,
                 },
                 FieldMeta {
                     name: "email".into(),
@@ -343,6 +401,7 @@ mod tests {
                     field_type: FieldType::Text,
                     allowed_operators: vec!["eq".into(), "icontains".into()],
                     nullable: false,
+                    vector_dimensions: None,
                 },
             ],
             pk_index: 0,
@@ -358,6 +417,7 @@ mod tests {
             order_by: vec![],
             limit: None,
             offset: None,
+            vector_order_by: None,
         }
     }
 
@@ -587,6 +647,7 @@ mod tests {
             order_by: vec![],
             limit: None,
             offset: None,
+            vector_order_by: None,
         }
     }
 
@@ -664,6 +725,7 @@ mod tests {
             order_by: vec![],
             limit: None,
             offset: None,
+            vector_order_by: None,
         }
     }
 
@@ -731,6 +793,7 @@ mod tests {
             order_by: vec![],
             limit: None,
             offset: None,
+            vector_order_by: None,
         }
     }
 
