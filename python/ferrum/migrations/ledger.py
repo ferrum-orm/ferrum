@@ -92,3 +92,15 @@ async def is_applied(conn: Connection, digest: str) -> bool:
         digest,
     )
     return row is not None
+
+
+async def delete_applied(conn: Connection, digest: str) -> None:
+    """Remove a migration record from the ledger (used by revert only).
+
+    No credentials or bound values appear in errors or logs (CRED-1).
+    """
+    pool = conn._require_pool()
+    await pool.execute(
+        "DELETE FROM ferrum_migrations WHERE digest = $1",
+        digest,
+    )

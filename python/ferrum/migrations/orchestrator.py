@@ -31,7 +31,7 @@ from ferrum.migrations.tokens import verify_token
 
 if TYPE_CHECKING:
     from ferrum.connection import Connection
-    from ferrum.models import FieldMeta, Model
+    from ferrum.models import FieldMeta, Model, ModelMetadata
 
 
 class OperationClass(Enum):
@@ -116,6 +116,11 @@ _SQL_TYPE_ALLOWLIST: frozenset[str] = frozenset(
         "VECTOR",
         "TSVECTOR",
     }
+)
+
+# Allowlist for FK ON DELETE actions — mirrors _ON_DELETE_ALLOWLIST in models.py.
+_FK_ON_DELETE_ALLOWLIST: frozenset[str] = frozenset(
+    {"CASCADE", "SET NULL", "RESTRICT", "SET DEFAULT", "NO ACTION"}
 )
 
 # Index access methods allowed in CREATE INDEX ... USING ...
@@ -242,6 +247,19 @@ def _op_to_sql(op: dict[str, Any]) -> str:
         name = op["name"]
         return f'DROP INDEX IF EXISTS "{name}"'
 
+    if kind == "add_fk":
+        on_delete = str(op.get("on_delete", "CASCADE")).upper()
+        if on_delete not in _FK_ON_DELETE_ALLOWLIST:
+            raise FerrumMigrationError(f"Unsupported ON DELETE action {on_delete!r}. [FERR-M001]")
+        return (
+            f'ALTER TABLE "{op["table"]}" ADD CONSTRAINT "{op["name"]}" '
+            f'FOREIGN KEY ("{op["column"]}") REFERENCES "{op["ref_table"]}" ("{op["ref_column"]}")'
+            f" ON DELETE {on_delete}"
+        )
+
+    if kind == "drop_fk":
+        return f'ALTER TABLE "{op["table"]}" DROP CONSTRAINT IF EXISTS "{op["name"]}"'
+
     if kind == "raw_sql":
         # raw_sql ops with safe=False must have been blocked at the
         # requires_confirmation gate before reaching this point.
@@ -327,8 +345,11 @@ def _field_to_col_def(field_meta: FieldMeta, *, is_pk: bool) -> dict[str, Any]:
 
 
 def compute_plan(
-    model_classes: list[type[Model]],
-    existing_tables: dict[str, list[str]],
+    model_classes: list[type[Model]] | None = None,
+    existing_tables: dict[str, list[str]] | None = None,
+    *,
+    conn: Connection | None = None,
+    models: list[type[Model]] | None = None,
 ) -> dict[str, Any]:
     """Compute a migration plan from model classes against the current DB schema.
 
@@ -345,13 +366,34 @@ def compute_plan(
             of table/column names; no user input reaches SQL identifiers.
         existing_tables: Mapping of table name → list of existing column names,
             as returned by DB introspection.  Pass ``{}`` for a fresh database.
+        conn: Reserved for a future DB-introspection path.  ``None`` means use
+            the supplied/static ``existing_tables`` mapping.
+        models: Keyword alias for ``model_classes`` used by CLI/tests.
 
     Returns:
         A plan dict matching the ``MigrationPlan`` JSON schema expected by
         ``apply()``.  Suitable for ``json.dumps()`` and passing to ``apply()``.
     """
+    del conn
+    if models is not None:
+        if model_classes is not None:
+            raise TypeError("Pass either model_classes or models, not both.")
+        model_classes = models
+    if model_classes is None:
+        raise TypeError("compute_plan() requires model_classes or models.")
+    if existing_tables is None:
+        existing_tables = {}
+
     ops: list[dict[str, Any]] = []
     timestamp = datetime.datetime.now(tz=datetime.UTC).strftime("%Y%m%d_%H%M%S")
+
+    # Pre-build a model-name → table-name lookup so FK target tables are resolved
+    # from actual metadata rather than a naive snake_case conversion.
+    meta_by_name: dict[str, Any] = {cls.__name__: cls.get_metadata() for cls in model_classes}
+
+    # Track M2M join tables already emitted to avoid duplicate CREATE TABLE ops
+    # when both sides of the relationship appear in model_classes.
+    emitted_m2m_tables: set[str] = set()
 
     for cls in model_classes:
         # ModelMetadata is built once at class-definition time and is read-only.
@@ -392,6 +434,85 @@ def compute_plan(
                 if opclasses is not None:
                     index_op["opclasses"] = opclasses
                 ops.append(index_op)
+
+            # Emit AddForeignKey ops for FK / OneToOne relations on new tables.
+            for rel in metadata.relations:
+                if rel.kind in ("fk", "one_to_one"):
+                    target_meta = meta_by_name.get(rel.to_model)
+                    target_table = target_meta.table_name if target_meta else rel.to_model.lower()
+                    constraint_name = f"fk_{table}_{rel.db_column}"
+                    ops.append(
+                        {
+                            "kind": "add_fk",
+                            "table": table,
+                            "name": constraint_name,
+                            "column": rel.db_column,
+                            "ref_table": target_table,
+                            "ref_column": "id",
+                            "on_delete": rel.on_delete or "CASCADE",
+                        }
+                    )
+                elif rel.kind == "m2m" and rel.through_table not in emitted_m2m_tables:
+                    through = rel.through_table
+                    if through is None:
+                        raise FerrumMigrationError(
+                            f"M2M relation {rel.field_name!r} on {table!r} "
+                            "has no through_table. [FERR-M001]"
+                        )
+                    emitted_m2m_tables.add(through)
+
+                    target_meta = meta_by_name.get(rel.to_model)
+                    target_table = target_meta.table_name if target_meta else rel.to_model.lower()
+                    owner_col = f"{table}_id"
+                    target_col = f"{target_table}_id"
+
+                    if through not in existing_tables:
+                        ops.append(
+                            {
+                                "kind": "create_table",
+                                "table": through,
+                                "columns": [
+                                    {
+                                        "name": "id",
+                                        "sql_type": "BIGSERIAL",
+                                        "primary_key": True,
+                                        "not_null": True,
+                                    },
+                                    {
+                                        "name": owner_col,
+                                        "sql_type": "INTEGER",
+                                        "not_null": True,
+                                    },
+                                    {
+                                        "name": target_col,
+                                        "sql_type": "INTEGER",
+                                        "not_null": True,
+                                    },
+                                ],
+                            }
+                        )
+                        ops.append(
+                            {
+                                "kind": "add_fk",
+                                "table": through,
+                                "name": f"fk_{through}_{owner_col}",
+                                "column": owner_col,
+                                "ref_table": table,
+                                "ref_column": "id",
+                                "on_delete": "CASCADE",
+                            }
+                        )
+                        ops.append(
+                            {
+                                "kind": "add_fk",
+                                "table": through,
+                                "name": f"fk_{through}_{target_col}",
+                                "column": target_col,
+                                "ref_table": target_table,
+                                "ref_column": "id",
+                                "on_delete": "CASCADE",
+                            }
+                        )
         else:
             existing_cols = set(existing_tables[table])
             for f in metadata.fields:
@@ -475,7 +596,7 @@ async def apply(
 
     # MIG-2: destructive gate — independently scan ops, never trust the
     # `requires_confirmation` flag from plan JSON (a crafted JSON could lie).
-    destructive_kinds = frozenset({"drop_table", "drop_column", "raw_sql"})
+    destructive_kinds = frozenset({"drop_table", "drop_column", "drop_fk", "raw_sql"})
     is_destructive = any(op.get("kind") in destructive_kinds for op in ops)
     if (is_destructive or plan.get("requires_confirmation")) and not confirm:
         raise FerrumMigrationError(

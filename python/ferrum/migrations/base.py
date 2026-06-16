@@ -17,8 +17,13 @@ Each migration file in the migrations directory should define a single
             ]),
         ]
 
-Class-level ``dependencies`` and ``operations`` are overridden by subclasses;
-the defaults here are empty so a bare ``Migration`` subclass is always valid.
+Class-level ``dependencies``, ``operations``, and ``reverse_operations`` are
+overridden by subclasses; the defaults here are empty so a bare ``Migration``
+subclass is always valid.
+
+An empty ``reverse_operations`` list marks the migration as irreversible.
+``ferrum revert`` will refuse to revert any migration whose
+``reverse_operations`` is empty.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ class Migration:
 
     dependencies: ClassVar[list[str]] = []
     operations: ClassVar[list[Operation]] = []
+    reverse_operations: ClassVar[list[Operation]] = []  # empty = irreversible
 
     @classmethod
     def get_name(cls, file_path: str) -> str:

@@ -111,6 +111,11 @@ _ALLOWED_OPERATORS: dict[str, tuple[str, ...]] = {
     "tsvector": ("match", "is_null"),
 }
 
+# Allowlist for ON DELETE actions in FK constraints (SQL injection guard).
+_ON_DELETE_ALLOWLIST: frozenset[str] = frozenset(
+    {"CASCADE", "SET NULL", "RESTRICT", "SET DEFAULT", "NO ACTION"}
+)
+
 
 def _to_snake_case(name: str) -> str:
     """Convert CamelCase class name to snake_case table name."""
@@ -186,6 +191,22 @@ class Index:
 
 
 @dataclasses.dataclass(frozen=True)
+class RelationMeta:
+    """Immutable descriptor for a single relationship field.
+
+    Populated once during ``_build_metadata`` and stored on ``ModelMetadata``.
+    Never carries bound values, row data, or connection info.
+    """
+
+    field_name: str
+    kind: str  # "fk" | "one_to_one" | "m2m"
+    to_model: str
+    db_column: str | None = None  # backing FK column for fk/one_to_one
+    through_table: str | None = None  # join table for m2m
+    on_delete: str | None = None  # validated ON DELETE action
+
+
+@dataclasses.dataclass(frozen=True)
 class ModelMetadata:
     """Immutable model metadata built once at class-definition time.
 
@@ -200,6 +221,7 @@ class ModelMetadata:
     indexes: tuple[IndexMeta, ...] = ()
     allowed_sort_directions: tuple[str, ...] = ("asc", "desc")
     pk_index: int = 0
+    relations: tuple[RelationMeta, ...] = ()
 
     def to_metadata_json(self) -> str:
         """Serialize to the JSON string expected by ``ferrum._native.compile_query``.
@@ -277,6 +299,118 @@ def _field_type_to_sql(field: FieldMeta) -> str:
     if ft == "tsvector":
         return "TSVECTOR"
     return "TEXT"
+
+
+# ---------------------------------------------------------------------------
+# Relationship descriptor classes (class-level, analogous to ClassVar[_Manager])
+# ---------------------------------------------------------------------------
+
+
+class ForeignKey:
+    """Declare a many-to-one relationship.
+
+    Attach as a ``ClassVar`` so Pydantic ignores it::
+
+        class Post(Model):
+            author_id: int
+            author: ClassVar[ForeignKey] = ForeignKey(to="User", on_delete="CASCADE")
+
+    The backing FK column defaults to ``{field_name}_id``.  Override with
+    ``db_column`` if your schema names it differently.  The column must be
+    declared as a typed field (``author_id: int``) for full Pydantic validation;
+    ``_build_metadata`` will auto-add a virtual ``FieldMeta`` for DDL purposes
+    only when the column is absent from ``model_fields``.
+
+    ``on_delete`` is validated against ``_ON_DELETE_ALLOWLIST`` at class-definition
+    time and interpolated into DDL only via the orchestrator allowlist check.
+    """
+
+    def __init__(
+        self,
+        to: str,
+        *,
+        db_column: str | None = None,
+        on_delete: str = "CASCADE",
+        related_name: str | None = None,
+    ) -> None:
+        self.to = to
+        self.db_column = db_column
+        self.on_delete = on_delete
+        self.related_name = related_name
+
+    def __class_getitem__(cls, item: Any) -> type[ForeignKey]:  # noqa: ANN401
+        """Support ``ForeignKey["ModelName"]`` annotation syntax."""
+        return cls
+
+    def __repr__(self) -> str:
+        return f"ForeignKey(to={self.to!r}, on_delete={self.on_delete!r})"
+
+
+class OneToOne:
+    """Declare a one-to-one relationship (unique FK).
+
+    Usage mirrors :class:`ForeignKey`::
+
+        class Profile(Model):
+            user_id: int
+            user: ClassVar[OneToOne] = OneToOne(to="User", on_delete="CASCADE")
+    """
+
+    def __init__(
+        self,
+        to: str,
+        *,
+        db_column: str | None = None,
+        on_delete: str = "CASCADE",
+        related_name: str | None = None,
+    ) -> None:
+        self.to = to
+        self.db_column = db_column
+        self.on_delete = on_delete
+        self.related_name = related_name
+
+    def __class_getitem__(cls, item: Any) -> type[OneToOne]:  # noqa: ANN401
+        """Support ``OneToOne["ModelName"]`` annotation syntax."""
+        return cls
+
+    def __repr__(self) -> str:
+        return f"OneToOne(to={self.to!r}, on_delete={self.on_delete!r})"
+
+
+class ManyToMany:
+    """Declare a many-to-many relationship (generates a join table).
+
+    Usage::
+
+        class Post(Model):
+            tags: ClassVar[ManyToMany] = ManyToMany(to="Tag")
+
+    The join table name defaults to the two table names sorted alphabetically
+    and joined with ``_`` (e.g. ``post_tag``).  Override with ``through``.
+
+    ``through_fields`` is an optional ``(from_col, to_col)`` tuple that names the
+    FK columns on the join table when they differ from ``{table}_id`` defaults.
+    """
+
+    def __init__(
+        self,
+        to: str,
+        *,
+        through: str | None = None,
+        through_fields: tuple[str, str] | None = None,
+        related_name: str | None = None,
+    ) -> None:
+        self.to = to
+        self.through = through
+        self.through_fields = through_fields
+        self.related_name = related_name
+
+    def __class_getitem__(cls, item: Any) -> type[ManyToMany]:  # noqa: ANN401
+        """Support ``ManyToMany["ModelName"]`` annotation syntax."""
+        return cls
+
+    def __repr__(self) -> str:
+        return f"ManyToMany(to={self.to!r}, through={self.through!r})"
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +601,7 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
             )
         )
 
+    field_column_names: set[str] = {f.column_name for f in fields}
     field_names = {f.name for f in fields}
     indexes: list[IndexMeta] = []
     if meta_cls is not None:
@@ -499,12 +634,65 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                 )
             )
 
+    # --- relationship descriptors (ClassVar-style class attributes) ---
+    # Scan cls.__dict__ directly so we pick up descriptors regardless of whether
+    # the attribute appears in model_fields (it shouldn't — ClassVar excludes it).
+    relations: list[RelationMeta] = []
+    for attr_name, attr_value in cls.__dict__.items():
+        if isinstance(attr_value, (ForeignKey, OneToOne)):
+            kind = "fk" if isinstance(attr_value, ForeignKey) else "one_to_one"
+            on_delete = attr_value.on_delete.upper()
+            if on_delete not in _ON_DELETE_ALLOWLIST:
+                raise ValueError(
+                    f"Model {cls.__name__!r} field {attr_name!r}: "
+                    f"Invalid on_delete {on_delete!r}. "
+                    f"Allowed: {sorted(_ON_DELETE_ALLOWLIST)}."
+                )
+            backing_col = attr_value.db_column or f"{attr_name}_id"
+            if backing_col not in field_column_names:
+                # Auto-add a virtual FieldMeta so the column appears in DDL.
+                # Declare the column explicitly as an int field for full Pydantic
+                # validation support.
+                fields.append(
+                    FieldMeta(
+                        name=backing_col,
+                        column_name=backing_col,
+                        python_type_name="int",
+                        field_type="int",
+                        allowed_operators=_ALLOWED_OPERATORS["int"],
+                        nullable=False,
+                        pk=False,
+                    )
+                )
+                field_column_names.add(backing_col)
+            relations.append(
+                RelationMeta(
+                    field_name=attr_name,
+                    kind=kind,
+                    to_model=attr_value.to,
+                    db_column=backing_col,
+                    on_delete=on_delete,
+                )
+            )
+        elif isinstance(attr_value, ManyToMany):
+            target_table = _to_snake_case(attr_value.to)
+            through_table = attr_value.through or "_".join(sorted([table_name, target_table]))
+            relations.append(
+                RelationMeta(
+                    field_name=attr_name,
+                    kind="m2m",
+                    to_model=attr_value.to,
+                    through_table=through_table,
+                )
+            )
+
     return ModelMetadata(
         table_name=table_name,
         model_name=cls.__name__,
         fields=tuple(fields),
         indexes=tuple(indexes),
         pk_index=pk_index,
+        relations=tuple(relations),
     )
 
 

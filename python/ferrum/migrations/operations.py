@@ -245,6 +245,71 @@ class DropIndex(Operation):
         return f"DropIndex({self.index_name!r})"
 
 
+class AddForeignKey(Operation):
+    """Add a foreign-key constraint to an existing table.
+
+    Generates ``ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY … REFERENCES … ON DELETE …``.
+    The ``on_delete`` value is validated against the orchestrator allowlist before
+    it is interpolated into DDL.
+    """
+
+    def __init__(
+        self,
+        table_name: str,
+        constraint_name: str,
+        column: str,
+        ref_table: str,
+        ref_column: str = "id",
+        *,
+        on_delete: str = "CASCADE",
+    ) -> None:
+        self.table_name = table_name
+        self.constraint_name = constraint_name
+        self.column = column
+        self.ref_table = ref_table
+        self.ref_column = ref_column
+        self.on_delete = on_delete
+
+    def to_op_dict(self) -> dict[str, Any]:
+        return {
+            "kind": "add_fk",
+            "table": self.table_name,
+            "name": self.constraint_name,
+            "column": self.column,
+            "ref_table": self.ref_table,
+            "ref_column": self.ref_column,
+            "on_delete": self.on_delete,
+        }
+
+    @property
+    def classification(self) -> str:
+        return "safe"
+
+    def __repr__(self) -> str:
+        return (
+            f"AddForeignKey({self.table_name!r}, {self.constraint_name!r}, "
+            f"{self.column!r} -> {self.ref_table!r}.{self.ref_column!r})"
+        )
+
+
+class DropForeignKey(Operation):
+    """Drop a foreign-key constraint by name (destructive — removes referential integrity)."""
+
+    def __init__(self, table_name: str, constraint_name: str) -> None:
+        self.table_name = table_name
+        self.constraint_name = constraint_name
+
+    def to_op_dict(self) -> dict[str, Any]:
+        return {"kind": "drop_fk", "table": self.table_name, "name": self.constraint_name}
+
+    @property
+    def classification(self) -> str:
+        return "destructive"
+
+    def __repr__(self) -> str:
+        return f"DropForeignKey({self.table_name!r}, {self.constraint_name!r})"
+
+
 class RawSQL(Operation):
     """Execute a raw SQL statement.
 

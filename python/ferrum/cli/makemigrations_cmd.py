@@ -37,7 +37,7 @@ class Migration(Migration):
     operations = [
 {operations_source}
     ]
-"""
+{reverse_operations_block}"""
 
 
 def _get_all_model_subclasses() -> list[type[Model]]:
@@ -125,7 +125,7 @@ def _index_source(op: dict[str, Any]) -> str:
 def _op_to_source(op: dict[str, Any]) -> str:
     """Convert a plan op dict to an 8-space-indented Python source line.
 
-    Handles ``create_table``, ``add_column``, and ``add_index`` — the kinds
+    Handles ``create_table``, ``add_column``, ``add_index``, and ``add_fk`` — the kinds
     emitted by ``compute_plan`` in v0.1.
 
     Raises:
@@ -155,7 +155,60 @@ def _op_to_source(op: dict[str, Any]) -> str:
     if kind == "add_index":
         return f"        {_index_source(op)},"
 
+    if kind == "add_fk":
+        return (
+            f"        ops.AddForeignKey({op['table']!r}, {op['name']!r}, "
+            f"{op['column']!r}, {op['ref_table']!r}, {op.get('ref_column', 'id')!r}, "
+            f"on_delete={op.get('on_delete', 'CASCADE')!r}),"
+        )
+
     raise ValueError(f"Cannot render op kind {kind!r} to Python source")
+
+
+def _reverse_op_to_source(op_dict: dict[str, Any]) -> str | None:
+    """Return the 8-space-indented source line for the reverse of *op_dict*, or
+    ``None`` if the operation has no safe auto-reverse.
+
+    Reversible ops:
+    - ``create_table`` → ``ops.DropTable(table)``
+    - ``add_column``   → ``ops.DropColumn(table, col)``
+    - ``add_index``    → ``ops.DropIndex(name)``
+    - ``add_fk``       → ``ops.DropForeignKey(table, name)``
+
+    Everything else (``drop_table``, ``drop_column``, ``drop_index``,
+    ``rename_column``, ``raw_sql``, ``drop_fk``) returns ``None``.
+    """
+    kind = op_dict.get("kind", "")
+    if kind == "create_table":
+        return f"        ops.DropTable({op_dict['table']!r}),"
+    if kind == "add_column":
+        return f"        ops.DropColumn({op_dict['table']!r}, {op_dict['name']!r}),"
+    if kind == "add_index":
+        return f"        ops.DropIndex({op_dict['name']!r}),"
+    if kind == "add_fk":
+        return f"        ops.DropForeignKey({op_dict['table']!r}, {op_dict['name']!r}),"
+    return None
+
+
+def _build_reverse_block(ops: list[dict[str, Any]]) -> str:
+    """Build the ``reverse_operations = [...]`` class body block.
+
+    Returns a string that starts with a newline so it can be appended directly
+    after the closing ``]`` of the ``operations`` list in the migration template.
+    If any op has no known reverse, the block uses the irreversible-comment form
+    with an empty list so the developer can fill it in manually.
+    """
+    rev_lines = [_reverse_op_to_source(op) for op in ops]
+    has_irreversible = any(line is None for line in rev_lines)
+    if has_irreversible:
+        return (
+            "\n    # WARNING: one or more operations cannot be auto-reversed.\n"
+            "    # Populate reverse_operations manually or leave empty to mark"
+            " this migration irreversible.\n"
+            "    reverse_operations = []\n"
+        )
+    joined = "\n".join(line for line in rev_lines if line is not None)
+    return f"\n    reverse_operations = [\n{joined}\n    ]\n"
 
 
 async def run_makemigrations(
@@ -212,9 +265,12 @@ async def run_makemigrations(
         print(f"Error: cannot render migration ops to source: {exc}", file=sys.stderr)
         return 2
 
+    reverse_block = _build_reverse_block(ops)
+
     content = _MIGRATION_TEMPLATE.format(
         dependencies=dependencies,
         operations_source=ops_source,
+        reverse_operations_block=reverse_block,
     )
 
     migrations_dir.mkdir(parents=True, exist_ok=True)

@@ -81,6 +81,55 @@ def migrate_cmd(
     migrate(env=env, confirm=confirm, dry_run=dry_run, migrations_dir=migrations_dir)
 
 
+@cli.command("inspectdb")
+def inspectdb_cmd(
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output file or directory (default: stdout)",
+    ),
+    schema: str = typer.Option(
+        "public",
+        "--schema",
+        help="PostgreSQL schema to introspect",
+    ),
+) -> None:
+    """Generate Ferrum model definitions from an existing database schema."""
+    from ferrum.cli.inspectdb_cmd import dispatch_inspectdb
+
+    dispatch_inspectdb(output=output, schema=schema)
+
+
+@cli.command("revert")
+def revert_cmd(
+    target: str | None = typer.Option(
+        None,
+        "--target",
+        help="Revert down to (exclusive) this migration name",
+    ),
+    env: str = typer.Option(
+        "development",
+        "--env",
+        help="Target environment (default: development)",
+    ),
+    confirm: bool = typer.Option(
+        False,
+        "--confirm",
+        help="Confirm destructive reverse operations",
+    ),
+    migrations_dir: Path | None = typer.Option(
+        None,
+        "--migrations-dir",
+        help="Migrations directory (default: ./migrations)",
+    ),
+) -> None:
+    """Revert the last applied migration (or down to --target)."""
+    from ferrum.cli.revert_cmd import dispatch_revert
+
+    dispatch_revert(target=target, env=env, confirm=confirm, migrations_dir=migrations_dir)
+
+
 @cli.command("showmigrations")
 def showmigrations_cmd(
     migrations_dir: Path | None = typer.Option(
@@ -150,6 +199,17 @@ def migrations_apply_cmd(
         dry_run=dry_run,
         environment=environment,
     )
+
+
+@cli.command("resetdb")
+def resetdb_cmd(
+    env: str = typer.Option("development", "--env"),
+    confirm: bool = typer.Option(False, "--confirm", help="Required — confirm destructive reset"),
+) -> None:
+    """Drop all Ferrum model tables and clear the migration ledger. Requires --confirm."""
+    from ferrum.cli.resetdb_cmd import dispatch_resetdb
+
+    dispatch_resetdb(env=env, confirm=confirm)
 
 
 def app() -> None:
