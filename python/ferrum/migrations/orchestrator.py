@@ -600,9 +600,7 @@ async def apply(
             raise FerrumMigrationError("Token validation failed. [FERR-M001]")
         # MIG-6 replay guard: token-authenticated applies are single-use via ledger.
         if await is_applied(conn, plan_digest):
-            raise FerrumMigrationError(
-                "Migration plan has already been applied. [FERR-M003]"
-            )
+            raise FerrumMigrationError("Migration plan has already been applied. [FERR-M003]")
 
     # MIG-2: destructive gate — independently scan ops, never trust the
     # `requires_confirmation` flag from plan JSON (a crafted JSON could lie).

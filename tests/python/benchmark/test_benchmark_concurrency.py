@@ -1,6 +1,6 @@
 """Benchmark: concurrent QuerySet execution under pool pressure.
 
-Workloads: 100–1000 concurrent select tasks with a 10–50 connection pool.
+Workloads: 100-1000 concurrent select tasks with a 10-50 connection pool.
 Requires ``FERRUM_TEST_DSN``.
 """
 
@@ -52,7 +52,7 @@ async def test_concurrent_select_100_tasks(
 
     try:
         total = await benchmark.pedantic(run_concurrent, rounds=5, iterations=1)
-        assert total == 2000  # 100 tasks × 20 rows each
+        assert total == 2000  # 100 tasks x 20 rows each
     finally:
         async with pool.acquire() as raw_conn:
             await raw_conn.execute("DROP TABLE IF EXISTS ferrum_bench_concurrent")

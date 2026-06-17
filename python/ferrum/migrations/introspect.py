@@ -217,9 +217,7 @@ def detect_drift(
         if extra:
             unexpected_columns[table] = extra
 
-    has_drift = bool(
-        missing_tables or unexpected_tables or missing_columns or unexpected_columns
-    )
+    has_drift = bool(missing_tables or unexpected_tables or missing_columns or unexpected_columns)
 
     guidance = ""
     if has_drift:

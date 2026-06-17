@@ -1,11 +1,11 @@
 //! Criterion benchmarks for row hydration at 1 / 10 / 100 / 1000 rows.
 //!
-//! Budget (ARCHITECTURE.md §14 / benches/README.md): hydrate_rows p99 < 5 ms @ 100 rows.
+//! Budget (ARCHITECTURE.md §14 / benches/README.md): `hydrate_rows` p99 < 5 ms @ 100 rows.
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use ferrum_core::hydrate::hydrate_rows;
-use ferrum_core::ir::metadata::{FieldMeta, FieldType, ModelMetadata};
 use ferrum_core::hydrate::RowPayload;
+use ferrum_core::ir::metadata::{FieldMeta, FieldType, ModelMetadata};
 use serde_json::json;
 
 fn bench_metadata() -> ModelMetadata {
@@ -54,7 +54,7 @@ fn make_rows(count: usize) -> Vec<RowPayload> {
     (0..count)
         .map(|i| {
             serde_json::from_value(json!({
-                "id": i as i64 + 1,
+                "id": i64::try_from(i).expect("bench row index") + 1,
                 "title": format!("Post title {i}"),
                 "body": if i % 3 == 0 { serde_json::Value::Null } else { json!(format!("Body {i}")) },
                 "published": i % 2 == 0,
