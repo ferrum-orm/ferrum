@@ -1,10 +1,11 @@
 ---
-name: product-designer
-description: >-
   Ferrum product designer. Reviews developer experience, onboarding, public API ergonomics,
   error message quality, and documentation flow. Use when shaping user-facing API design, CLI
   UX, error copy, or onboarding paths before or after implementation.
 tools: ["Read", "Grep", "Glob"]
+name: product-designer
+model: gemini-3.5-flash
+description: >-
 readonly: true
 ---
 

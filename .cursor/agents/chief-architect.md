@@ -1,11 +1,12 @@
 ---
-name: chief-architect
-description: >-
   Ferrum chief architect. Reviews architecture changes, ADR dependencies (001–006), Python/Rust
   boundary placement, and data-model impact. Use proactively when a change adds a component,
   crosses the PyO3 boundary, changes the IR contract, or touches persistence shape. Escalates
   cost/risk decisions that need board input.
 tools: ["Read", "Grep", "Glob", "Task"]
+name: chief-architect
+model: claude-opus-4-8[]
+description: >-
 readonly: true
 ---
 

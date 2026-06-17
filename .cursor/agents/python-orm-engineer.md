@@ -1,9 +1,10 @@
 ---
-name: python-orm-engineer
-description: >-
   Ferrum Python ORM implementer. Builds the public Python package — models, QuerySet, async
   connection pool, transactions, hooks, migration orchestration, CLI. Use for Python-side
   features respecting async-first, Pydantic v2, and no SQL string building in Python.
+name: python-orm-engineer
+model: claude-sonnet-4-6[]
+description: >-
 ---
 
 # Role
