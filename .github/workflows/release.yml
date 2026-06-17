@@ -166,7 +166,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install wheels/*.whl pytest pytest-asyncio
+      # Install the built wheel WITH the cli/dotenv extras (the security suite
+      # imports ferrum.cli, which needs rich/typer). --find-links resolves
+      # ferrum to the local wheel so we still qualify the built artifact.
+      - run: pip install "ferrum[cli,dotenv]" --find-links wheels/ pytest pytest-asyncio
       - name: Run security qualification on the wheel
         run: pytest tests/python/security -m security -v
 
