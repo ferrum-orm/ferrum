@@ -27,8 +27,10 @@ jobs:
           - platform: macos-arm64
             runs-on: macos-latest
             cibw-archs: arm64
+          # Intel macOS (macos-13) runners are deprecated and queue indefinitely;
+          # cross-compile the x86_64 wheel on the Apple-Silicon runner instead.
           - platform: macos-x86_64
-            runs-on: macos-13
+            runs-on: macos-latest
             cibw-archs: x86_64
 
     steps:
@@ -42,7 +44,11 @@ jobs:
         env:
           CIBW_BUILD: "cp311-* cp312-* cp313-*"
           CIBW_ARCHS: ${{ matrix.cibw-archs }}
-          CIBW_BEFORE_ALL: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+          # Linux wheels build inside the manylinux container, which ships no Rust.
+          CIBW_BEFORE_ALL_LINUX: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+          # On macOS install both apple targets so maturin can honor cibuildwheel's
+          # ARCHFLAGS and cross-compile the requested arch (x86_64 on the arm64 runner).
+          CIBW_BEFORE_ALL_MACOS: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && $HOME/.cargo/bin/rustup target add x86_64-apple-darwin aarch64-apple-darwin"
           CIBW_ENVIRONMENT: 'PATH="$HOME/.cargo/bin:$PATH"'
 
       - uses: actions/upload-artifact@v4
