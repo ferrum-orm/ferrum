@@ -194,15 +194,9 @@ def _make_native_mod(
 ) -> object:
     """Return a minimal fake ``ferrum._native`` module for map_native_error tests."""
     mod = mock.MagicMock()
-    mod.FerrumCompileError = compile_cls or type(
-        "FerrumCompileError", (RuntimeError,), {}
-    )
-    mod.FerrumHydrationError = hydration_cls or type(
-        "FerrumHydrationError", (RuntimeError,), {}
-    )
-    mod.FerrumInternalError = internal_cls or type(
-        "FerrumInternalError", (RuntimeError,), {}
-    )
+    mod.FerrumCompileError = compile_cls or type("FerrumCompileError", (RuntimeError,), {})
+    mod.FerrumHydrationError = hydration_cls or type("FerrumHydrationError", (RuntimeError,), {})
+    mod.FerrumInternalError = internal_cls or type("FerrumInternalError", (RuntimeError,), {})
     return mod
 
 

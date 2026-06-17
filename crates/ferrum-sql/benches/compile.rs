@@ -1,6 +1,6 @@
 //! Criterion benchmarks for the Rust compile path (SELECT emission).
 //!
-//! Budget (ARCHITECTURE.md §14 / benches/README.md): compile_query p99 < 1 ms.
+//! Budget (ARCHITECTURE.md §14 / benches/README.md): `compile_query` p99 < 1 ms.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use ferrum_core::ir::{
