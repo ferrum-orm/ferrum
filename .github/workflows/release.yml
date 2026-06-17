@@ -49,6 +49,10 @@ jobs:
       - uses: pypa/cibuildwheel@v4.1.0
         env:
           CIBW_BUILD: "cp311-* cp312-* cp313-*"
+          # ADR-005 ships manylinux (glibc) wheels only; skip musllinux so the
+          # linux artifact doesn't carry a musl wheel that pip can't install on
+          # the glibc smoke-install / security-gate runners.
+          CIBW_SKIP: "*musllinux*"
           CIBW_ARCHS: ${{ matrix.cibw-archs }}
           # Linux wheels build inside the manylinux container, which ships no Rust.
           CIBW_BEFORE_ALL_LINUX: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
