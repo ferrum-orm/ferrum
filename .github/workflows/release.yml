@@ -38,7 +38,7 @@ jobs:
         if: matrix.cibw-archs == 'aarch64'
         uses: docker/setup-qemu-action@v3
 
-      - uses: pypa/cibuildwheel@v2
+      - uses: pypa/cibuildwheel@v4.1.0
         env:
           CIBW_BUILD: "cp311-* cp312-* cp313-*"
           CIBW_ARCHS: ${{ matrix.cibw-archs }}
