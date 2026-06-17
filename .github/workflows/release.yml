@@ -23,8 +23,10 @@ jobs:
           - platform: linux-x86_64
             runs-on: ubuntu-latest
             cibw-archs: x86_64
+          # Native ARM64 runner (free for public repos) — avoids QEMU emulation,
+          # which made the Rust compile ~5x slower and gated the whole stage.
           - platform: linux-aarch64
-            runs-on: ubuntu-latest
+            runs-on: ubuntu-24.04-arm
             cibw-archs: aarch64
           - platform: macos-arm64
             runs-on: macos-latest
@@ -41,10 +43,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up QEMU (for aarch64 cross-compile)
-        if: matrix.cibw-archs == 'aarch64'
-        uses: docker/setup-qemu-action@v3
 
       - uses: pypa/cibuildwheel@v4.1.0
         env:
