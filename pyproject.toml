@@ -70,8 +70,11 @@ Documentation = "https://ferrumdb.github.io/ferrum"
 python-source = "python"
 module-name = "ferrum._native"
 manifest-path = "crates/ferrum-pyo3/Cargo.toml"
-# abi3 wheel targeting CPython 3.11+ (ADR-005)
-features = ["pyo3/abi3-py311"]
+# abi3 wheel targeting CPython 3.11+ (ADR-005).
+# extension-module: build a Python extension that resolves CPython symbols at
+# runtime instead of linking libpython at build time (no libpython3.x on the
+# manylinux/cibuildwheel host or the setup-python lib path).
+features = ["pyo3/abi3-py311", "pyo3/extension-module"]
 
 # ---------------------------------------------------------------------------
 # ruff
