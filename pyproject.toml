@@ -3,7 +3,7 @@ requires = ["maturin>=1.7,<2"]
 build-backend = "maturin"
 
 [project]
-name = "ferrum"
+name = "ferrum-orm"
 version = "0.1.0"
 description = "Next-generation async ORM for Python with a Rust-powered core"
 license = { text = "Apache-2.0" }
@@ -39,8 +39,8 @@ dotenv = ["python-dotenv>=1.0"]
 uuid7 = ["uuid6>=2024.1"]
 fastapi = []  # uses the host's FastAPI; no extra deps needed
 dev = [
-    "ferrum[cli]",
-    "ferrum[dotenv]",
+    "ferrum-orm[cli]",
+    "ferrum-orm[dotenv]",
     "maturin>=1.7,<2",
     "pytest>=8",
     "pytest-asyncio>=0.23",
