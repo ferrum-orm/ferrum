@@ -16,6 +16,8 @@ jobs:
     name: Build wheels (${{ matrix.platform }})
     runs-on: ${{ matrix.runs-on }}
     strategy:
+      # Don't cancel the other platform wheels if one fails.
+      fail-fast: false
       matrix:
         include:
           - platform: linux-x86_64
@@ -27,11 +29,15 @@ jobs:
           - platform: macos-arm64
             runs-on: macos-latest
             cibw-archs: arm64
+            macos-target: "11.0"
           # Intel macOS (macos-13) runners are deprecated and queue indefinitely;
           # cross-compile the x86_64 wheel on the Apple-Silicon runner instead.
           - platform: macos-x86_64
             runs-on: macos-latest
             cibw-archs: x86_64
+            # rustc's minimum is 10.12, so the abi3 .so can't satisfy the 10.9
+            # floor cibuildwheel/delocate would otherwise tag x86_64 wheels with.
+            macos-target: "10.12"
 
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +56,9 @@ jobs:
           # ARCHFLAGS and cross-compile the requested arch (x86_64 on the arm64 runner).
           CIBW_BEFORE_ALL_MACOS: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && $HOME/.cargo/bin/rustup target add x86_64-apple-darwin aarch64-apple-darwin"
           CIBW_ENVIRONMENT: 'PATH="$HOME/.cargo/bin:$PATH"'
+          # Platform overrides fully replace CIBW_ENVIRONMENT on macOS, so repeat PATH.
+          # Pin the deployment target per-arch so the wheel tag matches the .so's min macOS.
+          CIBW_ENVIRONMENT_MACOS: 'PATH="$HOME/.cargo/bin:$PATH" MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos-target }}'
 
       - uses: actions/upload-artifact@v4
         with:
