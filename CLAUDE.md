@@ -72,8 +72,9 @@ choice.
   full-repo builds, unless the task scope warrants more.
 - **Production source is not implemented yet.** Do not add ORM source as part of
   documentation, workspace-setup, or planning tasks.
-- **Git commits:** if you commit, add exactly `Co-Authored-By: Paperclip <noreply@paperclip.ing>`
-  to the end of the commit message.
+- **Git commits:** commit as `ferrum-orm <294406588+ferrum-orm@users.noreply.github.com>` and do
+  **not** add any `Co-Authored-By:` trailer. This repo must show a single GitHub contributor
+  (ferrum-orm); any author/committer/co-author identity other than that re-adds a contributor.
 
 ## Definition of done (full checklist in `AGENTS.md` §8)
 
