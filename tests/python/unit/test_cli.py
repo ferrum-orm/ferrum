@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from typer.testing import CliRunner
 
@@ -10,6 +12,13 @@ from ferrum.cli import app as app_module
 from ferrum.cli.app import cli
 
 runner = CliRunner()
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text: str) -> str:
+    """Strip Rich/Click ANSI codes so help assertions work in CI."""
+    return _ANSI_ESCAPE.sub("", text)
 
 
 def test_root_help_renders() -> None:
@@ -23,8 +32,9 @@ def test_root_help_renders() -> None:
 def test_makemigrations_help_lists_flags() -> None:
     result = runner.invoke(cli, ["makemigrations", "--help"])
     assert result.exit_code == 0
-    assert "--name" in result.stdout
-    assert "--migrations-dir" in result.stdout
+    help_text = _plain(result.stdout)
+    assert "--name" in help_text
+    assert "--migrations-dir" in help_text
 
 
 def test_migrations_subcommand_help() -> None:
