@@ -44,7 +44,6 @@ jobs:
           CIBW_ARCHS: ${{ matrix.cibw-archs }}
           CIBW_BEFORE_ALL: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
           CIBW_ENVIRONMENT: 'PATH="$HOME/.cargo/bin:$PATH"'
-          CIBW_BUILD_FRONTEND: "build[uv]"
 
       - uses: actions/upload-artifact@v4
         with:
