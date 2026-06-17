@@ -190,3 +190,7 @@ jobs:
           path: dist/
           merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # The 0.1.0 wheels already uploaded before the sdist failed; skip files
+          # that already exist so the re-run just adds the (now-fixed) sdist.
+          skip-existing: true
