@@ -84,6 +84,34 @@ jobs:
           path: dist/*.tar.gz
 
   # ---------------------------------------------------------------------------
+  # Windows sdist smoke: Windows is sdist-only in v0.1 (ADR-005). Prove that
+  # `pip install` from the sdist compiles the Rust extension and imports on
+  # Windows. No Windows wheel is produced.
+  # ---------------------------------------------------------------------------
+  windows-sdist-smoke:
+    name: Windows sdist smoke
+    needs: [build-sdist]
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist/
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install from sdist (compiles the Rust extension) and import
+        run: |
+          pip install dist/*.tar.gz
+          python -c "import ferrum; print(ferrum.__version__)"
+
+  # ---------------------------------------------------------------------------
   # Smoke-install each wheel
   # ---------------------------------------------------------------------------
   smoke-install:
@@ -143,7 +171,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish:
     name: Publish to PyPI
-    needs: [security-gate-wheel, build-sdist]
+    needs: [security-gate-wheel, build-sdist, windows-sdist-smoke]
     runs-on: ubuntu-latest
     environment: release
     permissions:
