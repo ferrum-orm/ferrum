@@ -37,7 +37,7 @@ async def run_showmigrations(migrations_dir: Path) -> int:
         async with connect() as conn:
             await ledger.ensure_ledger(conn)
             for module in modules:
-                digest = ledger.compute_digest(module.name, module.path.read_text())
+                digest = ledger.compute_digest(module.name, module.path.read_text(encoding="utf-8"))
                 applied = await ledger.is_applied(conn, digest)
                 if applied:
                     table.add_row("[green][X][/green]", module.name)

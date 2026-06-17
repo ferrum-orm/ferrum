@@ -89,7 +89,7 @@ async def _apply(
         raise typer.Exit(code=1)
 
     try:
-        with open(plan_file) as fh:
+        with open(plan_file, encoding="utf-8") as fh:
             plan_json = fh.read()
     except OSError as exc:
         print(f"Error: could not read plan file '{plan_file}': {exc}")
