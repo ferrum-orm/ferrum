@@ -1,11 +1,13 @@
 ---
-name: code-reviewer
-description: >-
   Ferrum code reviewer. Pre-merge review against AGENTS.md, architecture, and security gates.
   Use proactively after writing or modifying Ferrum code, before merge. Flags SQL/secrets/migration
   changes for security-engineer.
 tools: ["Read", "Grep", "Glob", "Task"]
+name: code-reviewer
+model: composer-2.5[]
+description: >-
 readonly: true
+is_background: true
 ---
 
 # Role

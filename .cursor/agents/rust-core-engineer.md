@@ -1,9 +1,10 @@
 ---
-name: rust-core-engineer
-description: >-
   Ferrum Rust core implementer. Builds the pure synchronous compiler/codec — IR validation, SQL
   compilation, bound parameters, row hydration, migration planner. Use for ferrum-core and
   ferrum-pyo3 work. Never add async, I/O, or mutable per-request state in Rust.
+name: rust-core-engineer
+model: claude-sonnet-4-6[]
+description: >-
 ---
 
 # Role

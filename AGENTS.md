@@ -184,13 +184,13 @@ ChiefArchitect.
 
 - Task runner: `mise run <task>`; tasks defined in `mise.toml` at repo root.
 - Python deps managed with `uv`; `uv sync --extra dev` installs dev extras including maturin; `maturin` must be under `[project.optional-dependencies] dev`, not only `[build-system] requires`.
-- PyO3 extension crate at `crates/ferrum-pyo3/Cargo.toml`; `pyproject.toml` sets maturin `manifest-path` so maturin does not use the workspace root.
-- Python package at `python/ferrum/`; Rust crates at `crates/ferrum-{core,sql,pyo3,migrate}/`.
+- Python package at `python/ferrum/` (not `src/`); Rust crates at `crates/ferrum-{core,sql,pyo3,migrate}/`; PyO3 extension at `crates/ferrum-pyo3/Cargo.toml` with maturin `manifest-path` in `pyproject.toml`.
 - Full local CI parity: `mise run ci-local`; scoped verification: Rust-only → `test-rust lint-rust`; Python-only → `test-python-unit`; extension/boundary → `dev` plus integration or security tests.
 - `rustfmt.toml` stable-rustfmt options only; `.importlinter` `root_packages` must use multi-line list syntax.
 - Canonical connection env var is `FERRUM_DATABASE_URL` (not `DATABASE_URL`); library `ferrum.connect()` reads env only — no dotenv in core code.
 - CLI bootstrap (`ferrum.cli.bootstrap`) runs before subcommands: optional `ferrum.toml`, dotenv load (`override=False`), and settings/model import; discovery order is `FERRUM_SETTINGS` → `[ferrum].settings` in `ferrum.toml` → `ferrum_conf.py`.
-- Ferrum CLI is Typer-based and requires the `ferrum[cli]` extra (typer + rich); `ferrum makemigrations` scans `Model.__subclasses__()` so models must be imported via bootstrap settings module.
+- Ferrum CLI is Typer-based and requires the `ferrum[cli]` extra (typer + rich); subcommands include `makemigrations`, `migrate`, `showmigrations`, `revert`, `resetdb` (--confirm required), and `inspectdb` (scaffold models from DB); `makemigrations` scans `Model.__subclasses__()` so models must be imported via bootstrap settings module.
 - pgvector runtime I/O: after `ferrum.connect()`, call `ferrum.ext.pgvector.register_vector_codecs(conn)` — runs `CREATE EXTENSION IF NOT EXISTS vector` and registers asyncpg codecs.
 - `ferrum-local-tests` sibling project at `../ferrum-local-tests/`; editable install via `[tool.uv.sources] ferrum = { path = "../ferrum", editable = true }`.
-- GitHub Actions CI jobs require a virtualenv before `maturin develop`: `python -m venv .venv && . .venv/bin/activate` before pip/maturin/pytest steps.
+- GitHub Actions CI jobs require a virtualenv before `maturin develop`: `python -m venv .venv && . .venv/bin/activate` before pip/maturin/pytest steps; `release.yml` builds abi3 wheels on `v*` tag push and publishes to PyPI via OIDC trusted publishing.
+- Model relationships use ClassVar descriptors (`ForeignKey`, `OneToOne`, `ManyToMany`) on the model class; FK/OTO use `{field}_id` columns and M2M uses join tables via migration ops.
