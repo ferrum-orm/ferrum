@@ -56,7 +56,7 @@ async def run_migrate(
             # Pair each module with its content-keyed digest and filter applied.
             unapplied: list[tuple[_loader.MigrationModule, str]] = []
             for module in modules:
-                content = module.path.read_text()
+                content = module.path.read_text(encoding="utf-8")
                 digest = _ledger.compute_digest(module.name, content)
                 if not await _ledger.is_applied(conn, digest):
                     unapplied.append((module, digest))

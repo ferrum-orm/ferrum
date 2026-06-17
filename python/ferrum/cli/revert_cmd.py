@@ -57,7 +57,7 @@ async def run_revert(
             # Pair each module with its content-keyed digest; filter to applied.
             applied: list[tuple[_loader.MigrationModule, str]] = []
             for module in modules:
-                content = module.path.read_text()
+                content = module.path.read_text(encoding="utf-8")
                 digest = _ledger.compute_digest(module.name, content)
                 if await _ledger.is_applied(conn, digest):
                     applied.append((module, digest))

@@ -297,7 +297,7 @@ async def run_inspectdb(
                 fk_by_table.get(table, {}),
             )
             dest = output / f"{table}_model.py"
-            dest.write_text(_HEADER + "\n\n" + class_src + "\n")
+            dest.write_text(_HEADER + "\n\n" + class_src + "\n", encoding="utf-8")
             print(f"  wrote {dest}")
         return 0
 
@@ -316,7 +316,7 @@ async def run_inspectdb(
     if output is None:
         print(full_src, end="")
     else:
-        output.write_text(full_src)
+        output.write_text(full_src, encoding="utf-8")
         print(f"  wrote {output}")
 
     return 0
