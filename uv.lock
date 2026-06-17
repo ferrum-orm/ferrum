@@ -258,7 +258,7 @@ wheels = [
 ]
 
 [[package]]
-name = "ferrum"
+name = "ferrum-orm"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
@@ -296,8 +296,8 @@ uuid7 = [
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.29" },
-    { name = "ferrum", extras = ["cli"], marker = "extra == 'dev'" },
-    { name = "ferrum", extras = ["dotenv"], marker = "extra == 'dev'" },
+    { name = "ferrum-orm", extras = ["cli"], marker = "extra == 'dev'" },
+    { name = "ferrum-orm", extras = ["dotenv"], marker = "extra == 'dev'" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.100" },
     { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2" },
     { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.7,<2" },

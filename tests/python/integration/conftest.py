@@ -13,11 +13,36 @@ The DSN must point to a PostgreSQL instance where the test user has CREATE TABLE
 from __future__ import annotations
 
 import os
+import uuid
 
 import pytest
 import pytest_asyncio
 
 import ferrum
+
+
+@pytest.fixture
+def require_native() -> None:
+    """Skip when the maturin-built Rust extension is not importable."""
+    pytest.importorskip(
+        "ferrum._native",
+        reason="Rust extension not built — run `maturin develop`",
+    )
+
+
+@pytest.fixture
+def unique_suffix() -> str:
+    """Unique suffix for transient table names in parallel-safe integration tests."""
+    return uuid.uuid4().hex[:12]
+
+
+@pytest.fixture
+def pg_dsn() -> str:
+    """DSN string for tests that manage their own connection lifecycle."""
+    dsn = os.environ.get("FERRUM_TEST_DSN")
+    if not dsn:
+        pytest.skip("FERRUM_TEST_DSN not set")
+    return dsn
 
 
 @pytest_asyncio.fixture

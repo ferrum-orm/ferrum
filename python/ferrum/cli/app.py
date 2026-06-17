@@ -26,11 +26,16 @@ def init_cmd(
         "--name",
         help="Project name / directory (default: current directory)",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Overwrite existing scaffold files (default: skip existing)",
+    ),
 ) -> None:
     """Scaffold a new Ferrum project."""
     from ferrum.cli.init import run_init
 
-    run_init(name=name)
+    run_init(name=name, force=force)
 
 
 @cli.command("makemigrations")

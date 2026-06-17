@@ -1,0 +1,43 @@
+{
+  "regression_factor": 1.1,
+  "rust": {
+    "compile_query": {
+      "p99_ms": 1.0,
+      "criterion_id": "compile_query/select_filtered/representative"
+    },
+    "hydrate_rows_1": {
+      "p99_ms": 0.5,
+      "criterion_id": "hydrate_rows/rows/1"
+    },
+    "hydrate_rows_10": {
+      "p99_ms": 1.0,
+      "criterion_id": "hydrate_rows/rows/10"
+    },
+    "hydrate_rows_100": {
+      "p99_ms": 5.0,
+      "criterion_id": "hydrate_rows/rows/100"
+    },
+    "hydrate_rows_1000": {
+      "p99_ms": 40.0,
+      "criterion_id": "hydrate_rows/rows/1000"
+    }
+  },
+  "python": {
+    "hook_dispatch": {
+      "p99_us": 500.0,
+      "pytest_name": "test_hook_dispatch_overhead"
+    },
+    "crud_create": {
+      "p99_ms": 25.0,
+      "pytest_name": "test_create_overhead"
+    },
+    "crud_read": {
+      "p99_ms": 15.0,
+      "pytest_name": "test_filter_get_overhead"
+    },
+    "concurrent_select_100": {
+      "p99_ms": 500.0,
+      "pytest_name": "test_concurrent_select_100_tasks"
+    }
+  }
+}
