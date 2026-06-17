@@ -52,11 +52,14 @@ jobs:
           # the glibc smoke-install / security-gate runners.
           CIBW_SKIP: "*musllinux*"
           CIBW_ARCHS: ${{ matrix.cibw-archs }}
-          # Linux wheels build inside the manylinux container, which ships no Rust.
-          CIBW_BEFORE_ALL_LINUX: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
-          # On macOS install both apple targets so maturin can honor cibuildwheel's
-          # ARCHFLAGS and cross-compile the requested arch (x86_64 on the arm64 runner).
-          CIBW_BEFORE_ALL_MACOS: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && $HOME/.cargo/bin/rustup target add x86_64-apple-darwin aarch64-apple-darwin"
+          # The ARM Linux/macOS images ship a rustup toolchain already; re-running
+          # rustup-init over it conflicts ("detected conflict: bin/cargo-clippy").
+          # Install only if cargo is absent, with --profile minimal (no clippy) to
+          # avoid the conflict on the manylinux x86_64 container that has no Rust.
+          CIBW_BEFORE_ALL_LINUX: "command -v cargo >/dev/null 2>&1 || [ -x $HOME/.cargo/bin/cargo ] || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"
+          # Same guard on macOS, then always add the apple targets so maturin can
+          # honor cibuildwheel's ARCHFLAGS and cross-compile x86_64 on the arm64 runner.
+          CIBW_BEFORE_ALL_MACOS: "command -v cargo >/dev/null 2>&1 || [ -x $HOME/.cargo/bin/cargo ] || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal; export PATH=$HOME/.cargo/bin:$PATH; rustup target add x86_64-apple-darwin aarch64-apple-darwin"
           CIBW_ENVIRONMENT: 'PATH="$HOME/.cargo/bin:$PATH"'
           # Platform overrides fully replace CIBW_ENVIRONMENT on macOS, so repeat PATH.
           # Pin the deployment target per-arch so the wheel tag matches the .so's min macOS.
