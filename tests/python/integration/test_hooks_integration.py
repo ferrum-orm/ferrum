@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import pytest
-from helpers import transient_table
 
 import ferrum
 from ferrum.hooks import _TIER_A_KEYS, clear_hooks, register_hook
+
+from .helpers import transient_table
 
 
 @pytest.mark.integration

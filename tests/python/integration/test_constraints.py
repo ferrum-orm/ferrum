@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import pytest
-from helpers import transient_table
 
 import ferrum
 from ferrum.errors import FerrumIntegrityError
+
+from .helpers import transient_table
 
 
 @pytest.mark.integration

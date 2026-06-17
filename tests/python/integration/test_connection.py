@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from helpers import raw_pool, seed_bulk_text_rows, transient_table
 
 import ferrum
 from ferrum.connection import Connection
 from ferrum.errors import FerrumConnectionError
+
+from .helpers import raw_pool, seed_bulk_text_rows, transient_table
 
 
 @pytest.mark.integration

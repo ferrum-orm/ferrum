@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 
 import pytest
-from helpers import raw_pool
 
 import ferrum
 from ferrum.errors import FerrumMigrationError
@@ -16,6 +15,8 @@ from ferrum.migrations.ledger import (
     is_applied,
     record_applied,
 )
+
+from .helpers import raw_pool
 
 
 def _create_table_plan(table: str) -> str:
