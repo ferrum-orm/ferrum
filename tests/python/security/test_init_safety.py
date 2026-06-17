@@ -3,9 +3,7 @@
 INIT-1: Generated docker-compose.yml binds PostgreSQL to 127.0.0.1 (not 0.0.0.0).
 INIT-2: Generated .gitignore excludes .env files; init refuses path traversal;
         scaffolding uses placeholder credentials only (no real secrets in tracked
-        files); generation is idempotent (no silent overwrite).
-
-Tests marked ``pytest.mark.skip`` require the full CLI flag surface from Wave 4.
+        files); generation is idempotent (no silent overwrite) unless ``--force``.
 """
 
 from __future__ import annotations
@@ -109,13 +107,15 @@ class TestINIT2SecretHygiene:
             "init() silently overwrote an existing .gitignore (INIT-2 idempotency violated)"
         )
 
-    @pytest.mark.skip(
-        reason=(
-            "INIT-2 full: --force overwrite flag requires the CLI surface "
-            "(Wave 4 — ferrum.cli.init). Invariant: explicit --force flag allows "
-            "overwrite; without it, init skips existing files silently."
-        )
-    )
-    def test_init_force_flag_allows_overwrite(self) -> None:
+    def test_init_force_flag_allows_overwrite(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """INIT-2: --force flag allows deliberate overwrite of existing scaffold files."""
-        # Wave 4 implementation: run_init(name=".", force=True) overwrites existing files.
+        monkeypatch.chdir(tmp_path)
+        run_init(name=".")
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text("# sentinel marker\n")
+        run_init(name=".", force=True)
+        after = gitignore.read_text()
+        assert "# sentinel marker" not in after
+        assert ".env" in after

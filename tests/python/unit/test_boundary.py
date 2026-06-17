@@ -174,3 +174,262 @@ class TestRustPanicAndErrorBoundary:
         assert isinstance(result, dict)
         assert "sql_text" in result
         assert "SELECT" in result["sql_text"].upper()
+
+
+# ---------------------------------------------------------------------------
+# Hydration boundary: _native.hydrate_rows() error surface (ADR-003, ERR-2)
+# ---------------------------------------------------------------------------
+
+
+class TestHydrationBoundary:
+    """Tests for ``_native.hydrate_rows()`` at the PyO3 boundary.
+
+    All tests are skipped when the Rust extension has not been built.
+    """
+
+    def test_hydrate_rows_valid_returns_list(self) -> None:
+        """Sanity: well-formed rows hydrate without exception and return a list."""
+        _native = pytest.importorskip(
+            "ferrum._native",
+            reason="Rust extension not built — run `maturin develop`",
+        )
+
+        import json
+
+        class Probe(ferrum.Model):
+            id: int = 0
+            label: str = ""
+
+        metadata_json = Probe.get_metadata().to_metadata_json()
+        rows_json = json.dumps([{"id": 1, "label": "hello"}])
+
+        result = _native.hydrate_rows(metadata_json, rows_json)
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0]["id"] == 1
+
+    def test_hydrate_rows_null_required_column_raises_hydration_error(self) -> None:
+        """ERR-1: a non-nullable column with NULL → FerrumHydrationError, not plain RuntimeError."""
+        _native = pytest.importorskip(
+            "ferrum._native",
+            reason="Rust extension not built — run `maturin develop`",
+        )
+
+        import json
+
+        class Probe(ferrum.Model):
+            id: int = 0
+            label: str = ""
+
+        metadata_json = Probe.get_metadata().to_metadata_json()
+        rows_json = json.dumps([{"id": 1, "label": None}])
+
+        with pytest.raises(_native.FerrumHydrationError):
+            _native.hydrate_rows(metadata_json, rows_json)
+
+    def test_hydrate_rows_missing_required_column_raises_hydration_error(self) -> None:
+        """A row missing a required non-nullable column → FerrumHydrationError."""
+        _native = pytest.importorskip(
+            "ferrum._native",
+            reason="Rust extension not built — run `maturin develop`",
+        )
+
+        import json
+
+        class Probe(ferrum.Model):
+            id: int = 0
+            label: str = ""
+
+        metadata_json = Probe.get_metadata().to_metadata_json()
+        rows_json = json.dumps([{"id": 1}])
+
+        with pytest.raises(_native.FerrumHydrationError):
+            _native.hydrate_rows(metadata_json, rows_json)
+
+    def test_hydrate_rows_malformed_metadata_raises_hydration_error(self) -> None:
+        """Structurally-malformed metadata JSON → FerrumHydrationError (deser failure)."""
+        _native = pytest.importorskip(
+            "ferrum._native",
+            reason="Rust extension not built — run `maturin develop`",
+        )
+
+        import json
+
+        with pytest.raises(_native.FerrumHydrationError):
+            _native.hydrate_rows("{}", json.dumps([{"id": 1}]))
+
+    def test_hydrate_rows_malformed_rows_json_raises_hydration_error(self) -> None:
+        """Non-JSON rows argument → FerrumHydrationError (deser failure), not SyntaxError."""
+        _native = pytest.importorskip(
+            "ferrum._native",
+            reason="Rust extension not built — run `maturin develop`",
+        )
+
+        class Probe(ferrum.Model):
+            id: int = 0
+            label: str = ""
+
+        metadata_json = Probe.get_metadata().to_metadata_json()
+
+        with pytest.raises(_native.FerrumHydrationError):
+            _native.hydrate_rows(metadata_json, "not-json")
+
+    def test_hydrate_rows_error_is_not_plain_runtime_error(self) -> None:
+        """hydrate_rows errors must be typed FerrumHydrationError, not bare RuntimeError."""
+        _native = pytest.importorskip(
+            "ferrum._native",
+            reason="Rust extension not built — run `maturin develop`",
+        )
+
+        import json
+
+        class Probe(ferrum.Model):
+            id: int = 0
+            label: str = ""
+
+        metadata_json = Probe.get_metadata().to_metadata_json()
+        rows_json = json.dumps([{"id": 1, "label": None}])
+
+        try:
+            _native.hydrate_rows(metadata_json, rows_json)
+        except Exception as exc:
+            assert isinstance(exc, _native.FerrumHydrationError), (
+                f"Expected FerrumHydrationError at boundary, got bare {type(exc).__name__}: {exc}"
+            )
+
+    def test_hydrate_rows_error_message_does_not_contain_row_values(self) -> None:
+        """ERR-1: hydration error message must not echo row values (only model/column names)."""
+        _native = pytest.importorskip(
+            "ferrum._native",
+            reason="Rust extension not built — run `maturin develop`",
+        )
+
+        import json
+
+        class Probe(ferrum.Model):
+            id: int = 0
+            label: str = ""
+
+        metadata_json = Probe.get_metadata().to_metadata_json()
+        sentinel = "TOP_SECRET_ROW_VALUE_54321"
+        rows_json = json.dumps([{"id": sentinel, "label": None}])
+
+        with pytest.raises(_native.FerrumHydrationError) as exc_info:
+            _native.hydrate_rows(metadata_json, rows_json)
+
+        assert sentinel not in str(exc_info.value), (
+            f"Row value {sentinel!r} must not appear in hydration error message"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Python-side _hydrate_rows wiring (ADR-003 live path)
+# ---------------------------------------------------------------------------
+
+
+class TestHydrateRowsPythonWiring:
+    """Tests for the Python ``_hydrate_rows()`` function in ``ferrum.queryset``.
+
+    These tests exercise the Rust-wiring path without a full asyncpg connection.
+    When the native extension is available, the Rust NULL check runs before
+    ``model_construct``. When it is not, the fallback path is tested instead.
+    """
+
+    def test_hydrate_rows_with_valid_data_constructs_models(self) -> None:
+        """_hydrate_rows returns model instances from valid dict-like rows."""
+        from ferrum.queryset import _hydrate_rows
+
+        class Probe(ferrum.Model):
+            id: int = 0
+            label: str = ""
+
+        rows = [{"id": 1, "label": "alpha"}, {"id": 2, "label": "beta"}]
+        result = _hydrate_rows(Probe, rows)
+        assert len(result) == 2
+        assert result[0].id == 1
+        assert result[1].label == "beta"
+
+    def test_hydrate_rows_empty_returns_empty_list(self) -> None:
+        """_hydrate_rows([]) → []."""
+        from ferrum.queryset import _hydrate_rows
+
+        class Probe(ferrum.Model):
+            id: int = 0
+
+        assert _hydrate_rows(Probe, []) == []
+
+    def test_hydrate_rows_null_required_column_raises_ferrum_error(self) -> None:
+        """NULL in non-nullable column raises FerrumHydrationError (native ext required)."""
+        pytest.importorskip(
+            "ferrum._native",
+            reason="Rust extension not built — run `maturin develop`",
+        )
+
+        from ferrum.errors import FerrumHydrationError
+        from ferrum.queryset import _hydrate_rows
+
+        class Probe(ferrum.Model):
+            id: int = 0
+            label: str = ""
+
+        rows = [{"id": 1, "label": None}]
+        with pytest.raises(FerrumHydrationError):
+            _hydrate_rows(Probe, rows)
+
+    def test_hydrate_rows_null_nullable_column_is_ok(self) -> None:
+        """A NULL in an Optional column is valid and must not raise."""
+        from ferrum.queryset import _hydrate_rows
+
+        class Probe(ferrum.Model):
+            id: int = 0
+            label: str | None = None
+
+        rows = [{"id": 1, "label": None}]
+        result = _hydrate_rows(Probe, rows)
+        assert result[0].label is None
+
+    def test_hydrate_rows_null_failure_emits_hydration_failure_hook(self) -> None:
+        """On hydration failure, a Tier A 'hydration_failure' hook is dispatched."""
+        pytest.importorskip(
+            "ferrum._native",
+            reason="Rust extension not built — run `maturin develop`",
+        )
+
+        from ferrum.errors import FerrumHydrationError
+        from ferrum.hooks import HookPayload, clear_hooks, register_hook
+        from ferrum.queryset import _hydrate_rows
+
+        class Probe(ferrum.Model):
+            id: int = 0
+            label: str = ""
+
+        received: list[HookPayload] = []
+        register_hook("hydration_failure", received.append)
+        try:
+            with pytest.raises(FerrumHydrationError):
+                _hydrate_rows(Probe, [{"id": 1, "label": None}], fingerprint="fp:Probe:select")
+            assert len(received) == 1
+            payload = received[0]
+            assert payload["event"] == "hydration_failure"
+            assert payload["model"] == "Probe"
+            assert payload["status"] == "error"
+        finally:
+            clear_hooks()
+
+    def test_hydrate_rows_preserves_native_python_types(self) -> None:
+        """model_construct is called with native Python types, not JSON-serialized strings."""
+        from datetime import datetime
+
+        from ferrum.queryset import _hydrate_rows
+
+        class Probe(ferrum.Model):
+            id: int = 0
+            created_at: datetime = datetime(2024, 1, 1)
+
+        ts = datetime(2024, 6, 1, 12, 0, 0)
+        rows = [{"id": 1, "created_at": ts}]
+        result = _hydrate_rows(Probe, rows)
+        assert isinstance(result[0].created_at, datetime), (
+            "model_construct must receive native datetime, not a JSON string"
+        )
+        assert result[0].created_at == ts

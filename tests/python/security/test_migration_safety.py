@@ -14,8 +14,10 @@ Token lifecycle tests (MIG-6/MIG-7/MIG-8) are retained for the gate-function lay
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import pathlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -85,6 +87,11 @@ def _drop_table_ops() -> list[dict]:
 
 def _drop_column_ops() -> list[dict]:
     return [{"kind": "drop_column", "table": "users", "column": "email"}]
+
+
+def _confirmation_token(plan_json: str) -> str:
+    """Return the apply-path token expected by ``verify_token``."""
+    return hashlib.sha256(plan_json.encode()).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------------------
@@ -357,19 +364,39 @@ class TestMIG6TokenReplay:
         assert validate_token(token_a, digest_a)
         assert not validate_token(token_a, digest_b)
 
-    @pytest.mark.skip(
-        reason=(
-            "MIG-6 full: single-use replay guard requires the migration ledger "
-            "(Wave 4 — ferrum.migrations.ledger). Invariant: re-applying with the "
-            "same token after a successful apply must fail before any mutation."
-        )
-    )
-    async def test_token_replay_after_apply_rejected(self) -> None:  # pragma: no cover
+    @pytest.mark.asyncio
+    async def test_token_replay_after_apply_rejected(self) -> None:
         """MIG-6: Re-using a confirmation token after a successful apply is rejected.
 
-        Wave 4: apply(plan, token=t) succeeds on first call; the second call
-        with the same token raises FerrumMigrationError before mutation.
+        The ledger replay guard must fire before any second mutation attempt.
         """
+        pool = AsyncMock()
+        pool.execute = AsyncMock(return_value=None)
+        conn = _make_conn()
+        conn._require_pool.return_value = pool
+        plan = _plan_json(_create_table_ops())
+        token = _confirmation_token(plan)
+
+        with (
+            patch(
+                "ferrum.migrations.orchestrator.is_applied",
+                new_callable=AsyncMock,
+            ) as mock_is_applied,
+            patch(
+                "ferrum.migrations.orchestrator.record_applied",
+                new_callable=AsyncMock,
+            ) as mock_record,
+        ):
+            mock_is_applied.return_value = False
+            result = await apply(conn, plan, dry_run=False, confirm=True, token=token)
+            assert result.applied is True
+            mock_record.assert_awaited_once()
+
+            mock_is_applied.return_value = True
+            with pytest.raises(FerrumMigrationError, match="already been applied"):
+                await apply(conn, plan, dry_run=False, confirm=True, token=token)
+
+        pool.execute.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -384,15 +411,28 @@ class TestMIG7TokenNotInPublicStructures:
         assert not hasattr(plan, "token")
         assert not hasattr(plan, "confirmation_token")
 
-    @pytest.mark.skip(
-        reason=(
-            "MIG-7 full: CLI argv leakage guard requires the migration CLI "
-            "(Wave 4 — ferrum.cli.migrations_cmd). Invariant: the token must "
-            "not appear in process argv or public logs when passed via env var / stdin."
+    def test_token_not_emitted_to_stdout_in_dry_run_output(
+        self,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """MIG-7: Dry-run output must not contain a confirmation token value."""
+        from ferrum.cli.migrations_cmd import migrations_dry_run
+
+        plan = _plan_json(_create_table_ops())
+        plan_path = tmp_path / "plan.json"
+        plan_path.write_text(plan, encoding="utf-8")
+        secret_token = _confirmation_token(plan)
+        monkeypatch.setenv("FERRUM_MIGRATION_TOKEN", secret_token)
+
+        migrations_dry_run(plan_file=plan_path, environment="development")
+
+        captured = capsys.readouterr()
+        combined = captured.out + captured.err
+        assert secret_token not in combined, (
+            f"Confirmation token leaked into dry-run output: {combined[:500]!r}"
         )
-    )
-    def test_token_not_emitted_to_stdout_in_dry_run_output(self) -> None:  # pragma: no cover
-        """MIG-7: Dry-run JSON output must not contain a confirmation token value."""
 
 
 # ---------------------------------------------------------------------------
@@ -406,15 +446,44 @@ class TestMIG8TokenInjectionPath:
         assert not validate_token("no-dot-separator", "any_digest")
         assert not validate_token("", "any_digest")
 
-    @pytest.mark.skip(
-        reason=(
-            "MIG-8 full: env-var / stdin token injection requires the migration CLI "
-            "(Wave 4 — ferrum.cli.migrations_cmd). Invariant: the CLI must accept "
-            "FERRUM_MIGRATION_TOKEN env var and refuse to log it."
-        )
-    )
-    def test_token_accepted_via_env_var(self) -> None:  # pragma: no cover
+    def test_token_accepted_via_env_var(
+        self,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """MIG-8: CLI apply accepts token via FERRUM_MIGRATION_TOKEN env variable."""
+        from ferrum.cli.migrations_cmd import migrations_apply
+
+        plan = _plan_json(_create_table_ops())
+        plan_path = tmp_path / "plan.json"
+        plan_path.write_text(plan, encoding="utf-8")
+        token = _confirmation_token(plan)
+        monkeypatch.setenv("FERRUM_MIGRATION_TOKEN", token)
+        monkeypatch.setenv("FERRUM_DATABASE_URL", "postgresql://ferrum:changeme@127.0.0.1/db")
+
+        pool = AsyncMock()
+        pool.execute = AsyncMock(return_value=None)
+        mock_conn = MagicMock()
+        mock_conn._require_pool.return_value = pool
+        mock_cm = MagicMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("ferrum.connection.connect", return_value=mock_cm),
+            patch(
+                "ferrum.migrations.orchestrator.is_applied",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "ferrum.migrations.orchestrator.record_applied",
+                new_callable=AsyncMock,
+            ),
+        ):
+            migrations_apply(plan_file=plan_path, confirm=False, dry_run=False)
+
+        pool.execute.assert_awaited()
 
 
 # ---------------------------------------------------------------------------

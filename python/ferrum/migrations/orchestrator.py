@@ -21,12 +21,14 @@ Security invariants:
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from ferrum.errors import FerrumMigrationError
+from ferrum.migrations.ledger import is_applied, record_applied
 from ferrum.migrations.tokens import verify_token
 
 if TYPE_CHECKING:
@@ -588,11 +590,19 @@ async def apply(
         _print_plan(plan)
         return MigrationResult(applied=False, ops_count=len(ops), dry_run=True)
 
+    plan_digest = hashlib.sha256(plan_json.encode()).hexdigest()
+
     # Token gate: validate the confirmation token against the plan digest before
     # any SQL is executed.  Checked before destructive/env gates so a bad token
     # is rejected immediately, regardless of what other flags are set (MIG-2).
-    if confirm and token is not None and not verify_token(plan_json, token):
-        raise FerrumMigrationError("Token validation failed. [FERR-M001]")
+    if confirm and token is not None:
+        if not verify_token(plan_json, token):
+            raise FerrumMigrationError("Token validation failed. [FERR-M001]")
+        # MIG-6 replay guard: token-authenticated applies are single-use via ledger.
+        if await is_applied(conn, plan_digest):
+            raise FerrumMigrationError(
+                "Migration plan has already been applied. [FERR-M003]"
+            )
 
     # MIG-2: destructive gate — independently scan ops, never trust the
     # `requires_confirmation` flag from plan JSON (a crafted JSON could lie).
@@ -616,5 +626,13 @@ async def apply(
         print(f"[ferrum migrate] applying: {label}")
         sql = _op_to_sql(op)
         await pool.execute(sql)
+
+    if confirm and token is not None:
+        await record_applied(
+            conn,
+            plan_digest,
+            environment=env,
+            description=str(plan.get("name", "")),
+        )
 
     return MigrationResult(applied=True, ops_count=len(ops), dry_run=False)

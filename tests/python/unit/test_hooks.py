@@ -246,6 +246,87 @@ class TestTierAEnforcement:
             unregister_hook(fn)
 
     # ------------------------------------------------------------------
+    # hydration_failure Tier A hook (ADR-003 live path)
+    # ------------------------------------------------------------------
+
+    def test_hydration_failure_dispatches_tier_a_payload(self) -> None:
+        """hydration_failure() emits an event with the required Tier A keys."""
+        from ferrum.hooks import hydration_failure
+
+        received: list[HookPayload] = []
+        register_hook("hydration_failure", received.append)
+        try:
+            hydration_failure(
+                fingerprint="fp:User:select",
+                failure_category="FerrumHydrationError",
+                model="User",
+            )
+            assert len(received) == 1
+            payload = received[0]
+            assert payload["event"] == "hydration_failure"
+            assert payload["fingerprint"] == "fp:User:select"
+            assert payload["failure_category"] == "FerrumHydrationError"
+            assert payload["model"] == "User"
+            assert payload["status"] == "error"
+        finally:
+            clear_hooks()
+
+    def test_hydration_failure_does_not_contain_row_data(self) -> None:
+        """hydration_failure Tier A payload must not carry row data (LOG-1, ERR-1)."""
+        from ferrum.hooks import hydration_failure
+
+        received: list[HookPayload] = []
+        register_hook("*", received.append)
+        try:
+            hydration_failure(
+                fingerprint="fp:Post:select",
+                failure_category="FerrumHydrationError",
+                model="Post",
+            )
+            assert len(received) == 1
+            payload = received[0]
+            payload_str = str(payload)
+            assert "row_data" not in payload_str
+            assert set(payload.keys()).issubset(_TIER_A_KEYS)
+        finally:
+            clear_hooks()
+
+    def test_hydration_failure_event_received_by_wildcard_hook(self) -> None:
+        """hydration_failure events reach catch-all ('*') hooks."""
+        from ferrum.hooks import hydration_failure
+
+        received: list[HookPayload] = []
+        register_hook("*", received.append)
+        try:
+            hydration_failure(
+                fingerprint="fp:Item:select",
+                failure_category="FerrumHydrationError",
+                model="Item",
+            )
+            assert any(p.get("event") == "hydration_failure" for p in received), (
+                "hydration_failure event must reach wildcard ('*') hooks"
+            )
+        finally:
+            clear_hooks()
+
+    def test_hydration_failure_crashing_hook_does_not_propagate(self) -> None:
+        """A crashing hook registered on 'hydration_failure' must not break the query path."""
+        from ferrum.hooks import hydration_failure
+
+        def _bad_hook(_: HookPayload) -> None:
+            raise RuntimeError("hook crash during hydration failure")
+
+        register_hook("hydration_failure", _bad_hook)
+        try:
+            hydration_failure(
+                fingerprint="fp:Widget:select",
+                failure_category="FerrumHydrationError",
+                model="Widget",
+            )
+        finally:
+            clear_hooks()
+
+    # ------------------------------------------------------------------
     # Tier B/C must not activate from DEBUG=1  (LOG-2 / LOG-3)
     # ------------------------------------------------------------------
 

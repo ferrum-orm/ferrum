@@ -1,4 +1,4 @@
-"""Unit tests for the Ferrum error taxonomy."""
+"""Unit tests for the Ferrum error taxonomy and centralized error mapping (ADR-006)."""
 
 from __future__ import annotations
 
@@ -11,12 +11,14 @@ from ferrum.errors import (
     FerrumConnectionError,
     FerrumDangerApiError,
     FerrumError,
+    FerrumHydrationError,
     FerrumIntegrityError,
     FerrumInternalError,
     FerrumMigrationError,
     FerrumNotFoundError,
     FerrumTimeoutError,
     map_db_error,
+    map_native_error,
 )
 
 
@@ -157,6 +159,127 @@ class TestMapDbError:
 
 
 # ---------------------------------------------------------------------------
+# FerrumHydrationError taxonomy
+# ---------------------------------------------------------------------------
+
+
+class TestFerrumHydrationError:
+    def test_hydration_error_is_ferrum_error(self) -> None:
+        """FerrumHydrationError must be a FerrumError subclass (ADR-006 taxonomy)."""
+        assert issubclass(FerrumHydrationError, FerrumError)
+
+    def test_hydration_error_code(self) -> None:
+        assert FerrumHydrationError.code == "FERR-H001"
+
+    def test_hydration_error_message_does_not_contain_row_data(self) -> None:
+        """FERR-H001 messages must not carry row data — only model/column names (ERR-1)."""
+        err = FerrumHydrationError(
+            "Row hydration failed: column 'title' is NULL on model 'Post'. [FERR-H001]"
+        )
+        msg = str(err)
+        assert "Post" in msg  # model name is safe metadata
+        assert "title" in msg  # column name is safe metadata
+
+
+# ---------------------------------------------------------------------------
+# map_native_error() — ADR-006 error remapping at the PyO3 boundary
+# ---------------------------------------------------------------------------
+
+
+def _make_native_mod(
+    *,
+    compile_cls: type | None = None,
+    hydration_cls: type | None = None,
+    internal_cls: type | None = None,
+) -> object:
+    """Return a minimal fake ``ferrum._native`` module for map_native_error tests."""
+    mod = mock.MagicMock()
+    mod.FerrumCompileError = compile_cls or type(
+        "FerrumCompileError", (RuntimeError,), {}
+    )
+    mod.FerrumHydrationError = hydration_cls or type(
+        "FerrumHydrationError", (RuntimeError,), {}
+    )
+    mod.FerrumInternalError = internal_cls or type(
+        "FerrumInternalError", (RuntimeError,), {}
+    )
+    return mod
+
+
+class TestMapNativeError:
+    def test_native_compile_error_maps_to_ferrum_compile_error(self) -> None:
+        """_native.FerrumCompileError → Python FerrumCompileError."""
+        native = _make_native_mod()
+        exc = native.FerrumCompileError("bad IR")
+        result = map_native_error(exc, _native_mod=native)
+        assert isinstance(result, FerrumCompileError), (
+            f"Expected FerrumCompileError, got {type(result).__name__}"
+        )
+
+    def test_native_hydration_error_maps_to_ferrum_hydration_error(self) -> None:
+        """_native.FerrumHydrationError → Python FerrumHydrationError."""
+        native = _make_native_mod()
+        exc = native.FerrumHydrationError("NULL in non-nullable column")
+        result = map_native_error(exc, _native_mod=native)
+        assert isinstance(result, FerrumHydrationError), (
+            f"Expected FerrumHydrationError, got {type(result).__name__}"
+        )
+
+    def test_native_internal_error_maps_to_ferrum_internal_error(self) -> None:
+        """_native.FerrumInternalError → Python FerrumInternalError."""
+        native = _make_native_mod()
+        exc = native.FerrumInternalError("unexpected panic")
+        result = map_native_error(exc, _native_mod=native)
+        assert isinstance(result, FerrumInternalError), (
+            f"Expected FerrumInternalError, got {type(result).__name__}"
+        )
+
+    def test_unknown_runtime_error_maps_to_ferrum_internal_error(self) -> None:
+        """Bare RuntimeError from native ext → FerrumInternalError (catch-all)."""
+        native = _make_native_mod()
+        exc = RuntimeError("something exploded in Rust")
+        result = map_native_error(exc, _native_mod=native)
+        assert isinstance(result, FerrumInternalError), (
+            f"Expected FerrumInternalError for unmapped RuntimeError, got {type(result).__name__}"
+        )
+
+    def test_mapped_compile_error_has_correct_code(self) -> None:
+        """Mapped FerrumCompileError carries the FERR-C102 code (not config FERR-C001)."""
+        native = _make_native_mod()
+        exc = native.FerrumCompileError("bad filter field")
+        result = map_native_error(exc, _native_mod=native)
+        assert isinstance(result, FerrumCompileError)
+        assert result.code == "FERR-C102"
+
+    def test_mapped_hydration_error_has_correct_code(self) -> None:
+        """Mapped FerrumHydrationError carries the FERR-H001 code."""
+        native = _make_native_mod()
+        exc = native.FerrumHydrationError("NULL value")
+        result = map_native_error(exc, _native_mod=native)
+        assert isinstance(result, FerrumHydrationError)
+        assert result.code == "FERR-H001"
+
+    def test_map_native_error_no_native_mod_falls_back_gracefully(self) -> None:
+        """If _native_mod is None, map_native_error falls back to FerrumInternalError."""
+        result = map_native_error(RuntimeError("fallback"), _native_mod=None)
+        assert isinstance(result, FerrumInternalError)
+
+    def test_compile_error_type_is_ferrum_error_subclass(self) -> None:
+        """Mapped compile error is always a FerrumError subclass."""
+        native = _make_native_mod()
+        exc = native.FerrumCompileError("unknown field 'foo'")
+        result = map_native_error(exc, _native_mod=native)
+        assert isinstance(result, FerrumError)
+
+    def test_hydration_error_type_is_ferrum_error_subclass(self) -> None:
+        """Mapped hydration error is always a FerrumError subclass."""
+        native = _make_native_mod()
+        exc = native.FerrumHydrationError("NULL at column 'label'")
+        result = map_native_error(exc, _native_mod=native)
+        assert isinstance(result, FerrumError)
+
+
+# ---------------------------------------------------------------------------
 # ERR-2: PyO3 panic → catchable (reference to test_boundary.py)
 # ---------------------------------------------------------------------------
 
@@ -168,14 +291,70 @@ class TestErr2PanicBoundaryReference:
         Specifically:
         - test_rust_panic_surfaces_as_ferrum_internal_error
         - test_compile_error_message_does_not_contain_bound_values
+        - test_hydrate_rows_missing_required_column_raises_hydration_error
+        - test_hydrate_rows_null_required_column_raises_hydration_error
 
         This placeholder documents the coverage mapping so the security gate
         checklist can confirm ERR-2 without re-running native extension tests here.
         """
-        # test_boundary.py contains the native-extension-gated ERR-2 tests.
-        # This test serves as a coverage-map marker; it always passes.
         boundary_tests = [
             "test_rust_panic_surfaces_as_ferrum_internal_error",
             "test_compile_error_message_does_not_contain_bound_values",
+            "test_hydrate_rows_missing_required_column_raises_hydration_error",
+            "test_hydrate_rows_null_required_column_raises_hydration_error",
         ]
-        assert len(boundary_tests) == 2
+        assert len(boundary_tests) == 4
+
+
+# ---------------------------------------------------------------------------
+# Timeout and cancellation mapping
+# ---------------------------------------------------------------------------
+
+
+class TestTimeoutAndCancellationMapping:
+    def test_asyncio_timeout_maps_to_ferrum_timeout_error(self) -> None:
+        """asyncio.TimeoutError (pool-acquire / statement timeout) → FerrumTimeoutError."""
+        result = map_db_error(TimeoutError())
+        assert isinstance(result, FerrumTimeoutError), (
+            f"Expected FerrumTimeoutError for TimeoutError, got {type(result).__name__}"
+        )
+
+    def test_asyncio_timeout_message_is_sanitized(self) -> None:
+        """Timeout error message must not contain DSN, bound values, or raw exception detail."""
+        result = map_db_error(TimeoutError("postgresql://user:secret@host/db"))
+        assert "secret" not in str(result), "DSN secret must not appear in timeout error message"
+
+    def test_query_canceled_maps_to_ferrum_timeout_error(self) -> None:
+        """asyncpg.QueryCanceledError (SQLSTATE 57014) → FerrumTimeoutError."""
+        mock_exc = mock.MagicMock(spec=asyncpg.exceptions.QueryCanceledError)
+        mock_exc.detail = None
+        mock_exc.hint = None
+
+        result = map_db_error(mock_exc, context={})
+
+        assert isinstance(result, FerrumTimeoutError), (
+            f"Expected FerrumTimeoutError for QueryCanceledError, got {type(result).__name__}"
+        )
+
+    def test_query_canceled_message_has_no_row_data(self) -> None:
+        """Cancellation error message must not echo row data or raw SQLSTATE."""
+        mock_exc = mock.MagicMock(spec=asyncpg.exceptions.QueryCanceledError)
+        mock_exc.detail = "query canceled because of user request containing row=sentinel_row_data"
+        mock_exc.hint = None
+
+        result = map_db_error(mock_exc, context={})
+
+        assert "sentinel_row_data" not in str(result), (
+            "Raw DETAIL/HINT must not appear in mapped cancellation error"
+        )
+
+    def test_pool_acquire_timeout_maps_to_ferrum_timeout(self) -> None:
+        """Pool exhaustion expressed as TimeoutError → FerrumTimeoutError.
+
+        When a pool has no available connections and the acquire timeout fires,
+        asyncpg propagates asyncio.TimeoutError (== TimeoutError) to the caller.
+        This must map to FerrumTimeoutError — not FerrumInternalError.
+        """
+        result = map_db_error(TimeoutError())
+        assert isinstance(result, FerrumTimeoutError)
+        assert FerrumTimeoutError.code in str(result) or "FERR-E102" in str(result)

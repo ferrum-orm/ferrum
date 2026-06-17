@@ -73,11 +73,12 @@ _NEXT_STEPS = """\
    (enables makemigrations auto-discovery)"""
 
 
-def run_init(*, name: str = ".") -> None:
+def run_init(*, name: str = ".", force: bool = False) -> None:
     """Scaffold a minimal Ferrum project in ``name`` directory.
 
     Args:
         name: Target directory. Must be relative to cwd (INIT-2).
+        force: When ``True``, overwrite existing scaffold files (INIT-2).
 
     Raises:
         SystemExit: If the path is outside cwd or already contains conflicting files.
@@ -97,10 +98,11 @@ def run_init(*, name: str = ".") -> None:
 
     target.mkdir(parents=True, exist_ok=True)
 
-    _write_if_absent(target / "ferrum.toml", _FERRUM_TOML_TEMPLATE)
-    _write_if_absent(target / ".gitignore", _GITIGNORE_TEMPLATE)
-    _write_if_absent(target / ".env.example", _ENV_EXAMPLE_TEMPLATE)
-    _write_if_absent(target / "docker-compose.yml", _DOCKER_COMPOSE_TEMPLATE)
+    write = _write_force if force else _write_if_absent
+    write(target / "ferrum.toml", _FERRUM_TOML_TEMPLATE)
+    write(target / ".gitignore", _GITIGNORE_TEMPLATE)
+    write(target / ".env.example", _ENV_EXAMPLE_TEMPLATE)
+    write(target / "docker-compose.yml", _DOCKER_COMPOSE_TEMPLATE)
 
     console = Console()
     console.print(f"Ferrum project scaffolded in [bold]{target}[/bold]")
@@ -113,3 +115,9 @@ def _write_if_absent(path: Path, content: str) -> None:
     else:
         path.write_text(content, encoding="utf-8")
         print(f"  write {path.name}")
+
+
+def _write_force(path: Path, content: str) -> None:
+    path.write_text(content, encoding="utf-8")
+    action = "overwrite" if path.exists() else "write"
+    print(f"  {action} {path.name}")

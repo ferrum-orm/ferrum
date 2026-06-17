@@ -212,6 +212,34 @@ def query_failure(
     )
 
 
+def hydration_failure(
+    *,
+    fingerprint: str,
+    failure_category: str,
+    model: str,
+) -> None:
+    """Dispatch a Tier A ``hydration_failure`` hook payload.
+
+    Fires when ``_native.hydrate_rows()`` raises during the live read path.
+    The payload contains only model/column metadata — never row values or
+    bound parameters (LOG-1, ERR-1).
+
+    Args:
+        fingerprint: Query fingerprint (operation + model, no values).
+        failure_category: Ferrum error class name (e.g. ``"FerrumHydrationError"``).
+        model: Model class name — safe metadata, never user input.
+    """
+    dispatch(
+        {
+            "event": "hydration_failure",
+            "fingerprint": fingerprint,
+            "failure_category": failure_category,
+            "model": model,
+            "status": "error",
+        }
+    )
+
+
 class QueryTimer:
     """Context manager that times a query and dispatches a Tier A hook payload."""
 

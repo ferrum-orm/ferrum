@@ -33,6 +33,7 @@ from ferrum.errors import (
     FerrumMultipleObjectsError,
     FerrumNotFoundError,
     map_db_error,
+    map_native_error,
 )
 
 if TYPE_CHECKING:
@@ -123,23 +124,67 @@ def _decode_bound_param(param_json: str) -> object:
     return val
 
 
-def _hydrate_rows(model: type[_M], rows: list[Any]) -> list[_M]:
+class _RowEncoder(json.JSONEncoder):
+    """JSON encoder that handles asyncpg ``Record`` and non-JSON-native Python types.
+
+    Used to serialize rows for the Rust ``hydrate_rows`` structural check.
+    Complex types (datetime, UUID) are converted to strings — Rust performs
+    structural validation (presence, nullability) only; Python retains native
+    types for ``model_construct``.
+    """
+
+    def default(self, o: Any) -> Any:  # noqa: ANN401
+        if isinstance(o, (datetime, UUID)):
+            return str(o)
+        if hasattr(o, "_mapping"):
+            return dict(o._mapping)
+        return super().default(o)
+
+
+def _hydrate_rows(
+    model: type[_M],
+    rows: list[Any],
+    *,
+    fingerprint: str = "",
+) -> list[_M]:
     """Convert asyncpg ``Record`` objects to model instances (ADR-003 trusted path).
 
-    Uses ``model_construct`` (skip re-validation) since rows originate from a
-    trusted DB source. Custom validators with side-effects do not re-run here —
-    document this to callers and offer opt-in full validation if needed.
+    When the native extension is available, delegates structural validation
+    (non-nullable column checks) to ``_native_ext.hydrate_rows()`` before
+    calling ``model_construct``. Rust validation runs on a JSON-serialized copy
+    of the rows so Python retains native types (datetime, UUID, etc.) for the
+    actual ``model_construct`` call.
 
-    W-3 (Wave 3 tracking): This function bypasses ``_native_ext.hydrate_rows``
-    Rust validation. When Track B wires ``hydrate_rows`` in ``ferrum-pyo3``, this
-    should delegate to ``_native_ext.hydrate_rows(metadata_json, rows_json)`` for
-    non-nullable column validation before ``model_construct``. Until then, the
-    trusted-source assumption applies: the DB enforces NOT NULL; custom validators
-    do not re-run here.
+    Uses ``model_construct`` (skip re-validation) since rows originate from a
+    trusted DB source. Custom validators with side-effects do not re-run here.
+
+    On hydration failure:
+    - Dispatches a Tier A ``hydration_failure`` hook.
+    - Raises ``FerrumHydrationError`` (remapped via ``map_native_error``).
     """
-    # Wave 3: delegate to _native_ext.hydrate_rows() once Track B lands so Rust NULL
-    # validation runs on live path.
-    return [model.model_construct(**dict(row)) for row in rows]
+    row_dicts = [dict(row) for row in rows]
+
+    if _native_ext is not None:
+        try:
+            metadata = model.get_metadata() if hasattr(model, "get_metadata") else None
+        except Exception:
+            metadata = None
+
+        if metadata is not None:
+            try:
+                metadata_json = metadata.to_metadata_json()
+                rows_json = json.dumps(row_dicts, cls=_RowEncoder)
+                _native_ext.hydrate_rows(metadata_json, rows_json)
+            except Exception as exc:
+                mapped = map_native_error(exc, _native_mod=_native_ext)
+                _hooks.hydration_failure(
+                    fingerprint=fingerprint,
+                    failure_category=type(mapped).__name__,
+                    model=model.__name__,
+                )
+                raise mapped from exc
+
+    return [model.model_construct(**row) for row in row_dicts]
 
 
 class QuerySet(Generic[_M]):
@@ -394,13 +439,8 @@ class QuerySet(Generic[_M]):
         metadata_json = metadata.to_metadata_json() if metadata is not None else "{}"
         try:
             return _native_ext.compile_query(metadata_json, ir_json)  # type: ignore[return-value]
-        except FerrumCompileError:
-            raise
-        except RuntimeError as exc:
-            # ADR-006: PyO3 raises RuntimeError for FerrumCompileError on the Rust side;
-            # remap here so callers always catch FerrumCompileError. Tracked for ADR-006
-            # centralized error layer.
-            raise FerrumCompileError(str(exc), model=self._model.__name__) from None
+        except Exception as exc:
+            raise map_native_error(exc, _native_mod=_native_ext) from exc
 
     def _build_insert_ir(self, values: dict[str, Any]) -> dict[str, Any]:
         """Build an INSERT IR dict from the provided field values.

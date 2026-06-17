@@ -10,9 +10,14 @@ No exception message ever contains bound parameter values, DSNs, or passwords.
 
 Stable error codes (``FERR-XXXX``) are class-level attributes and appear in
 rendered messages for documentation links and tooling (DX blocker B-6).
+
+``map_native_error()`` is the single centralized seam for routing exceptions
+from the ``ferrum._native`` PyO3 extension into the Ferrum taxonomy (ADR-006).
 """
 
 from __future__ import annotations
+
+import asyncio
 
 try:
     import asyncpg.exceptions as _asyncpg_exc  # type: ignore[import-untyped]
@@ -127,6 +132,16 @@ class FerrumInternalError(FerrumError):
     code = "FERR-E500"
 
 
+class FerrumHydrationError(FerrumError):
+    """Row hydration failed: a non-nullable column was NULL or a required column was missing.
+
+    Raised after ``_native.hydrate_rows()`` validates DB rows before ``model_construct``.
+    The message contains only model/column names — no row values (ERR-1).
+    """
+
+    code = "FERR-H001"
+
+
 class FerrumMigrationError(FerrumError):
     """A migration operation failed or was rejected by a safety gate."""
 
@@ -180,6 +195,11 @@ def map_db_error(exc: Exception, *, context: dict | None = None) -> FerrumError:
     if isinstance(exc, FerrumError):
         return exc
 
+    # asyncio.TimeoutError covers both pool-acquire timeouts and statement timeouts.
+    # In Python 3.11+ TimeoutError is asyncio.TimeoutError, so both are caught here.
+    if isinstance(exc, asyncio.TimeoutError):
+        return FerrumTimeoutError("Query or connection timed out. [FERR-E102]")
+
     if _HAS_ASYNCPG and _asyncpg_exc is not None:
         if isinstance(exc, _asyncpg_exc.UniqueViolationError):
             constraint = getattr(exc, "constraint_name", None)
@@ -207,6 +227,10 @@ def map_db_error(exc: Exception, *, context: dict | None = None) -> FerrumError:
         _undef_types = tuple(t for t in (_undef_col, _undef_tbl) if t is not None)
         if _undef_types and isinstance(exc, _undef_types):
             return FerrumSchemaError(f"Schema object not found ({type(exc).__name__}). [FERR-S001]")
+        # QueryCanceledError (SQLSTATE 57014) — statement timeout or explicit cancellation.
+        _query_canceled = getattr(_asyncpg_exc, "QueryCanceledError", None)
+        if _query_canceled is not None and isinstance(exc, _query_canceled):
+            return FerrumTimeoutError("Query was cancelled. [FERR-E102]")
         _pg_conn = getattr(_asyncpg_exc, "PostgresConnectionError", None)
         if _pg_conn is not None and isinstance(exc, _pg_conn):
             return FerrumConnectionError(
@@ -220,3 +244,54 @@ def map_db_error(exc: Exception, *, context: dict | None = None) -> FerrumError:
     return FerrumInternalError(
         f"Unexpected error in database operation: {type(exc).__name__}. [FERR-E500]"
     )
+
+
+def map_native_error(exc: Exception, *, _native_mod: object = None) -> FerrumError:
+    """Map a ``ferrum._native`` PyO3 exception to the Ferrum error taxonomy (ADR-006).
+
+    This is the single non-bypassable seam for all native extension exceptions.
+    Callers should pass the already-imported ``_native_mod`` (``ferrum._native``)
+    to avoid re-importing the extension on each call.
+
+    Routing:
+    - ``_native.FerrumCompileError``   → ``FerrumCompileError``   (FERR-C102)
+    - ``_native.FerrumHydrationError`` → ``FerrumHydrationError`` (FERR-H001)
+    - ``_native.FerrumInternalError``  → ``FerrumInternalError``  (FERR-E500)
+    - ``RuntimeError`` (bare)          → ``FerrumInternalError``  (FERR-E500)
+    - Anything else                    → delegated to ``map_db_error()``
+
+    Note on message safety: Rust exception messages must contain only model/column
+    names — never row values or bound parameters. This is enforced at the Rust layer;
+    ``map_native_error`` passes the native message through without additional
+    sanitization (the redaction guarantee is structural, not string-based).
+
+    Args:
+        exc: The exception raised by the ``ferrum._native`` extension.
+        _native_mod: The imported ``ferrum._native`` module, or ``None`` if the
+            extension is not available (fallback to ``FerrumInternalError``).
+
+    Returns:
+        A ``FerrumError`` subclass appropriate to the exception.
+    """
+    if isinstance(exc, FerrumError):
+        return exc
+
+    if _native_mod is not None:
+        _native_compile_err = getattr(_native_mod, "FerrumCompileError", None)
+        _native_hydration_err = getattr(_native_mod, "FerrumHydrationError", None)
+        _native_internal_err = getattr(_native_mod, "FerrumInternalError", None)
+
+        if _native_compile_err is not None and isinstance(exc, _native_compile_err):
+            return FerrumCompileError(str(exc), category="compile_error")
+        if _native_hydration_err is not None and isinstance(exc, _native_hydration_err):
+            # Message from Rust contains model/column names only — safe to surface.
+            return FerrumHydrationError(f"Row hydration failed: {exc}. [FERR-H001]")
+        if _native_internal_err is not None and isinstance(exc, _native_internal_err):
+            return FerrumInternalError("Internal Ferrum error (native). [FERR-E500]")
+
+    if isinstance(exc, RuntimeError):
+        return FerrumInternalError(
+            f"Internal Ferrum error (native): {type(exc).__name__}. [FERR-E500]"
+        )
+
+    return map_db_error(exc)
