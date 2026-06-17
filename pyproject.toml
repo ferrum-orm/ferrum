@@ -75,6 +75,9 @@ manifest-path = "crates/ferrum-pyo3/Cargo.toml"
 # runtime instead of linking libpython at build time (no libpython3.x on the
 # manylinux/cibuildwheel host or the setup-python lib path).
 features = ["pyo3/abi3-py311", "pyo3/extension-module"]
+# Pack LICENSE into the sdist too: maturin records `License-File: LICENSE` in the
+# metadata, and PyPI (metadata 2.4) rejects the sdist if the file isn't present.
+include = ["LICENSE"]
 
 # ---------------------------------------------------------------------------
 # ruff
