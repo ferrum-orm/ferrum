@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -212,7 +211,6 @@ async def test_run_inspectdb_queries_are_parameterized_with_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_conn = _FakeDbConn(column_rows=[])
-    connect_mock = AsyncMock(return_value=_FakeConnect(db_conn))
     monkeypatch.setattr(inspectdb_cmd, "connect", lambda: _FakeConnect(db_conn))
 
     result = await inspectdb_cmd.run_inspectdb(output=None, schema="tenant_schema")
