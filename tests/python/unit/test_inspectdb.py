@@ -49,12 +49,21 @@ class _FakePool:
         return _AsyncContext(self.db_conn)
 
 
+class _FakeDriver:
+    dialect = "postgres"
+
+    def __init__(self, pool: _FakePool) -> None:
+        self._pool = pool
+
+
 class _FakeConn:
+    dialect = "postgres"
+
     def __init__(self, db_conn: _FakeDbConn) -> None:
         self.db_conn = db_conn
 
-    def _require_pool(self) -> _FakePool:
-        return _FakePool(self.db_conn)
+    def _require_driver(self) -> _FakeDriver:
+        return _FakeDriver(_FakePool(self.db_conn))
 
 
 class _FakeConnect:

@@ -100,7 +100,7 @@ async def _apply(
 
     if do_dry_run:
         # Dry-run does not need a DB connection; pass a sentinel conn object.
-        # apply() with dry_run=True never calls conn._require_pool().
+        # apply() with dry_run=True never calls conn._require_driver().
         from ferrum.connection import Connection
 
         conn = Connection.__new__(Connection)

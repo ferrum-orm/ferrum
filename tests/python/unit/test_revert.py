@@ -54,12 +54,21 @@ class _FakePool:
         return _AsyncContext(self.db_conn)
 
 
+class _FakeDriver:
+    dialect = "postgres"
+
+    def __init__(self, pool: _FakePool) -> None:
+        self._pool = pool
+
+
 class _FakeConn:
+    dialect = "postgres"
+
     def __init__(self, pool: _FakePool) -> None:
         self.pool = pool
 
-    def _require_pool(self) -> _FakePool:
-        return self.pool
+    def _require_driver(self) -> _FakeDriver:
+        return _FakeDriver(self.pool)
 
 
 class _FakeConnect:
@@ -132,7 +141,8 @@ async def test_delete_applied_calls_parameterized_delete() -> None:
     pool = AsyncMock()
     pool.execute = AsyncMock(return_value=None)
     conn = MagicMock()
-    conn._require_pool.return_value = pool
+    conn.dialect = "postgres"
+    conn._require_driver.return_value = pool
 
     await delete_applied(conn, "digest-123")
 

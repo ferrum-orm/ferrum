@@ -246,7 +246,14 @@ async def run_inspectdb(
     """
     try:
         async with connect() as conn:
-            pool = conn._require_pool()
+            driver = conn._require_driver()
+            if conn.dialect != "postgres":
+                print("inspectdb currently supports PostgreSQL only.")
+                return 2
+            pool = getattr(driver, "_pool", None)
+            if pool is None:
+                print("Connection error: pool not open [FERR-E101]")
+                return 2
             async with pool.acquire() as db_conn:
                 col_rows = await db_conn.fetch(_COL_QUERY, schema)
                 fk_rows = await db_conn.fetch(_FK_QUERY, schema)

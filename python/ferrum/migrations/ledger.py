@@ -1,9 +1,4 @@
-"""Migration history ledger: append-only record of applied migrations.
-
-The ledger table (``ferrum_migrations``) is append-only. Rows are never updated
-or deleted by Ferrum tooling. Each row records the plan digest, timestamp, and
-environment — never bound values or credentials (CRED-1).
-"""
+"""Migration history ledger: append-only record of applied migrations."""
 
 from __future__ import annotations
 
@@ -18,6 +13,22 @@ except ImportError:
     _asyncpg_exc = None  # type: ignore
     _HAS_ASYNCPG = False
 
+try:
+    import asyncmy.errors as _asyncmy_exc  # type: ignore[import-untyped]
+
+    _HAS_ASYNCMY: bool = True
+except ImportError:
+    _asyncmy_exc = None  # type: ignore
+    _HAS_ASYNCMY = False
+
+try:
+    import aiosqlite  # type: ignore[import-untyped]
+
+    _HAS_AIOSQLITE: bool = True
+except ImportError:
+    aiosqlite = None  # type: ignore
+    _HAS_AIOSQLITE = False
+
 from ferrum.errors import FerrumMigrationError
 
 if TYPE_CHECKING:
@@ -25,7 +36,29 @@ if TYPE_CHECKING:
 
 LEDGER_TABLE = "ferrum_migrations"
 
-CREATE_LEDGER_SQL = f"""
+
+def _create_ledger_sql(dialect: str) -> str:
+    if dialect == "mysql":
+        return f"""
+CREATE TABLE IF NOT EXISTS {LEDGER_TABLE} (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    digest      TEXT        NOT NULL UNIQUE,
+    applied_at  DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    environment TEXT        NOT NULL DEFAULT 'development',
+    description TEXT
+)
+""".strip()
+    if dialect == "sqlite":
+        return f"""
+CREATE TABLE IF NOT EXISTS {LEDGER_TABLE} (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    digest      TEXT        NOT NULL UNIQUE,
+    applied_at  TEXT        NOT NULL DEFAULT (datetime('now')),
+    environment TEXT        NOT NULL DEFAULT 'development',
+    description TEXT
+)
+""".strip()
+    return f"""
 CREATE TABLE IF NOT EXISTS {LEDGER_TABLE} (
     id          BIGSERIAL PRIMARY KEY,
     digest      TEXT        NOT NULL UNIQUE,
@@ -36,19 +69,39 @@ CREATE TABLE IF NOT EXISTS {LEDGER_TABLE} (
 """.strip()
 
 
-def compute_digest(name: str, content: str) -> str:
-    """Return a stable sha256 digest for a migration file.
+def _insert_ledger_sql(dialect: str) -> str:
+    if dialect in ("mysql", "sqlite"):
+        return (
+            f"INSERT INTO {LEDGER_TABLE} (digest, environment, description) "
+            "VALUES (?, ?, ?)"
+        )
+    return (
+        f"INSERT INTO {LEDGER_TABLE} (digest, environment, description) "
+        "VALUES ($1, $2, $3)"
+    )
 
-    The digest is keyed on both the migration name and its full content so that
-    renaming or editing a migration file produces a distinct digest.
-    """
+
+def _select_digest_sql(dialect: str) -> str:
+    if dialect in ("mysql", "sqlite"):
+        return f"SELECT 1 FROM {LEDGER_TABLE} WHERE digest = ?"
+    return f"SELECT 1 FROM {LEDGER_TABLE} WHERE digest = $1"
+
+
+def _delete_digest_sql(dialect: str) -> str:
+    if dialect in ("mysql", "sqlite"):
+        return f"DELETE FROM {LEDGER_TABLE} WHERE digest = ?"
+    return f"DELETE FROM {LEDGER_TABLE} WHERE digest = $1"
+
+
+def compute_digest(name: str, content: str) -> str:
+    """Return a stable sha256 digest for a migration file."""
     return hashlib.sha256(f"{name}:{content}".encode()).hexdigest()
 
 
 async def ensure_ledger(conn: Connection) -> None:
     """Create the ledger table if it does not exist."""
-    pool = conn._require_pool()
-    await pool.execute(CREATE_LEDGER_SQL)
+    driver = conn._require_driver()
+    await driver.execute(_create_ledger_sql(conn.dialect))
 
 
 async def record_applied(
@@ -58,25 +111,31 @@ async def record_applied(
     environment: str = "development",
     description: str = "",
 ) -> None:
-    """Append a record for an applied migration.
-
-    Raises ``FerrumMigrationError`` if the digest has already been recorded
-    (replay guard, MIG-8).  Credentials and bound values are never included in
-    the error message (CRED-1).
-    """
-    pool = conn._require_pool()
+    """Append a record for an applied migration."""
+    driver = conn._require_driver()
     try:
-        await pool.execute(
-            "INSERT INTO ferrum_migrations (digest, environment, description) VALUES ($1, $2, $3)",
+        await driver.execute(
+            _insert_ledger_sql(conn.dialect),
             digest,
             environment,
             description,
         )
     except Exception as exc:
-        if (
-            _HAS_ASYNCPG
-            and _asyncpg_exc is not None
-            and isinstance(exc, _asyncpg_exc.UniqueViolationError)
+        if _HAS_ASYNCPG and _asyncpg_exc is not None and isinstance(
+            exc, _asyncpg_exc.UniqueViolationError
+        ):
+            raise FerrumMigrationError(
+                f"Migration {description!r} has already been applied. [FERR-M003]"
+            ) from None
+        integrity_cls = (
+            getattr(_asyncmy_exc, "IntegrityError", None) if _HAS_ASYNCMY else None
+        )
+        if integrity_cls is not None and isinstance(exc, integrity_cls):
+            raise FerrumMigrationError(
+                f"Migration {description!r} has already been applied. [FERR-M003]"
+            ) from None
+        if _HAS_AIOSQLITE and aiosqlite is not None and isinstance(
+            exc, aiosqlite.IntegrityError
         ):
             raise FerrumMigrationError(
                 f"Migration {description!r} has already been applied. [FERR-M003]"
@@ -86,21 +145,12 @@ async def record_applied(
 
 async def is_applied(conn: Connection, digest: str) -> bool:
     """Return True if a migration with this digest has already been applied."""
-    pool = conn._require_pool()
-    row = await pool.fetchrow(
-        "SELECT 1 FROM ferrum_migrations WHERE digest = $1",
-        digest,
-    )
+    driver = conn._require_driver()
+    row = await driver.fetchrow(_select_digest_sql(conn.dialect), digest)
     return row is not None
 
 
 async def delete_applied(conn: Connection, digest: str) -> None:
-    """Remove a migration record from the ledger (used by revert only).
-
-    No credentials or bound values appear in errors or logs (CRED-1).
-    """
-    pool = conn._require_pool()
-    await pool.execute(
-        "DELETE FROM ferrum_migrations WHERE digest = $1",
-        digest,
-    )
+    """Remove a migration record from the ledger (used by revert only)."""
+    driver = conn._require_driver()
+    await driver.execute(_delete_digest_sql(conn.dialect), digest)

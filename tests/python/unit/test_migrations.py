@@ -41,9 +41,10 @@ def _plan_json(
 
 
 def _make_conn(*, pool: object = None) -> MagicMock:
-    """Return a mock Connection whose _require_pool returns ``pool``."""
+    """Return a mock Connection whose _require_driver returns ``pool``."""
     conn = MagicMock()
-    conn._require_pool.return_value = pool or MagicMock()
+    conn.dialect = "postgres"
+    conn._require_driver.return_value = pool or MagicMock()
     return conn
 
 
@@ -67,7 +68,7 @@ async def test_dry_run_returns_without_applying() -> None:
     assert result.ops_count == 1
 
     # Pool must not be acquired at all during dry-run.
-    conn._require_pool.assert_not_called()
+    conn._require_driver.assert_not_called()
     pool.execute.assert_not_called()
 
 

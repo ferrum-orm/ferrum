@@ -28,7 +28,7 @@ MODELS = [Note]
 
 async def _fetch_existing_tables(conn) -> dict[str, list[str]]:  # noqa: ANN001
     """Introspect public tables via information_schema."""
-    pool = conn._require_pool()
+    pool = conn._require_driver()
     rows = await pool.fetch(
         """
         SELECT table_name, column_name

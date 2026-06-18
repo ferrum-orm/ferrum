@@ -15,11 +15,11 @@ class FerrumCompileError(RuntimeError):
 class FerrumHydrationError(RuntimeError):
     """Row hydration failed: missing required column, type mismatch, or malformed JSON."""
 
-def compile_query(metadata_json: str, ir_json: str) -> dict[str, object]:
+def compile_query(metadata_json: str, ir_json: str, dialect: str = "postgres") -> dict[str, object]:
     """Compile a ``QuerySetIR`` (JSON) against model metadata (JSON).
 
     Returns a dict with keys:
-        sql_text: str — parameterized SQL ($1, $2, …)
+        sql_text: str — parameterized SQL ($1/$2 for PostgreSQL, ? for MySQL/SQLite)
         bound_params: list[str] — JSON-encoded bound values in placeholder order
         param_type_summary: list[str] — Tier A observability summary (no values)
         fingerprint: str — stable FNV-1a hash of the SQL shape

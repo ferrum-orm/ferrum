@@ -1,4 +1,4 @@
-//! `ferrum-sql`: PostgreSQL-dialect SQL emission.
+//! `ferrum-sql`: per-dialect SQL emission.
 //!
 //! Receives validated AST/IR nodes from `ferrum-core` and emits parameterized
 //! `PostgreSQL` SQL text (`$1`, `$2`, … placeholders).

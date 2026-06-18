@@ -326,9 +326,10 @@ class TestWritePathStatusStringParsing:
             "operation": "delete",
         }
         mock_conn = MagicMock()
+        mock_conn.dialect = "postgres"
         mock_pool = AsyncMock()
         mock_pool.execute = AsyncMock(return_value="DELETE OK")
-        mock_conn._require_pool.return_value = mock_pool
+        mock_conn._require_driver.return_value = mock_pool
         with patch("ferrum.queryset._native_ext", mock_ext):
             result = await qs.delete(mock_conn)
         assert result == 0
@@ -349,9 +350,10 @@ class TestWritePathStatusStringParsing:
             "operation": "update",
         }
         mock_conn = MagicMock()
+        mock_conn.dialect = "postgres"
         mock_pool = AsyncMock()
         mock_pool.execute = AsyncMock(return_value="UPDATE OK")
-        mock_conn._require_pool.return_value = mock_pool
+        mock_conn._require_driver.return_value = mock_pool
         with patch("ferrum.queryset._native_ext", mock_ext):
             result = await qs.update(mock_conn, title="x")
         assert result == 0
@@ -378,9 +380,10 @@ class TestWritePathHookDispatch:
             "operation": "delete",
         }
         mock_conn = MagicMock()
+        mock_conn.dialect = "postgres"
         mock_pool = AsyncMock()
         mock_pool.execute = AsyncMock(return_value="DELETE 2")
-        mock_conn._require_pool.return_value = mock_pool
+        mock_conn._require_driver.return_value = mock_pool
 
         dispatched: list[dict] = []
 
@@ -420,11 +423,12 @@ class TestWritePathHookDispatch:
             "operation": "update",
         }
         mock_conn = MagicMock()
+        mock_conn.dialect = "postgres"
         mock_pool = AsyncMock()
         mock_pool.execute = AsyncMock(
             side_effect=asyncpg.exceptions.PostgresConnectionError("connection lost")
         )
-        mock_conn._require_pool.return_value = mock_pool
+        mock_conn._require_driver.return_value = mock_pool
 
         dispatched: list[dict] = []
         from ferrum.hooks import clear_hooks, register_hook
@@ -458,9 +462,10 @@ class TestWritePathHookDispatch:
             "operation": "delete",
         }
         mock_conn = MagicMock()
+        mock_conn.dialect = "postgres"
         mock_pool = AsyncMock()
         mock_pool.execute = AsyncMock(return_value="DELETE 1")
-        mock_conn._require_pool.return_value = mock_pool
+        mock_conn._require_driver.return_value = mock_pool
 
         dispatched: list[dict] = []
         from ferrum.hooks import clear_hooks, register_hook

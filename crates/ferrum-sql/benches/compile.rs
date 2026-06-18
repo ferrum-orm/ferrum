@@ -8,6 +8,7 @@ use ferrum_core::ir::{
     BindValue, FieldRef, Filter, ModelMetadata, Operation, OrderBy, QuerySetIR, SortDirection,
     IR_VERSION,
 };
+use ferrum_sql::dialect::Dialect;
 use ferrum_sql::emit::emit_select;
 
 fn bench_metadata() -> ModelMetadata {
@@ -125,7 +126,14 @@ fn compile_query(c: &mut Criterion) {
         BenchmarkId::new("select_filtered", "representative"),
         &(&metadata, &ir),
         |b, (meta, query_ir)| {
-            b.iter(|| emit_select(black_box(meta), black_box(query_ir)).unwrap());
+            b.iter(|| {
+                emit_select(
+                    black_box(Dialect::Postgres),
+                    black_box(meta),
+                    black_box(query_ir),
+                )
+                .unwrap()
+            });
         },
     );
 

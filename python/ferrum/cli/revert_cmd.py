@@ -102,13 +102,20 @@ async def run_revert(
                 rprint(f"Reverting [bold]{module.name}[/bold]...")
 
                 try:
-                    pool = conn._require_pool()
-                    async with pool.acquire() as db_conn, db_conn.transaction():
+                    driver = conn._require_driver()
+                    dialect = conn.dialect
+                    if dialect == "postgres":
+                        pool = getattr(driver, "_pool", None)
+                        if pool is None:
+                            raise FerrumMigrationError("PostgreSQL pool is not open. [FERR-M001]")
+                        async with pool.acquire() as db_conn, db_conn.transaction():
+                            for op in reverse_ops:
+                                sql = _op_to_sql(op.to_op_dict(), dialect=dialect)
+                                await db_conn.execute(sql)
+                    else:
                         for op in reverse_ops:
-                            sql = _op_to_sql(op.to_op_dict())
-                            await db_conn.execute(sql)
-                    # Ledger delete is issued after the DDL transaction commits so
-                    # the schema change and ledger removal are best-effort atomic.
+                            sql = _op_to_sql(op.to_op_dict(), dialect=dialect)
+                            await driver.execute(sql)
                     await _ledger.delete_applied(conn, digest)
                 except FerrumMigrationError:
                     raise

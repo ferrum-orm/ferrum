@@ -1,4 +1,4 @@
-//! SQL emitters for `PostgreSQL`: SELECT (Wave 1). INSERT/UPDATE/DELETE follow in Wave 3.
+//! SQL emitters: SELECT, INSERT, UPDATE, DELETE — parameterized per dialect.
 //!
 //! Each emitter takes validated IR nodes (field refs already checked against
 //! allowlists in `ferrum-core::compile`) and produces parameterized SQL text.
@@ -10,7 +10,7 @@
 //!   parameter, never interpolated into the SQL text.
 //! - `bound_params` never contains SQL identifier strings.
 
-use crate::dialect;
+use crate::dialect::Dialect;
 use ferrum_core::{
     compile::CompiledQuery,
     error::CompileError,
@@ -26,6 +26,7 @@ use std::fmt::Write as _;
 /// # Errors
 /// Propagates `CompileError` from allowlist validation or malformed IR.
 pub fn emit_select(
+    dialect: Dialect,
     metadata: &ModelMetadata,
     ir: &QuerySetIR,
 ) -> Result<CompiledQuery, CompileError> {
@@ -33,13 +34,13 @@ pub fn emit_select(
     ferrum_core::compile::compile(metadata, ir)?;
 
     // Build SELECT clause from validated field refs.
-    let table = dialect::quote_ident(&metadata.table_name);
+    let table = dialect.quote_ident(&metadata.table_name);
     let fields = match &ir.operation {
         ferrum_core::ir::Operation::Select { fields } => fields
             .iter()
             .map(|f| {
                 let col = &metadata.fields[f.index].column_name;
-                dialect::quote_ident(col)
+                dialect.quote_ident(col)
             })
             .collect::<Vec<_>>()
             .join(", "),
@@ -55,8 +56,9 @@ pub fn emit_select(
     let mut where_clauses: Vec<String> = Vec::new();
 
     for filter in &ir.filters {
-        let col = dialect::quote_ident(&metadata.fields[filter.field.index].column_name);
+        let col = dialect.quote_ident(&metadata.fields[filter.field.index].column_name);
         let (clause, param) = filter_clause(
+            dialect,
             &col,
             &filter.operator,
             bound_params.len() + 1,
@@ -78,7 +80,7 @@ pub fn emit_select(
     if !ir.order_by.is_empty() {
         let mut order_parts: Vec<String> = Vec::new();
         for o in &ir.order_by {
-            let col = dialect::quote_ident(&metadata.fields[o.field.index].column_name);
+            let col = dialect.quote_ident(&metadata.fields[o.field.index].column_name);
             // `Unknown` is already rejected by ferrum_core::compile above;
             // this arm is here for exhaustiveness (Defense in Depth).
             let dir = match o.direction {
@@ -97,9 +99,9 @@ pub fn emit_select(
         sql.push_str(" ORDER BY ");
         sql.push_str(&order_parts.join(", "));
     } else if let Some(vector_order) = &ir.vector_order_by {
-        let col = dialect::quote_ident(&metadata.fields[vector_order.field.index].column_name);
+        let col = dialect.quote_ident(&metadata.fields[vector_order.field.index].column_name);
         let op = vector_metric_to_sql(vector_order.metric);
-        let placeholder = dialect::placeholder(bound_params.len() + 1);
+        let placeholder = dialect.placeholder(bound_params.len() + 1);
         write!(sql, " ORDER BY {col} {op} {placeholder}").expect("write to String is infallible");
         param_type_summary.push(format!("{}:nearest_to", vector_order.field.name));
         bound_params.push(vector_order.value.clone());
@@ -108,13 +110,13 @@ pub fn emit_select(
     // LIMIT and OFFSET are bound parameters — values are never interpolated
     // into SQL text, even for integer-only inputs (SQL-2, Tier A discipline).
     if let Some(limit) = ir.limit {
-        let placeholder = dialect::placeholder(bound_params.len() + 1);
+        let placeholder = dialect.placeholder(bound_params.len() + 1);
         write!(sql, " LIMIT {placeholder}").expect("write to String is infallible");
         param_type_summary.push("limit:int".into());
         bound_params.push(BindValue::Int(i64::try_from(limit).unwrap_or(i64::MAX)));
     }
     if let Some(offset) = ir.offset {
-        let placeholder = dialect::placeholder(bound_params.len() + 1);
+        let placeholder = dialect.placeholder(bound_params.len() + 1);
         write!(sql, " OFFSET {placeholder}").expect("write to String is infallible");
         param_type_summary.push("offset:int".into());
         bound_params.push(BindValue::Int(i64::try_from(offset).unwrap_or(i64::MAX)));
@@ -138,6 +140,7 @@ pub fn emit_select(
 /// # Errors
 /// Propagates `CompileError` from allowlist validation or malformed IR.
 pub fn emit_insert(
+    dialect: Dialect,
     metadata: &ModelMetadata,
     ir: &QuerySetIR,
 ) -> Result<CompiledQuery, CompileError> {
@@ -149,7 +152,7 @@ pub fn emit_insert(
         });
     };
 
-    let table = dialect::quote_ident(&metadata.table_name);
+    let table = dialect.quote_ident(&metadata.table_name);
     let mut bound_params: Vec<BindValue> = Vec::new();
     let mut param_type_summary: Vec<String> = Vec::new();
     let mut col_names: Vec<String> = Vec::new();
@@ -157,23 +160,29 @@ pub fn emit_insert(
 
     for (field_ref, value) in values {
         // Column name from the metadata allowlist — never the raw user string.
-        col_names.push(dialect::quote_ident(
-            &metadata.fields[field_ref.index].column_name,
-        ));
-        let ph = dialect::placeholder(bound_params.len() + 1);
+        col_names.push(dialect.quote_ident(&metadata.fields[field_ref.index].column_name));
+        let ph = dialect.placeholder(bound_params.len() + 1);
         placeholders.push(ph);
         param_type_summary.push(format!("{}:insert", field_ref.name));
         bound_params.push(value.clone());
     }
 
     // RETURNING all model fields so the Python side can hydrate the inserted row.
-    let returning = returning_all_fields(metadata);
+    let returning = returning_all_fields(dialect, metadata);
 
-    let sql = format!(
-        "INSERT INTO {table} ({cols}) VALUES ({vals}) RETURNING {returning}",
-        cols = col_names.join(", "),
-        vals = placeholders.join(", "),
-    );
+    let sql = if dialect.supports_returning() {
+        format!(
+            "INSERT INTO {table} ({cols}) VALUES ({vals}) RETURNING {returning}",
+            cols = col_names.join(", "),
+            vals = placeholders.join(", "),
+        )
+    } else {
+        format!(
+            "INSERT INTO {table} ({cols}) VALUES ({vals})",
+            cols = col_names.join(", "),
+            vals = placeholders.join(", "),
+        )
+    };
     let fingerprint = sql_fingerprint(&sql);
 
     Ok(CompiledQuery {
@@ -192,6 +201,7 @@ pub fn emit_insert(
 /// # Errors
 /// Propagates `CompileError` from allowlist validation or malformed IR.
 pub fn emit_update(
+    dialect: Dialect,
     metadata: &ModelMetadata,
     ir: &QuerySetIR,
 ) -> Result<CompiledQuery, CompileError> {
@@ -204,14 +214,14 @@ pub fn emit_update(
         });
     };
 
-    let table = dialect::quote_ident(&metadata.table_name);
+    let table = dialect.quote_ident(&metadata.table_name);
     let mut bound_params: Vec<BindValue> = Vec::new();
     let mut param_type_summary: Vec<String> = Vec::new();
     let mut set_clauses: Vec<String> = Vec::new();
 
     for (field_ref, value) in assignments {
-        let col = dialect::quote_ident(&metadata.fields[field_ref.index].column_name);
-        let ph = dialect::placeholder(bound_params.len() + 1);
+        let col = dialect.quote_ident(&metadata.fields[field_ref.index].column_name);
+        let ph = dialect.placeholder(bound_params.len() + 1);
         set_clauses.push(format!("{col} = {ph}"));
         param_type_summary.push(format!("{}:assign", field_ref.name));
         bound_params.push(value.clone());
@@ -219,8 +229,9 @@ pub fn emit_update(
 
     let mut where_clauses: Vec<String> = Vec::new();
     for filter in &ir.filters {
-        let col = dialect::quote_ident(&metadata.fields[filter.field.index].column_name);
+        let col = dialect.quote_ident(&metadata.fields[filter.field.index].column_name);
         let (clause, param) = filter_clause(
+            dialect,
             &col,
             &filter.operator,
             bound_params.len() + 1,
@@ -233,11 +244,13 @@ pub fn emit_update(
         }
     }
 
-    let returning = returning_all_fields(metadata);
+    let returning = returning_all_fields(dialect, metadata);
 
     let mut sql = format!("UPDATE {table} SET {}", set_clauses.join(", "));
     write!(sql, " WHERE {}", where_clauses.join(" AND ")).expect("write to String is infallible");
-    write!(sql, " RETURNING {returning}").expect("write to String is infallible");
+    if dialect.supports_returning() {
+        write!(sql, " RETURNING {returning}").expect("write to String is infallible");
+    }
 
     let fingerprint = sql_fingerprint(&sql);
 
@@ -257,20 +270,22 @@ pub fn emit_update(
 /// # Errors
 /// Propagates `CompileError` from allowlist validation or malformed IR.
 pub fn emit_delete(
+    dialect: Dialect,
     metadata: &ModelMetadata,
     ir: &QuerySetIR,
 ) -> Result<CompiledQuery, CompileError> {
     // `compile` enforces MissingFilter for unfiltered DELETE.
     ferrum_core::compile::compile(metadata, ir)?;
 
-    let table = dialect::quote_ident(&metadata.table_name);
+    let table = dialect.quote_ident(&metadata.table_name);
     let mut bound_params: Vec<BindValue> = Vec::new();
     let mut param_type_summary: Vec<String> = Vec::new();
     let mut where_clauses: Vec<String> = Vec::new();
 
     for filter in &ir.filters {
-        let col = dialect::quote_ident(&metadata.fields[filter.field.index].column_name);
+        let col = dialect.quote_ident(&metadata.fields[filter.field.index].column_name);
         let (clause, param) = filter_clause(
+            dialect,
             &col,
             &filter.operator,
             bound_params.len() + 1,
@@ -297,17 +312,18 @@ pub fn emit_delete(
 /// Build the `RETURNING` list for all model fields (used by INSERT and UPDATE).
 ///
 /// Uses the metadata allowlist, never user input.
-fn returning_all_fields(metadata: &ModelMetadata) -> String {
+fn returning_all_fields(dialect: Dialect, metadata: &ModelMetadata) -> String {
     metadata
         .fields
         .iter()
-        .map(|f| dialect::quote_ident(&f.column_name))
+        .map(|f| dialect.quote_ident(&f.column_name))
         .collect::<Vec<_>>()
         .join(", ")
 }
 
 /// Build a WHERE predicate and optional bound parameter for a filter.
 fn filter_clause(
+    dialect: Dialect,
     col: &str,
     operator: &str,
     param_index: usize,
@@ -317,15 +333,19 @@ fn filter_clause(
         "is_null" => (format!("{col} IS NULL"), None),
         "is_not_null" => (format!("{col} IS NOT NULL"), None),
         "match" => {
-            let placeholder = dialect::placeholder(param_index);
+            if dialect != Dialect::Postgres {
+                let placeholder = dialect.placeholder(param_index);
+                return (format!("{col} LIKE {placeholder}"), Some(value));
+            }
+            let placeholder = dialect.placeholder(param_index);
             (
                 format!("{col} @@ plainto_tsquery({placeholder})"),
                 Some(value),
             )
         }
         op => {
-            let placeholder = dialect::placeholder(param_index);
-            let sql_op = operator_to_sql(op);
+            let placeholder = dialect.placeholder(param_index);
+            let sql_op = operator_to_sql(op, dialect);
             (format!("{col} {sql_op} {placeholder}"), Some(value))
         }
     }
@@ -343,7 +363,7 @@ fn vector_metric_to_sql(metric: VectorMetric) -> &'static str {
 ///
 /// Only operators in the per-field allowlists can reach this function;
 /// the `_` arm covers `"eq"` and is never hit for disallowed operators.
-fn operator_to_sql(op: &str) -> &'static str {
+fn operator_to_sql(op: &str, dialect: Dialect) -> &'static str {
     match op {
         "ne" => "<>",
         "gt" => ">",
@@ -352,8 +372,8 @@ fn operator_to_sql(op: &str) -> &'static str {
         "lte" => "<=",
         "is_null" => "IS NULL",
         "is_not_null" => "IS NOT NULL",
-        "icontains" => "ILIKE",
-        "contains" => "LIKE",
+        "icontains" if dialect == Dialect::Postgres => "ILIKE",
+        "icontains" | "contains" => "LIKE",
         _ => "=", // covers "eq"; unreachable for non-allowlisted operators
     }
 }
@@ -377,6 +397,7 @@ fn sql_fingerprint(sql: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dialect::Dialect;
     use ferrum_core::ir::{
         metadata::{FieldMeta, FieldType},
         BindValue, FieldRef, Filter, Operation, OrderBy, QuerySetIR, SortDirection, IR_VERSION,
@@ -436,7 +457,7 @@ mod tests {
                 index: 1,
             },
         ]);
-        let q = emit_select(&meta, &ir).unwrap();
+        let q = emit_select(Dialect::Postgres, &meta, &ir).unwrap();
         assert!(q.sql_text.contains("\"users\""));
         assert!(q.sql_text.contains("\"id\""));
         assert!(q.bound_params.is_empty());
@@ -461,7 +482,7 @@ mod tests {
             operator: "eq".into(),
             value: BindValue::Text("x@example.com".into()),
         });
-        let q = emit_select(&meta, &ir).unwrap();
+        let q = emit_select(Dialect::Postgres, &meta, &ir).unwrap();
         // Bound value must NOT appear in SQL text (SQL-2).
         assert!(
             !q.sql_text.contains("x@example.com"),
@@ -489,7 +510,7 @@ mod tests {
         ir.limit = Some(10);
         ir.offset = Some(5);
 
-        let q = emit_select(&meta, &ir).unwrap();
+        let q = emit_select(Dialect::Postgres, &meta, &ir).unwrap();
         assert!(q.sql_text.contains("ORDER BY"), "ORDER BY present");
         assert!(q.sql_text.contains("DESC"), "DESC direction");
         // Limit and offset must appear as placeholders, not literals.
@@ -520,7 +541,7 @@ mod tests {
             name: "ghost".into(),
             index: 99,
         }]);
-        let err = emit_select(&meta, &ir).unwrap_err();
+        let err = emit_select(Dialect::Postgres, &meta, &ir).unwrap_err();
         assert!(matches!(err, CompileError::UnknownField { .. }));
     }
 
@@ -540,7 +561,7 @@ mod tests {
             operator: "icontains".into(), // not allowed for Int field
             value: BindValue::Int(42),
         });
-        let err = emit_select(&meta, &ir).unwrap_err();
+        let err = emit_select(Dialect::Postgres, &meta, &ir).unwrap_err();
         assert!(matches!(err, CompileError::UnsupportedOperator { .. }));
     }
 
@@ -560,7 +581,7 @@ mod tests {
             },
             direction: SortDirection::Unknown,
         });
-        let err = emit_select(&meta, &ir).unwrap_err();
+        let err = emit_select(Dialect::Postgres, &meta, &ir).unwrap_err();
         assert!(matches!(err, CompileError::InvalidSortDirection { .. }));
     }
 
@@ -592,7 +613,7 @@ mod tests {
         });
         ir.limit = Some(20);
 
-        let q = emit_select(&meta, &ir).unwrap();
+        let q = emit_select(Dialect::Postgres, &meta, &ir).unwrap();
 
         // No bound_param may carry a SQL identifier string (table/column name).
         for param in &q.bound_params {
@@ -631,8 +652,8 @@ mod tests {
             name: "id".into(),
             index: 0,
         }]);
-        let q1 = emit_select(&meta, &ir).unwrap();
-        let q2 = emit_select(&meta, &ir).unwrap();
+        let q1 = emit_select(Dialect::Postgres, &meta, &ir).unwrap();
+        let q2 = emit_select(Dialect::Postgres, &meta, &ir).unwrap();
         assert_eq!(q1.fingerprint, q2.fingerprint);
     }
 
@@ -663,7 +684,7 @@ mod tests {
             },
             BindValue::Text("secret@example.com".into()),
         )]);
-        let q = emit_insert(&meta, &ir).unwrap();
+        let q = emit_insert(Dialect::Postgres, &meta, &ir).unwrap();
 
         // Value must NOT be in sql_text.
         assert!(
@@ -705,7 +726,7 @@ mod tests {
             },
             BindValue::Int(1),
         )]);
-        let q = emit_insert(&meta, &ir).unwrap();
+        let q = emit_insert(Dialect::Postgres, &meta, &ir).unwrap();
         // RETURNING must include both model fields.
         assert!(q.sql_text.contains("\"id\""));
         assert!(q.sql_text.contains("\"email\""));
@@ -743,7 +764,7 @@ mod tests {
             )],
             vec![],
         );
-        let err = emit_update(&meta, &ir).unwrap_err();
+        let err = emit_update(Dialect::Postgres, &meta, &ir).unwrap_err();
         assert!(
             matches!(err, CompileError::MissingFilter { .. }),
             "expected MissingFilter, got {err:?}"
@@ -770,7 +791,7 @@ mod tests {
                 value: BindValue::Int(42),
             }],
         );
-        let q = emit_update(&meta, &ir).unwrap();
+        let q = emit_update(Dialect::Postgres, &meta, &ir).unwrap();
         assert!(
             !q.sql_text.contains("new@example.com"),
             "assignment value not in sql_text"
@@ -802,7 +823,7 @@ mod tests {
     fn emit_delete_rejects_empty_filters() {
         let meta = make_metadata();
         let ir = delete_ir(vec![]);
-        let err = emit_delete(&meta, &ir).unwrap_err();
+        let err = emit_delete(Dialect::Postgres, &meta, &ir).unwrap_err();
         assert!(
             matches!(err, CompileError::MissingFilter { .. }),
             "expected MissingFilter, got {err:?}"
@@ -820,7 +841,7 @@ mod tests {
             operator: "eq".into(),
             value: BindValue::Int(7),
         }]);
-        let q = emit_delete(&meta, &ir).unwrap();
+        let q = emit_delete(Dialect::Postgres, &meta, &ir).unwrap();
         // Filter value must not appear in sql_text.
         assert!(
             !q.sql_text.contains('7'),

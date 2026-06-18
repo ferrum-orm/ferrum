@@ -38,7 +38,7 @@ class TestRustPanicAndErrorBoundary:
         )
 
         with pytest.raises(Exception) as exc_info:
-            _native.compile_query("{}", "{}")
+            _native.compile_query("{}", "{}", "postgres")
 
         exc = exc_info.value
         # Must be a Ferrum-typed exception from the extension, not a bare RuntimeError.
@@ -74,7 +74,7 @@ class TestRustPanicAndErrorBoundary:
         ir_json = json.dumps(ir)
 
         with pytest.raises(Exception) as exc_info:
-            _native.compile_query(metadata_json, ir_json)
+            _native.compile_query(metadata_json, ir_json, "postgres")
 
         assert isinstance(exc_info.value, _native.FerrumCompileError), (
             f"IR version mismatch must raise FerrumCompileError, "
@@ -112,7 +112,7 @@ class TestRustPanicAndErrorBoundary:
         ir_json = json.dumps(ir)
 
         with pytest.raises(Exception) as exc_info:
-            _native.compile_query(metadata_json, ir_json)
+            _native.compile_query(metadata_json, ir_json, "postgres")
 
         assert isinstance(exc_info.value, _native.FerrumCompileError), (
             f"Unknown field index must raise FerrumCompileError, "
@@ -150,7 +150,7 @@ class TestRustPanicAndErrorBoundary:
         ir_json = json.dumps(ir)
 
         with pytest.raises(Exception) as exc_info:
-            _native.compile_query(metadata_json, ir_json)
+            _native.compile_query(metadata_json, ir_json, "postgres")
 
         assert sentinel not in str(exc_info.value), (
             f"Bound value {sentinel!r} must not appear in error message"
@@ -170,7 +170,7 @@ class TestRustPanicAndErrorBoundary:
         metadata_json = Probe.get_metadata().to_metadata_json()
         ir_json = Probe.objects.filter(id=1).to_ir_json()
 
-        result = _native.compile_query(metadata_json, ir_json)
+        result = _native.compile_query(metadata_json, ir_json, "postgres")
         assert isinstance(result, dict)
         assert "sql_text" in result
         assert "SELECT" in result["sql_text"].upper()

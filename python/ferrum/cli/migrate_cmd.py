@@ -96,16 +96,26 @@ async def run_migrate(
                     continue
 
                 try:
-                    pool = conn._require_pool()
-                    async with pool.acquire() as db_conn, db_conn.transaction():
+                    driver = conn._require_driver()
+                    dialect = conn.dialect
+                    if dialect == "postgres":
+                        pool = getattr(driver, "_pool", None)
+                        if pool is None:
+                            raise FerrumMigrationError("PostgreSQL pool is not open. [FERR-M001]")
+                        async with pool.acquire() as db_conn, db_conn.transaction():
+                            for op in ops:
+                                sql = _op_to_sql(op.to_op_dict(), dialect=dialect)
+                                await db_conn.execute(sql)
+                            await _ledger.record_applied(
+                                conn,
+                                digest,
+                                environment=env,
+                                description=module.name,
+                            )
+                    else:
                         for op in ops:
-                            sql = _op_to_sql(op.to_op_dict())
-                            await db_conn.execute(sql)
-                        # record_applied uses conn (pool), not db_conn — the INSERT
-                        # is issued via a separate pool connection.  PostgreSQL DDL
-                        # is committed first on transaction exit, then ledger is
-                        # written; a failure here leaves the DDL applied but
-                        # un-recorded, which is detectable on the next run.
+                            sql = _op_to_sql(op.to_op_dict(), dialect=dialect)
+                            await driver.execute(sql)
                         await _ledger.record_applied(
                             conn,
                             digest,

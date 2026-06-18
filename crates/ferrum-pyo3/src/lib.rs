@@ -44,7 +44,12 @@ pyo3::create_exception!(ferrum_native, FerrumHydrationError, PyRuntimeError);
 ///   mismatch, missing filter on mutation, or malformed JSON.
 /// - `FerrumInternalError` — Rust panic (should never occur in normal use; ERR-2).
 #[pyfunction]
-fn compile_query(py: Python<'_>, metadata_json: &str, ir_json: &str) -> PyResult<Py<PyAny>> {
+fn compile_query(
+    py: Python<'_>,
+    metadata_json: &str,
+    ir_json: &str,
+    dialect: &str,
+) -> PyResult<Py<PyAny>> {
     // `AssertUnwindSafe` is sound here: we only share `&str` (Copy, RefUnwindSafe)
     // across the panic boundary, and the closure is called exactly once.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -55,6 +60,12 @@ fn compile_query(py: Python<'_>, metadata_json: &str, ir_json: &str) -> PyResult
         let ir: ferrum_core::ir::QuerySetIR = serde_json::from_str(ir_json).map_err(|e| {
             ferrum_core::error::CompileError::MalformedIr {
                 reason: format!("IR deserialization failed: {e}"),
+            }
+        })?;
+
+        let sql_dialect = ferrum_sql::dialect::Dialect::parse(dialect).ok_or_else(|| {
+            ferrum_core::error::CompileError::MalformedIr {
+                reason: format!("unknown dialect {dialect:?}; expected postgres, mysql, or sqlite"),
             }
         })?;
 
@@ -71,16 +82,16 @@ fn compile_query(py: Python<'_>, metadata_json: &str, ir_json: &str) -> PyResult
         // before any SQL text is produced (SQL-1).
         let compiled = match &ir.operation {
             ferrum_core::ir::Operation::Select { .. } => {
-                ferrum_sql::emit::emit_select(&metadata, &ir)
+                ferrum_sql::emit::emit_select(sql_dialect, &metadata, &ir)
             }
             ferrum_core::ir::Operation::Insert { .. } => {
-                ferrum_sql::emit::emit_insert(&metadata, &ir)
+                ferrum_sql::emit::emit_insert(sql_dialect, &metadata, &ir)
             }
             ferrum_core::ir::Operation::Update { .. } => {
-                ferrum_sql::emit::emit_update(&metadata, &ir)
+                ferrum_sql::emit::emit_update(sql_dialect, &metadata, &ir)
             }
             ferrum_core::ir::Operation::Delete { .. } => {
-                ferrum_sql::emit::emit_delete(&metadata, &ir)
+                ferrum_sql::emit::emit_delete(sql_dialect, &metadata, &ir)
             }
         }?;
 

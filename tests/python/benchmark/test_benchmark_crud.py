@@ -109,7 +109,7 @@ def test_native_compile_overhead(benchmark: pytest.BenchmarkFixture) -> None:
     ir_json = qs.to_ir_json()
 
     def compile_once() -> None:
-        result = _native.compile_query(metadata_json, ir_json)
+        result = _native.compile_query(metadata_json, ir_json, "postgres")
         assert "sql_text" in result
 
     benchmark(compile_once)

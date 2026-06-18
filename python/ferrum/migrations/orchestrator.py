@@ -149,7 +149,29 @@ _DEFAULT_VALUE_ALLOWLIST: frozenset[str] = frozenset(
 )
 
 
-def _col_def(col: dict[str, Any]) -> str:
+def _quote_ident(name: str, dialect: str) -> str:
+    """Quote a DDL identifier for the target dialect."""
+    if dialect == "mysql":
+        return "`" + name.replace("`", "``") + "`"
+    escaped = name.replace('"', '""')
+    return f'"{escaped}"'
+
+
+def _map_sql_type(sql_type: str, dialect: str) -> str:
+    """Map canonical SQL types to dialect-specific DDL tokens."""
+    upper = sql_type.upper()
+    if dialect == "mysql" and upper.startswith("BOOLEAN"):
+        return sql_type.replace("BOOLEAN", "TINYINT(1)").replace("boolean", "TINYINT(1)")
+    if dialect == "mysql" and upper == "BYTEA":
+        return "BLOB"
+    if dialect == "sqlite" and upper == "BYTEA":
+        return "BLOB"
+    if dialect == "sqlite" and upper.startswith("TIMESTAMPTZ"):
+        return sql_type.replace("TIMESTAMPTZ", "TEXT").replace("timestamptz", "TEXT")
+    return sql_type
+
+
+def _col_def(col: dict[str, Any], *, dialect: str = "postgres") -> str:
     """Build a column definition fragment for CREATE TABLE / ADD COLUMN.
 
     Security: identifiers are double-quoted; sql_type and default are
@@ -159,17 +181,30 @@ def _col_def(col: dict[str, Any]) -> str:
     the base token before the first ``(`` is checked against the allowlist so the
     parameter portion is never interpolated without the token being whitelisted.
     """
-    sql_type = col.get("sql_type", "TEXT")
+    sql_type = _map_sql_type(col.get("sql_type", "TEXT"), dialect)
     base_type = sql_type.split("(")[0].upper()
-    if base_type not in _SQL_TYPE_ALLOWLIST:
+    if base_type not in _SQL_TYPE_ALLOWLIST and dialect != "mysql":
         raise FerrumMigrationError(
             f"Unsupported SQL type {sql_type!r}. "
-            f"Only standard PostgreSQL types are allowed. [FERR-M001]"
+            f"Only standard SQL types are allowed. [FERR-M001]"
         )
-    parts = [f'"{col["name"]}" {sql_type.upper()}']
-    if col.get("not_null") or not col.get("nullable", True):
-        parts.append("NOT NULL")
+    if (
+        dialect == "mysql"
+        and base_type not in _SQL_TYPE_ALLOWLIST
+        and base_type not in {"TINYINT", "BLOB", "LONGTEXT", "DATETIME"}
+    ):
+        raise FerrumMigrationError(
+            f"Unsupported SQL type {sql_type!r}. [FERR-M001]"
+        )
+    parts = [f'{_quote_ident(col["name"], dialect)} {sql_type.upper()}']
     default = col.get("default")
+    not_null = col.get("not_null") or not col.get("nullable", True)
+    if not_null:
+        if dialect == "sqlite" and default is None and col.get("kind") == "add_column":
+            raise FerrumMigrationError(
+                "SQLite does not allow ADD COLUMN NOT NULL without a DEFAULT. [FERR-M001]"
+            )
+        parts.append("NOT NULL")
     if default is not None:
         if str(default).upper() not in _DEFAULT_VALUE_ALLOWLIST:
             raise FerrumMigrationError(
@@ -184,7 +219,7 @@ def _col_def(col: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-def _op_to_sql(op: dict[str, Any]) -> str:
+def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
     """Generate DDL SQL from a MigrationOp dict.
 
     All table/column/index names are double-quoted. Values are sourced
@@ -206,28 +241,51 @@ def _op_to_sql(op: dict[str, Any]) -> str:
 
     if kind == "create_table":
         table = op["table"]
-        col_defs = ", ".join(_col_def(c) for c in op.get("columns", []))
-        return f'CREATE TABLE IF NOT EXISTS "{table}" ({col_defs})'
+        col_defs = ", ".join(_col_def(c, dialect=dialect) for c in op.get("columns", []))
+        sql = f'CREATE TABLE IF NOT EXISTS {_quote_ident(table, dialect)} ({col_defs})'
+        if dialect == "mysql":
+            sql += " ENGINE=InnoDB"
+        return sql
 
     if kind == "drop_table":
         table = op["table"]
-        return f'DROP TABLE IF EXISTS "{table}"'
+        return f'DROP TABLE IF EXISTS {_quote_ident(table, dialect)}'
 
     if kind == "add_column":
         table = op["table"]
-        col = _col_def(op)
-        return f'ALTER TABLE "{table}" ADD COLUMN {col}'
+        col = {**op, "kind": "add_column"}
+        return (
+            f'ALTER TABLE {_quote_ident(table, dialect)} '
+            f'ADD COLUMN {_col_def(col, dialect=dialect)}'
+        )
 
     if kind == "drop_column":
         table = op["table"]
         column = op["column"]
-        return f'ALTER TABLE "{table}" DROP COLUMN IF EXISTS "{column}"'
+        if dialect == "sqlite":
+            raise FerrumMigrationError(
+                "SQLite does not support DROP COLUMN in Ferrum migrations. [FERR-M001]"
+            )
+        return (
+            f'ALTER TABLE {_quote_ident(table, dialect)} '
+            f'DROP COLUMN IF EXISTS {_quote_ident(column, dialect)}'
+        )
 
     if kind == "rename_column":
         table = op["table"]
         from_col = op["from"]
         to_col = op["to"]
-        return f'ALTER TABLE "{table}" RENAME COLUMN "{from_col}" TO "{to_col}"'
+        if dialect == "mysql":
+            return (
+                f'ALTER TABLE {_quote_ident(table, dialect)} '
+                f'RENAME COLUMN {_quote_ident(from_col, dialect)} '
+                f'TO {_quote_ident(to_col, dialect)}'
+            )
+        return (
+            f'ALTER TABLE {_quote_ident(table, dialect)} '
+            f'RENAME COLUMN {_quote_ident(from_col, dialect)} '
+            f'TO {_quote_ident(to_col, dialect)}'
+        )
 
     if kind == "add_index":
         unique_kw = "UNIQUE " if op.get("unique") else ""
@@ -235,11 +293,18 @@ def _op_to_sql(op: dict[str, Any]) -> str:
         table = op["table"]
         columns = list(op.get("columns", []))
         opclasses = op.get("opclasses")
-        cols = _index_columns_sql(columns, opclasses)
+        cols = _index_columns_sql(columns, opclasses, dialect=dialect)
         using = op.get("using", "btree")
         if using not in _INDEX_USING_ALLOWLIST:
             raise FerrumMigrationError(f"Unsupported index access method {using!r}. [FERR-M001]")
-        sql = f'CREATE {unique_kw}INDEX IF NOT EXISTS "{name}" ON "{table}" USING {using} ({cols})'
+        sql = (
+            f'CREATE {unique_kw}INDEX IF NOT EXISTS {_quote_ident(name, dialect)} '
+            f'ON {_quote_ident(table, dialect)}'
+        )
+        if dialect == "postgres":
+            sql += f" USING {using} ({cols})"
+        else:
+            sql += f" ({cols})"
         where = op.get("where")
         if where:
             sql = f"{sql} WHERE {where}"
@@ -247,20 +312,30 @@ def _op_to_sql(op: dict[str, Any]) -> str:
 
     if kind == "drop_index":
         name = op["name"]
-        return f'DROP INDEX IF EXISTS "{name}"'
+        if dialect == "mysql":
+            table = op.get("table", "")
+            if table:
+                return f'DROP INDEX {_quote_ident(name, dialect)} ON {_quote_ident(table, dialect)}'
+        return f'DROP INDEX IF EXISTS {_quote_ident(name, dialect)}'
 
     if kind == "add_fk":
         on_delete = str(op.get("on_delete", "CASCADE")).upper()
         if on_delete not in _FK_ON_DELETE_ALLOWLIST:
             raise FerrumMigrationError(f"Unsupported ON DELETE action {on_delete!r}. [FERR-M001]")
         return (
-            f'ALTER TABLE "{op["table"]}" ADD CONSTRAINT "{op["name"]}" '
-            f'FOREIGN KEY ("{op["column"]}") REFERENCES "{op["ref_table"]}" ("{op["ref_column"]}")'
+            f'ALTER TABLE {_quote_ident(op["table"], dialect)} '
+            f'ADD CONSTRAINT {_quote_ident(op["name"], dialect)} '
+            f'FOREIGN KEY ({_quote_ident(op["column"], dialect)}) '
+            f'REFERENCES {_quote_ident(op["ref_table"], dialect)} '
+            f'({_quote_ident(op["ref_column"], dialect)})'
             f" ON DELETE {on_delete}"
         )
 
     if kind == "drop_fk":
-        return f'ALTER TABLE "{op["table"]}" DROP CONSTRAINT IF EXISTS "{op["name"]}"'
+        return (
+            f'ALTER TABLE {_quote_ident(op["table"], dialect)} '
+            f'DROP CONSTRAINT IF EXISTS {_quote_ident(op["name"], dialect)}'
+        )
 
     if kind == "raw_sql":
         # raw_sql ops with safe=False must have been blocked at the
@@ -312,15 +387,20 @@ def _resolve_gin_opclasses(
     return opclasses if any_required else None
 
 
-def _index_columns_sql(columns: list[str], opclasses: list[str] | None) -> str:
+def _index_columns_sql(
+    columns: list[str],
+    opclasses: list[str] | None,
+    *,
+    dialect: str = "postgres",
+) -> str:
     """Format index column list, optionally with per-column operator classes."""
     parts: list[str] = []
     for i, column in enumerate(columns):
         opclass = opclasses[i] if opclasses and i < len(opclasses) else ""
-        if opclass:
-            parts.append(f'"{column}" {opclass}')
+        if opclass and dialect == "postgres":
+            parts.append(f'{_quote_ident(column, dialect)} {opclass}')
         else:
-            parts.append(f'"{column}"')
+            parts.append(_quote_ident(column, dialect))
     return ", ".join(parts)
 
 
@@ -616,14 +696,15 @@ async def apply(
     if env != "development" and not confirm:
         raise FerrumMigrationError("Non-development apply requires --confirm flag.")
 
-    pool = conn._require_pool()
+    driver = conn._require_driver()
+    dialect = conn.dialect
     for op in ops:
         kind = op.get("kind", "unknown")
         table = op.get("table", "")
         label = f"{kind} {table}".rstrip()
         print(f"[ferrum migrate] applying: {label}")
-        sql = _op_to_sql(op)
-        await pool.execute(sql)
+        sql = _op_to_sql(op, dialect=dialect)
+        await driver.execute(sql)
 
     if confirm and token is not None:
         await record_applied(

@@ -176,7 +176,9 @@ async def test_drop_fk_is_destructive_and_blocked_without_confirm() -> None:
             raise AssertionError(f"destructive SQL should be gated before execute: {sql}")
 
     class _Conn:
-        def _require_pool(self) -> _Pool:
+        dialect = "postgres"
+
+        def _require_driver(self) -> _Pool:
             return _Pool()
 
     assert DropForeignKey("orders", "fk_orders_user_id").classification == "destructive"

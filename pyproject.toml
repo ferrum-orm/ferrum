@@ -9,7 +9,7 @@ description = "Next-generation async ORM for Python with a Rust-powered core"
 license = { text = "Apache-2.0" }
 readme = "README.md"
 requires-python = ">=3.11"
-keywords = ["orm", "async", "postgresql", "pydantic", "rust"]
+keywords = ["orm", "async", "postgresql", "mysql", "sqlite", "pydantic", "rust"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Framework :: AsyncIO",
@@ -27,10 +27,12 @@ classifiers = [
 
 dependencies = [
     "pydantic>=2.0",
-    "asyncpg>=0.29",
 ]
 
 [project.optional-dependencies]
+pg = ["asyncpg>=0.29"]
+mysql = ["asyncmy>=0.2"]
+sqlite = ["aiosqlite>=0.19"]
 cli = [
     "typer>=0.12",
     "rich>=13",
@@ -38,9 +40,15 @@ cli = [
 dotenv = ["python-dotenv>=1.0"]
 uuid7 = ["uuid6>=2024.1"]
 fastapi = []  # uses the host's FastAPI; no extra deps needed
-dev = [
+all = [
+    "ferrum-orm[pg]",
+    "ferrum-orm[mysql]",
+    "ferrum-orm[sqlite]",
     "ferrum-orm[cli]",
     "ferrum-orm[dotenv]",
+]
+dev = [
+    "ferrum-orm[pg,cli,dotenv]",
     "maturin>=1.7,<2",
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -110,6 +118,9 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "ANN"]  # asserts and missing annotations are fine in tests
 "python/ferrum/cli/app.py" = ["B008"]  # Typer Option/Argument in parameter defaults
+"python/ferrum/drivers/**" = ["ANN401", "SIM117", "S608"]  # driver boundary; table names from compiler allowlists
+"python/ferrum/migrations/ledger.py" = ["S608"]  # LEDGER_TABLE is a fixed constant identifier
+"python/ferrum/cli/resetdb_cmd.py" = ["S608"]  # LEDGER_TABLE is a fixed constant
 
 # ---------------------------------------------------------------------------
 # ty
@@ -122,7 +133,7 @@ extra-paths = ["python"]
 include = ["python/ferrum"]
 
 [tool.ty.analysis]
-allowed-unresolved-imports = ["asyncpg.**", "testcontainers.**"]
+allowed-unresolved-imports = ["asyncpg.**", "asyncmy.**", "aiosqlite.**", "testcontainers.**"]
 
 # ---------------------------------------------------------------------------
 # pytest

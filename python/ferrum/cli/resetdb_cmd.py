@@ -76,14 +76,25 @@ async def run_resetdb(*, env: str = "development", confirm: bool = False) -> int
 
     try:
         async with connect() as conn:
-            pool = conn._require_pool()
+            driver = conn._require_driver()
+            dialect = conn.dialect
 
             dropped = 0
             for table in tables:
-                await pool.execute(f'DROP TABLE IF EXISTS "{table}" CASCADE')
+                if dialect == "mysql":
+                    await driver.execute(f"DROP TABLE IF EXISTS `{table}`")
+                elif dialect == "sqlite":
+                    await driver.execute(f'DROP TABLE IF EXISTS "{table}"')
+                else:
+                    await driver.execute(f'DROP TABLE IF EXISTS "{table}" CASCADE')
                 dropped += 1
 
-            await pool.execute(f"TRUNCATE {LEDGER_TABLE}")
+            if dialect == "mysql":
+                await driver.execute(f"TRUNCATE TABLE {LEDGER_TABLE}")
+            elif dialect == "sqlite":
+                await driver.execute(f"DELETE FROM {LEDGER_TABLE}")
+            else:
+                await driver.execute(f"TRUNCATE {LEDGER_TABLE}")
 
     except FerrumConfigError as exc:
         print(f"Configuration error: {exc}")

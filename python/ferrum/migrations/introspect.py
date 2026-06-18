@@ -1,4 +1,4 @@
-"""Live PostgreSQL schema introspection for migration planning and drift detection.
+"""Live database schema introspection for migration planning and drift detection.
 
 Provides two introspection levels:
 
@@ -8,11 +8,10 @@ Provides two introspection levels:
   drift detection to compare live schema against model metadata.
 
 Security invariants:
-- All queries use parameterised ``$1`` placeholders.  The schema name is the
-  only variable and is never interpolated into an identifier position.
+- All queries use bound parameters; schema names are never interpolated into
+  identifier positions.
 - ``ferrum_migrations`` is excluded so the ledger table never appears in model
   diffs.
-- No user-supplied values reach SQL; only the schema name is variable.
 """
 
 from __future__ import annotations
@@ -34,18 +33,15 @@ def get_db_identity(conn: Connection) -> str:
 
     Returns ``"host=<h> port=<p> dbname=<d> user=<u>"`` — never the password,
     TLS parameters, or the full DSN (CRED-1 allowlist, §3).
-
-    The identity string is embedded in confirmation tokens so that a token
-    generated against one database cannot authorize an apply against a different
-    database (prevents cross-environment token replay).
-
-    Falls back to ``"host=unknown …"`` when the DSN cannot be parsed.
     """
     try:
         dsn: str = getattr(conn, "_dsn", "") or ""
         parsed = urlparse(dsn)
-        host = parsed.hostname or "unknown"
-        port = str(parsed.port or 5432)
+        host = parsed.hostname or ("memory" if ":memory:" in dsn else "unknown")
+        if parsed.scheme.startswith("sqlite"):
+            port = "0"
+        else:
+            port = str(parsed.port or (3306 if parsed.scheme.startswith("mysql") else 5432))
         dbname = (parsed.path or "").lstrip("/") or "unknown"
         user = parsed.username or "unknown"
         return f"host={host} port={port} dbname={dbname} user={user}"
@@ -53,25 +49,13 @@ def get_db_identity(conn: Connection) -> str:
         return "host=unknown port=unknown dbname=unknown user=unknown"
 
 
-async def fetch_existing_tables(
+async def _fetch_existing_tables_postgres(
     conn: Connection,
     *,
-    schema: str = "public",
+    schema: str,
 ) -> dict[str, list[str]]:
-    """Return table → ordered column name list for all user tables in ``schema``.
-
-    Suitable as the ``existing_tables`` argument to ``compute_plan()``.
-
-    Args:
-        conn: Open Ferrum connection.
-        schema: PostgreSQL schema to introspect (default ``"public"``).
-
-    Returns:
-        Dict mapping each table name to the ordered list of its column names.
-        Tables in ``_EXCLUDED_TABLES`` are omitted.
-    """
-    pool = conn._require_pool()
-    rows = await pool.fetch(
+    driver = conn._require_driver()
+    rows = await driver.fetch(
         """
         SELECT table_name, column_name
         FROM information_schema.columns
@@ -82,33 +66,84 @@ async def fetch_existing_tables(
     )
     tables: dict[str, list[str]] = {}
     for row in rows:
-        table = row["table_name"]
+        table = row["table_name"] if isinstance(row, dict) else row[0]
+        column = row["column_name"] if isinstance(row, dict) else row[1]
         if table not in _EXCLUDED_TABLES:
-            tables.setdefault(table, []).append(row["column_name"])
+            tables.setdefault(table, []).append(column)
     return tables
 
 
-async def fetch_schema_state(
+async def _fetch_existing_tables_mysql(
+    conn: Connection,
+    *,
+    schema: str,
+) -> dict[str, list[str]]:
+    del schema  # MySQL uses DATABASE() for the active schema.
+    driver = conn._require_driver()
+    rows = await driver.fetch(
+        """
+        SELECT table_name, column_name
+        FROM information_schema.columns
+        WHERE table_schema = DATABASE()
+        ORDER BY table_name, ordinal_position
+        """
+    )
+    tables: dict[str, list[str]] = {}
+    for row in rows:
+        table = row["table_name"] if isinstance(row, dict) else row[0]
+        column = row["column_name"] if isinstance(row, dict) else row[1]
+        if table not in _EXCLUDED_TABLES:
+            tables.setdefault(table, []).append(column)
+    return tables
+
+
+async def _fetch_existing_tables_sqlite(conn: Connection) -> dict[str, list[str]]:
+    driver = conn._require_driver()
+    table_rows = await driver.fetch(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+    )
+    tables: dict[str, list[str]] = {}
+    for trow in table_rows:
+        table = trow["name"] if isinstance(trow, dict) else trow[0]
+        if table in _EXCLUDED_TABLES:
+            continue
+        info_rows = await driver.fetch(f"PRAGMA table_info({table!r})")
+        cols: list[str] = []
+        for irow in info_rows:
+            if isinstance(irow, dict):
+                cols.append(irow["name"])
+            else:
+                cols.append(irow[1])
+        tables[table] = cols
+    return tables
+
+
+async def fetch_existing_tables(
     conn: Connection,
     *,
     schema: str = "public",
-) -> dict[str, dict[str, dict[str, Any]]]:
-    """Return a detailed schema snapshot for drift detection.
+) -> dict[str, list[str]]:
+    """Return table → ordered column name list for all user tables.
 
-    Returns table → {column_name → {type, nullable, default}}.
-
-    Args:
-        conn: Open Ferrum connection.
-        schema: PostgreSQL schema to introspect (default ``"public"``).
-
-    Returns:
-        Nested dict: table name → column name → column metadata dict with keys
-        ``type`` (PostgreSQL ``data_type``), ``nullable`` (bool), and
-        ``default`` (``column_default`` string or ``None``).
-        Tables in ``_EXCLUDED_TABLES`` are omitted.
+    Dispatches per ``conn.dialect``.
     """
-    pool = conn._require_pool()
-    rows = await pool.fetch(
+    dialect = conn.dialect
+    if dialect == "postgres":
+        return await _fetch_existing_tables_postgres(conn, schema=schema)
+    if dialect == "mysql":
+        return await _fetch_existing_tables_mysql(conn, schema=schema)
+    if dialect == "sqlite":
+        return await _fetch_existing_tables_sqlite(conn)
+    raise ValueError(f"Unsupported dialect for introspection: {dialect!r}")
+
+
+async def _fetch_schema_state_postgres(
+    conn: Connection,
+    *,
+    schema: str,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    driver = conn._require_driver()
+    rows = await driver.fetch(
         """
         SELECT
             table_name,
@@ -124,17 +159,105 @@ async def fetch_schema_state(
     )
     tables: dict[str, dict[str, dict[str, Any]]] = {}
     for row in rows:
-        table = row["table_name"]
+        if isinstance(row, dict):
+            table, column, data_type, is_nullable, default = (
+                row["table_name"],
+                row["column_name"],
+                row["data_type"],
+                row["is_nullable"],
+                row["column_default"],
+            )
+        else:
+            table, column, data_type, is_nullable, default = row
         if table in _EXCLUDED_TABLES:
             continue
-        if table not in tables:
-            tables[table] = {}
-        tables[table][row["column_name"]] = {
-            "type": row["data_type"],
-            "nullable": row["is_nullable"] == "YES",
-            "default": row["column_default"],
+        tables.setdefault(table, {})[column] = {
+            "type": data_type,
+            "nullable": is_nullable == "YES",
+            "default": default,
         }
     return tables
+
+
+async def _fetch_schema_state_mysql(conn: Connection) -> dict[str, dict[str, dict[str, Any]]]:
+    driver = conn._require_driver()
+    rows = await driver.fetch(
+        """
+        SELECT
+            table_name,
+            column_name,
+            data_type,
+            is_nullable,
+            column_default
+        FROM information_schema.columns
+        WHERE table_schema = DATABASE()
+        ORDER BY table_name, ordinal_position
+        """
+    )
+    tables: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in rows:
+        if isinstance(row, dict):
+            table, column, data_type, is_nullable, default = (
+                row["table_name"],
+                row["column_name"],
+                row["data_type"],
+                row["is_nullable"],
+                row["column_default"],
+            )
+        else:
+            table, column, data_type, is_nullable, default = row
+        if table in _EXCLUDED_TABLES:
+            continue
+        tables.setdefault(table, {})[column] = {
+            "type": data_type,
+            "nullable": is_nullable == "YES",
+            "default": default,
+        }
+    return tables
+
+
+async def _fetch_schema_state_sqlite(conn: Connection) -> dict[str, dict[str, dict[str, Any]]]:
+    driver = conn._require_driver()
+    table_rows = await driver.fetch(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+    )
+    tables: dict[str, dict[str, dict[str, Any]]] = {}
+    for trow in table_rows:
+        table = trow["name"] if isinstance(trow, dict) else trow[0]
+        if table in _EXCLUDED_TABLES:
+            continue
+        info_rows = await driver.fetch(f"PRAGMA table_info({table!r})")
+        tables[table] = {}
+        for irow in info_rows:
+            if isinstance(irow, dict):
+                name = irow["name"]
+                col_type = irow["type"]
+                notnull = irow["notnull"]
+                default = irow["dflt_value"]
+            else:
+                name, col_type, notnull, default = irow[1], irow[2], irow[3], irow[4]
+            tables[table][name] = {
+                "type": col_type,
+                "nullable": not bool(notnull),
+                "default": default,
+            }
+    return tables
+
+
+async def fetch_schema_state(
+    conn: Connection,
+    *,
+    schema: str = "public",
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Return a detailed schema snapshot for drift detection."""
+    dialect = conn.dialect
+    if dialect == "postgres":
+        return await _fetch_schema_state_postgres(conn, schema=schema)
+    if dialect == "mysql":
+        return await _fetch_schema_state_mysql(conn)
+    if dialect == "sqlite":
+        return await _fetch_schema_state_sqlite(conn)
+    raise ValueError(f"Unsupported dialect for introspection: {dialect!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -144,11 +267,7 @@ async def fetch_schema_state(
 
 @dataclass
 class DriftReport:
-    """Result of a schema drift analysis.
-
-    Produced by :func:`detect_drift`.  Used to inform operators whether a
-    failed migration mutated the database and what recovery action is expected.
-    """
+    """Result of a schema drift analysis."""
 
     has_drift: bool
     missing_tables: list[str] = field(default_factory=list)
@@ -182,22 +301,7 @@ def detect_drift(
     existing_tables: dict[str, list[str]],
     expected_tables: dict[str, list[str]],
 ) -> DriftReport:
-    """Compare live schema against expected schema and return a DriftReport.
-
-    This is a pure function — no I/O.  Pass the result of
-    :func:`fetch_existing_tables` as ``existing_tables`` and a dict derived
-    from model metadata (or a prior migration plan) as ``expected_tables``.
-
-    Column-level drift is only checked for tables present in both snapshots;
-    a missing table implies all its columns are also missing.
-
-    Args:
-        existing_tables: Mapping of table_name → column_names from live DB.
-        expected_tables: Mapping of table_name → column_names from metadata.
-
-    Returns:
-        :class:`DriftReport` describing any discrepancies and guidance.
-    """
+    """Compare live schema against expected schema and return a DriftReport."""
     existing_set = set(existing_tables)
     expected_set = set(expected_tables)
 

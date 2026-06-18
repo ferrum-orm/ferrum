@@ -27,6 +27,22 @@ except ImportError:
     _asyncpg_exc = None  # type: ignore
     _HAS_ASYNCPG = False
 
+try:
+    import asyncmy.errors as _asyncmy_exc  # type: ignore[import-untyped]
+
+    _HAS_ASYNCMY: bool = True
+except ImportError:
+    _asyncmy_exc = None  # type: ignore
+    _HAS_ASYNCMY = False
+
+try:
+    import aiosqlite  # type: ignore[import-untyped]
+
+    _HAS_AIOSQLITE: bool = True
+except ImportError:
+    aiosqlite = None  # type: ignore
+    _HAS_AIOSQLITE = False
+
 
 class FerrumError(Exception):
     """Base class for all Ferrum exceptions."""
@@ -239,6 +255,43 @@ def map_db_error(exc: Exception, *, context: dict | None = None) -> FerrumError:
         _pg_base = getattr(_asyncpg_exc, "PostgresError", None)
         if _pg_base is not None and isinstance(exc, _pg_base):
             # Sanitized: only the exception class name; never DETAIL/HINT (ERR-1).
+            return FerrumDatabaseError(f"Database error: {type(exc).__name__}. [FERR-D001]")
+
+    if _HAS_ASYNCMY and _asyncmy_exc is not None:
+        integrity_cls = getattr(_asyncmy_exc, "IntegrityError", None)
+        if integrity_cls is not None and isinstance(exc, integrity_cls):
+            return FerrumIntegrityError(
+                f"Integrity constraint violation ({type(exc).__name__}). [FERR-D201]",
+                category="integrity_error",
+            )
+        op_err = getattr(_asyncmy_exc, "OperationalError", None)
+        if op_err is not None and isinstance(exc, op_err):
+            return FerrumConnectionError(
+                f"MySQL connection error: {type(exc).__name__}. [FERR-E101]"
+            )
+        prog_err = getattr(_asyncmy_exc, "ProgrammingError", None)
+        if prog_err is not None and isinstance(exc, prog_err):
+            return FerrumSchemaError(f"Schema object not found ({type(exc).__name__}). [FERR-S001]")
+        data_err = getattr(_asyncmy_exc, "DataError", None)
+        if data_err is not None and isinstance(exc, data_err):
+            return FerrumDatabaseError(f"Database error: {type(exc).__name__}. [FERR-D001]")
+
+    if _HAS_AIOSQLITE and aiosqlite is not None:
+        if isinstance(exc, aiosqlite.IntegrityError):
+            return FerrumIntegrityError(
+                f"Integrity constraint violation ({type(exc).__name__}). [FERR-D201]",
+                category="integrity_error",
+            )
+        if isinstance(exc, aiosqlite.OperationalError):
+            msg = str(exc).lower()
+            if "no such table" in msg or "no such column" in msg:
+                return FerrumSchemaError(
+                    f"Schema object not found ({type(exc).__name__}). [FERR-S001]"
+                )
+            return FerrumConnectionError(
+                f"SQLite connection error: {type(exc).__name__}. [FERR-E101]"
+            )
+        if isinstance(exc, aiosqlite.DatabaseError):
             return FerrumDatabaseError(f"Database error: {type(exc).__name__}. [FERR-D001]")
 
     return FerrumInternalError(

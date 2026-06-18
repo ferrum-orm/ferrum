@@ -72,7 +72,7 @@ class TestWheelSmoke:
         metadata_json = SmokeModel.get_metadata().to_metadata_json()
         ir_json = SmokeModel.objects.filter(id=1).to_ir_json()
 
-        result = _native.compile_query(metadata_json, ir_json)
+        result = _native.compile_query(metadata_json, ir_json, "postgres")
 
         assert isinstance(result, dict), f"Expected dict, got {type(result)}"
         assert "sql_text" in result, "result must contain sql_text"
@@ -127,7 +127,7 @@ class TestWheelSmoke:
         bad_ir_json = json.dumps(ir)
 
         with pytest.raises(_native.FerrumCompileError):
-            _native.compile_query(metadata_json, bad_ir_json)
+            _native.compile_query(metadata_json, bad_ir_json, "postgres")
 
     def test_compile_error_does_not_echo_bound_values(self) -> None:
         """FerrumCompileError messages must not echo submitted bound values (LOG-2).
@@ -149,7 +149,7 @@ class TestWheelSmoke:
         bad_ir_json = json.dumps(ir)
 
         with pytest.raises(Exception) as exc_info:
-            _native.compile_query(metadata_json, bad_ir_json)
+            _native.compile_query(metadata_json, bad_ir_json, "postgres")
 
         assert sentinel not in str(exc_info.value), (
             f"Bound value sentinel {sentinel!r} must not appear in error message; "

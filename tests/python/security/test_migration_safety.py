@@ -41,10 +41,11 @@ pytestmark = pytest.mark.security
 
 
 def _make_conn() -> MagicMock:
-    """Return a mock connection whose pool.execute is an AsyncMock."""
+    """Return a mock connection whose driver.execute is an AsyncMock."""
     conn = MagicMock()
+    conn.dialect = "postgres"
     pool = AsyncMock()
-    conn._require_pool.return_value = pool
+    conn._require_driver.return_value = pool
     return conn
 
 
@@ -106,7 +107,7 @@ class TestMIG1DryRunDefault:
         conn = _make_conn()
         plan = _plan_json(_create_table_ops())
         result = await apply(conn, plan)
-        conn._require_pool.return_value.execute.assert_not_called()
+        conn._require_driver.return_value.execute.assert_not_called()
         assert result.dry_run is True
         assert result.applied is False
 
@@ -116,7 +117,7 @@ class TestMIG1DryRunDefault:
         conn = _make_conn()
         plan = _plan_json(_drop_table_ops(), requires_confirmation=True)
         result = await apply(conn, plan, dry_run=True)
-        conn._require_pool.return_value.execute.assert_not_called()
+        conn._require_driver.return_value.execute.assert_not_called()
         assert result.dry_run is True
 
 
@@ -373,7 +374,7 @@ class TestMIG6TokenReplay:
         pool = AsyncMock()
         pool.execute = AsyncMock(return_value=None)
         conn = _make_conn()
-        conn._require_pool.return_value = pool
+        conn._require_driver.return_value = pool
         plan = _plan_json(_create_table_ops())
         token = _confirmation_token(plan)
 
@@ -464,7 +465,7 @@ class TestMIG8TokenInjectionPath:
         pool = AsyncMock()
         pool.execute = AsyncMock(return_value=None)
         mock_conn = MagicMock()
-        mock_conn._require_pool.return_value = pool
+        mock_conn._require_driver.return_value = pool
         mock_cm = MagicMock()
         mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
         mock_cm.__aexit__ = AsyncMock(return_value=False)
@@ -506,7 +507,7 @@ class TestDestructiveGateOnApply:
         with pytest.raises(FerrumMigrationError):
             await apply(conn, plan, dry_run=False, confirm=False)
 
-        conn._require_pool.return_value.execute.assert_not_called()
+        conn._require_driver.return_value.execute.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_drop_column_without_confirm_raises_before_sql(self) -> None:
@@ -517,7 +518,7 @@ class TestDestructiveGateOnApply:
         with pytest.raises(FerrumMigrationError):
             await apply(conn, plan, dry_run=False, confirm=False)
 
-        conn._require_pool.return_value.execute.assert_not_called()
+        conn._require_driver.return_value.execute.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_raw_sql_without_confirm_raises_before_sql(self) -> None:
@@ -535,7 +536,7 @@ class TestDestructiveGateOnApply:
         with pytest.raises(FerrumMigrationError):
             await apply(conn, plan, dry_run=False, confirm=False)
 
-        conn._require_pool.return_value.execute.assert_not_called()
+        conn._require_driver.return_value.execute.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

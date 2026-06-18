@@ -61,7 +61,7 @@ def test_compile_query_returns_valid_sql() -> None:
     metadata_json = Widget.get_metadata().to_metadata_json()
     ir_json = qs.to_ir_json()
 
-    result = _native.compile_query(metadata_json, ir_json)
+    result = _native.compile_query(metadata_json, ir_json, "postgres")
 
     # --- Shape assertions ---
     assert isinstance(result, dict), "compile_query must return a dict"
@@ -92,7 +92,7 @@ def test_compile_query_returns_valid_sql() -> None:
     fp = result["fingerprint"]
     assert isinstance(fp, str) and len(fp) > 0, "fingerprint must be a non-empty string"
     # Fingerprint must be stable across identical compilations (same IR → same fp).
-    result2 = _native.compile_query(metadata_json, ir_json)
+    result2 = _native.compile_query(metadata_json, ir_json, "postgres")
     assert result["fingerprint"] == result2["fingerprint"], (
         "fingerprint must be deterministic for the same IR"
     )

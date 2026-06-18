@@ -12,10 +12,12 @@ from ferrum.migrations.ledger import LEDGER_TABLE
 
 
 class _FakeConn:
+    dialect = "postgres"
+
     def __init__(self, pool: AsyncMock) -> None:
         self.pool = pool
 
-    def _require_pool(self) -> AsyncMock:
+    def _require_driver(self) -> AsyncMock:
         return self.pool
 
 

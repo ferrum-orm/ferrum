@@ -21,7 +21,7 @@ import pytest
 
 from ferrum.errors import FerrumMigrationError
 from ferrum.migrations.ledger import (
-    CREATE_LEDGER_SQL,
+    _create_ledger_sql,
     compute_digest,
     ensure_ledger,
     is_applied,
@@ -33,10 +33,11 @@ from ferrum.migrations.ledger import (
 # ---------------------------------------------------------------------------
 
 
-def _make_conn(*, pool: object | None = None) -> MagicMock:
-    """Return a mock Connection whose _require_pool returns pool."""
+def _make_conn(*, pool: object | None = None, dialect: str = "postgres") -> MagicMock:
+    """Return a mock Connection whose _require_driver returns pool."""
     conn = MagicMock()
-    conn._require_pool.return_value = pool or MagicMock()
+    conn.dialect = dialect
+    conn._require_driver.return_value = pool or MagicMock()
     return conn
 
 
@@ -101,17 +102,17 @@ class TestEnsureLedger:
 
         await ensure_ledger(conn)
 
-        pool.execute.assert_awaited_once_with(CREATE_LEDGER_SQL)
+        pool.execute.assert_awaited_once_with(_create_ledger_sql("postgres"))
 
     @pytest.mark.asyncio
-    async def test_calls_require_pool(self) -> None:
+    async def test_calls_require_driver(self) -> None:
         pool = AsyncMock()
         pool.execute = AsyncMock(return_value=None)
         conn = _make_conn(pool=pool)
 
         await ensure_ledger(conn)
 
-        conn._require_pool.assert_called_once()
+        conn._require_driver.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

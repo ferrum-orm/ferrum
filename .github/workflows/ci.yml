@@ -102,7 +102,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ty
-      - run: pip install -e ".[cli,dotenv]"
+      - run: pip install -e ".[pg,cli,dotenv]"
       - run: ty check python/ferrum
 
   # ---------------------------------------------------------------------------
@@ -116,8 +116,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install import-linter pydantic asyncpg
-      - run: pip install -e .
+      - run: pip install import-linter pydantic
+      - run: pip install -e ".[pg]"
       - run: lint-imports
 
   # ---------------------------------------------------------------------------

@@ -1,0 +1,27 @@
+"""Driver protocol for async database I/O."""
+
+from __future__ import annotations
+
+from typing import Any, Protocol, runtime_checkable
+
+
+@runtime_checkable
+class RowProtocol(Protocol):
+    """Duck-typed row: mapping interface or dict-like access."""
+
+    def keys(self) -> Any: ...
+    def __getitem__(self, key: str) -> Any: ...
+
+
+@runtime_checkable
+class DriverProtocol(Protocol):
+    """Uniform async driver surface for QuerySet and migrations."""
+
+    dialect: str  # "postgres" | "mysql" | "sqlite"
+
+    async def fetch(self, sql: str, *params: object) -> list[Any]: ...
+    async def fetchrow(self, sql: str, *params: object) -> Any | None: ...
+    async def fetchval(self, sql: str, *params: object) -> Any: ...
+    async def execute(self, sql: str, *params: object) -> str: ...
+    async def open(self) -> None: ...
+    async def close(self) -> None: ...

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ferrum.errors import FerrumConfigError
+
 if TYPE_CHECKING:
     from ferrum.connection import Connection
 
@@ -27,10 +29,16 @@ def _decode_vector(value: str) -> list[float]:
 async def register_vector_codecs(conn: Connection) -> None:
     """Ensure the ``vector`` extension exists and register asyncpg codecs.
 
-    Args:
-        conn: An open Ferrum ``Connection``.
+    PostgreSQL only — requires ``ferrum-orm[pg]``.
     """
-    pool = conn._require_pool()
+    if conn.dialect != "postgres":
+        raise FerrumConfigError(
+            "pgvector integration requires a PostgreSQL connection. [FERR-C001]"
+        )
+    driver = conn._require_driver()
+    pool = getattr(driver, "_pool", None)
+    if pool is None:
+        raise FerrumConfigError("PostgreSQL pool is not open. [FERR-C001]")
     await pool.execute("CREATE EXTENSION IF NOT EXISTS vector")
     await pool.set_type_codec(
         "vector",

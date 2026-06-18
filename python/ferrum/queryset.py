@@ -2,7 +2,7 @@
 
 ``QuerySet`` accumulates filter/order/limit/offset state and only touches the
 database when a terminal coroutine is awaited. The terminal methods delegate
-to the connection layer (asyncpg) and to the Rust compiler (ferrum._native).
+to the connection driver layer and to the Rust compiler (ferrum._native).
 
 Design constraints:
 - No SQL building here. QuerySet only builds the IR dict.
@@ -124,8 +124,19 @@ def _decode_bound_param(param_json: str) -> object:
     return val
 
 
+def _row_to_dict(row: Any) -> dict[str, Any]:  # noqa: ANN401
+    """Convert a driver row (Record, sqlite3.Row, dict) to a plain dict."""
+    if isinstance(row, dict):
+        return row
+    if hasattr(row, "_mapping"):
+        return dict(row._mapping)
+    if hasattr(row, "keys"):
+        return {k: row[k] for k in row}
+    return dict(row)
+
+
 class _RowEncoder(json.JSONEncoder):
-    """JSON encoder that handles asyncpg ``Record`` and non-JSON-native Python types.
+    """JSON encoder for driver rows and non-JSON-native Python types.
 
     Used to serialize rows for the Rust ``hydrate_rows`` structural check.
     Complex types (datetime, UUID) are converted to strings — Rust performs
@@ -147,7 +158,7 @@ def _hydrate_rows(
     *,
     fingerprint: str = "",
 ) -> list[_M]:
-    """Convert asyncpg ``Record`` objects to model instances (ADR-003 trusted path).
+    """Convert DB rows to model instances (ADR-003 trusted path).
 
     When the native extension is available, delegates structural validation
     (non-nullable column checks) to ``_native_ext.hydrate_rows()`` before
@@ -162,7 +173,7 @@ def _hydrate_rows(
     - Dispatches a Tier A ``hydration_failure`` hook.
     - Raises ``FerrumHydrationError`` (remapped via ``map_native_error``).
     """
-    row_dicts = [dict(row) for row in rows]
+    row_dicts = [_row_to_dict(row) for row in rows]
 
     if _native_ext is not None:
         try:
@@ -402,7 +413,7 @@ class QuerySet(Generic[_M]):
             ir["vector_order_by"] = self._vector_order_by
         return ir
 
-    def _compile(self) -> dict[str, Any]:
+    def _compile(self, *, dialect: str = "postgres") -> dict[str, Any]:
         """Compile the validated IR through the native Rust extension.
 
         Calls ``_build_ir()`` first so that all Python-side allowlist checks
@@ -419,9 +430,9 @@ class QuerySet(Generic[_M]):
         # (FerrumError). Centralized remapping tracked for Wave 3/ADR-006.
         if _native_ext is None:
             raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
-        return self._compile_ir(self._build_ir())
+        return self._compile_ir(self._build_ir(), dialect=dialect)
 
-    def _compile_ir(self, ir: dict[str, Any]) -> dict[str, Any]:
+    def _compile_ir(self, ir: dict[str, Any], *, dialect: str = "postgres") -> dict[str, Any]:
         """Invoke the native Rust compiler on a pre-built IR dict.
 
         Unlike ``_compile()``, accepts any IR dict (select/insert/update/delete)
@@ -438,7 +449,7 @@ class QuerySet(Generic[_M]):
         metadata = self._get_metadata()
         metadata_json = metadata.to_metadata_json() if metadata is not None else "{}"
         try:
-            return _native_ext.compile_query(metadata_json, ir_json)  # type: ignore[return-value]
+            return _native_ext.compile_query(metadata_json, ir_json, dialect)  # type: ignore[return-value]
         except Exception as exc:
             raise map_native_error(exc, _native_mod=_native_ext) from exc
 
@@ -572,11 +583,11 @@ class QuerySet(Generic[_M]):
                 "Obtain one from ferrum.connect(). [FERR-C001]"
             )
         metadata = self._get_metadata()
-        compiled = self._compile_ir(self._build_insert_ir(values))
+        compiled = self._compile_ir(self._build_insert_ir(values), dialect=conn.dialect)
         sql_text: str = compiled["sql_text"]
         bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
         fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
-        pool = conn._require_pool()
+        driver = conn._require_driver()
         model_name = self._model.__name__
         table = metadata.table_name if metadata is not None else model_name
         _hooks.query_start(
@@ -587,7 +598,7 @@ class QuerySet(Generic[_M]):
         )
         t0 = time.monotonic()
         try:
-            row = await pool.fetchrow(sql_text, *bound_params)
+            row = await driver.fetchrow(sql_text, *bound_params)
         except Exception as exc:
             duration_ms = (time.monotonic() - t0) * 1000
             mapped = map_db_error(exc, context={"model": model_name, "operation": "insert"})
@@ -607,7 +618,7 @@ class QuerySet(Generic[_M]):
             duration_ms=duration_ms,
             row_count=1,
         )
-        return self._model.model_construct(**dict(row))
+        return self._model.model_construct(**_row_to_dict(row))
 
     async def delete(self, conn: Connection | None = None) -> int:
         """Delete filtered rows. Returns the row count.
@@ -642,11 +653,11 @@ class QuerySet(Generic[_M]):
                 "Obtain one from ferrum.connect(). [FERR-C001]"
             )
         metadata = self._get_metadata()
-        compiled = self._compile_ir(self._build_delete_ir())
+        compiled = self._compile_ir(self._build_delete_ir(), dialect=conn.dialect)
         sql_text: str = compiled["sql_text"]
         bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
         fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
-        pool = conn._require_pool()
+        driver = conn._require_driver()
         model_name = self._model.__name__
         table = metadata.table_name if metadata is not None else model_name
         _hooks.query_start(
@@ -657,7 +668,7 @@ class QuerySet(Generic[_M]):
         )
         t0 = time.monotonic()
         try:
-            result: str = await pool.execute(sql_text, *bound_params)
+            result: str = await driver.execute(sql_text, *bound_params)
         except Exception as exc:
             duration_ms = (time.monotonic() - t0) * 1000
             mapped = map_db_error(exc, context={"model": model_name, "operation": "delete"})
@@ -704,11 +715,11 @@ class QuerySet(Generic[_M]):
         qs_all: QuerySet[_M] = QuerySet(self._model)
         delete_ir = qs_all._build_delete_ir()
         delete_ir["operation"]["danger"] = True  # bypass Rust MissingFilter for danger API
-        compiled = qs_all._compile_ir(delete_ir)
+        compiled = qs_all._compile_ir(delete_ir, dialect=conn.dialect)
         sql_text: str = compiled["sql_text"]
         bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
         fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
-        pool = conn._require_pool()
+        driver = conn._require_driver()
         model_name = self._model.__name__
         metadata_all = qs_all._get_metadata()
         table = metadata_all.table_name if metadata_all is not None else model_name
@@ -717,7 +728,7 @@ class QuerySet(Generic[_M]):
         )
         t0 = time.monotonic()
         try:
-            result: str = await pool.execute(sql_text, *bound_params)
+            result: str = await driver.execute(sql_text, *bound_params)
         except Exception as exc:
             duration_ms = (time.monotonic() - t0) * 1000
             mapped = map_db_error(exc)
@@ -772,11 +783,11 @@ class QuerySet(Generic[_M]):
                 "Obtain one from ferrum.connect(). [FERR-C001]"
             )
         metadata = self._get_metadata()
-        compiled = self._compile_ir(self._build_update_ir(assignments))
+        compiled = self._compile_ir(self._build_update_ir(assignments), dialect=conn.dialect)
         sql_text: str = compiled["sql_text"]
         bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
         fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
-        pool = conn._require_pool()
+        driver = conn._require_driver()
         model_name = self._model.__name__
         table = metadata.table_name if metadata is not None else model_name
         _hooks.query_start(
@@ -787,7 +798,7 @@ class QuerySet(Generic[_M]):
         )
         t0 = time.monotonic()
         try:
-            result: str = await pool.execute(sql_text, *bound_params)
+            result: str = await driver.execute(sql_text, *bound_params)
         except Exception as exc:
             duration_ms = (time.monotonic() - t0) * 1000
             mapped = map_db_error(exc, context={"model": model_name, "operation": "update"})
@@ -835,11 +846,11 @@ class QuerySet(Generic[_M]):
         qs_all: QuerySet[_M] = QuerySet(self._model)
         update_ir = qs_all._build_update_ir(assignments)
         update_ir["operation"]["danger"] = True  # bypass Rust MissingFilter for danger API
-        compiled = qs_all._compile_ir(update_ir)
+        compiled = qs_all._compile_ir(update_ir, dialect=conn.dialect)
         sql_text: str = compiled["sql_text"]
         bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
         fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
-        pool = conn._require_pool()
+        driver = conn._require_driver()
         model_name = self._model.__name__
         metadata_all = qs_all._get_metadata()
         table = metadata_all.table_name if metadata_all is not None else model_name
@@ -848,7 +859,7 @@ class QuerySet(Generic[_M]):
         )
         t0 = time.monotonic()
         try:
-            result: str = await pool.execute(sql_text, *bound_params)
+            result: str = await driver.execute(sql_text, *bound_params)
         except Exception as exc:
             duration_ms = (time.monotonic() - t0) * 1000
             mapped = map_db_error(exc)
@@ -890,11 +901,11 @@ class QuerySet(Generic[_M]):
         if _native_ext is None:
             raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
         metadata = self._get_metadata()
-        compiled = self._compile()
+        compiled = self._compile(dialect=conn.dialect)
         sql_text: str = compiled["sql_text"]
         bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
         fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
-        pool = conn._require_pool()
+        driver = conn._require_driver()
         model_name = self._model.__name__
         table = metadata.table_name if metadata is not None else model_name
         _hooks.query_start(
@@ -905,7 +916,7 @@ class QuerySet(Generic[_M]):
         )
         t0 = time.monotonic()
         try:
-            rows = await pool.fetch(sql_text, *bound_params)
+            rows = await driver.fetch(sql_text, *bound_params)
         except Exception as exc:
             duration_ms = (time.monotonic() - t0) * 1000
             mapped = map_db_error(exc, context={"model": model_name, "operation": "select"})
@@ -992,7 +1003,7 @@ class QuerySet(Generic[_M]):
         count_qs = self._clone()
         count_qs._limit = None
         count_qs._offset = None
-        compiled = count_qs._compile()
+        compiled = count_qs._compile(dialect=conn.dialect)
         sql_text: str = compiled["sql_text"]
         # Rewrite the SELECT projection to COUNT(*).  The emitter always emits
         # ``SELECT {cols} FROM {table} ...``; the first " FROM " token separates
@@ -1009,7 +1020,7 @@ class QuerySet(Generic[_M]):
         count_sql = "SELECT COUNT(*)" + sql_text[from_idx:]
         bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
         fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
-        pool = conn._require_pool()
+        driver = conn._require_driver()
         metadata = self._get_metadata()
         model_name = self._model.__name__
         table = metadata.table_name if metadata is not None else model_name
@@ -1021,7 +1032,7 @@ class QuerySet(Generic[_M]):
         )
         t0 = time.monotonic()
         try:
-            result = await pool.fetchval(count_sql, *bound_params)
+            result = await driver.fetchval(count_sql, *bound_params)
         except Exception as exc:
             duration_ms = (time.monotonic() - t0) * 1000
             mapped = map_db_error(exc, context={"model": model_name, "operation": "count"})
