@@ -45,8 +45,7 @@ class AiosqliteDriver:
             import aiosqlite  # type: ignore[import-untyped]
         except ImportError as exc:
             raise FerrumConfigError(
-                "SQLite driver not installed. Install with: uv add 'ferrum-orm[sqlite]' "
-                "[FERR-C001]"
+                "SQLite driver not installed. Install with: uv add 'ferrum-orm[sqlite]' [FERR-C001]"
             ) from exc
 
         try:

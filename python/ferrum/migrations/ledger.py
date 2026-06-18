@@ -10,7 +10,7 @@ try:
 
     _HAS_ASYNCPG: bool = True
 except ImportError:
-    _asyncpg_exc = None  # type: ignore
+    _asyncpg_exc = None
     _HAS_ASYNCPG = False
 
 try:
@@ -18,7 +18,7 @@ try:
 
     _HAS_ASYNCMY: bool = True
 except ImportError:
-    _asyncmy_exc = None  # type: ignore
+    _asyncmy_exc = None
     _HAS_ASYNCMY = False
 
 try:
@@ -26,7 +26,7 @@ try:
 
     _HAS_AIOSQLITE: bool = True
 except ImportError:
-    aiosqlite = None  # type: ignore
+    aiosqlite = None
     _HAS_AIOSQLITE = False
 
 from ferrum.errors import FerrumMigrationError
@@ -71,14 +71,8 @@ CREATE TABLE IF NOT EXISTS {LEDGER_TABLE} (
 
 def _insert_ledger_sql(dialect: str) -> str:
     if dialect in ("mysql", "sqlite"):
-        return (
-            f"INSERT INTO {LEDGER_TABLE} (digest, environment, description) "
-            "VALUES (?, ?, ?)"
-        )
-    return (
-        f"INSERT INTO {LEDGER_TABLE} (digest, environment, description) "
-        "VALUES ($1, $2, $3)"
-    )
+        return f"INSERT INTO {LEDGER_TABLE} (digest, environment, description) VALUES (?, ?, ?)"
+    return f"INSERT INTO {LEDGER_TABLE} (digest, environment, description) VALUES ($1, $2, $3)"
 
 
 def _select_digest_sql(dialect: str) -> str:
@@ -121,22 +115,20 @@ async def record_applied(
             description,
         )
     except Exception as exc:
-        if _HAS_ASYNCPG and _asyncpg_exc is not None and isinstance(
-            exc, _asyncpg_exc.UniqueViolationError
+        if (
+            _HAS_ASYNCPG
+            and _asyncpg_exc is not None
+            and isinstance(exc, _asyncpg_exc.UniqueViolationError)
         ):
             raise FerrumMigrationError(
                 f"Migration {description!r} has already been applied. [FERR-M003]"
             ) from None
-        integrity_cls = (
-            getattr(_asyncmy_exc, "IntegrityError", None) if _HAS_ASYNCMY else None
-        )
+        integrity_cls = getattr(_asyncmy_exc, "IntegrityError", None) if _HAS_ASYNCMY else None
         if integrity_cls is not None and isinstance(exc, integrity_cls):
             raise FerrumMigrationError(
                 f"Migration {description!r} has already been applied. [FERR-M003]"
             ) from None
-        if _HAS_AIOSQLITE and aiosqlite is not None and isinstance(
-            exc, aiosqlite.IntegrityError
-        ):
+        if _HAS_AIOSQLITE and aiosqlite is not None and isinstance(exc, aiosqlite.IntegrityError):
             raise FerrumMigrationError(
                 f"Migration {description!r} has already been applied. [FERR-M003]"
             ) from None

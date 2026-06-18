@@ -55,8 +55,7 @@ class AsyncmyDriver:
             import asyncmy  # type: ignore[import-untyped]
         except ImportError as exc:
             raise FerrumConfigError(
-                "MySQL driver not installed. Install with: uv add 'ferrum-orm[mysql]' "
-                "[FERR-C001]"
+                "MySQL driver not installed. Install with: uv add 'ferrum-orm[mysql]' [FERR-C001]"
             ) from exc
 
         diag = _redacted_diag(self._dsn)

@@ -185,18 +185,15 @@ def _col_def(col: dict[str, Any], *, dialect: str = "postgres") -> str:
     base_type = sql_type.split("(")[0].upper()
     if base_type not in _SQL_TYPE_ALLOWLIST and dialect != "mysql":
         raise FerrumMigrationError(
-            f"Unsupported SQL type {sql_type!r}. "
-            f"Only standard SQL types are allowed. [FERR-M001]"
+            f"Unsupported SQL type {sql_type!r}. Only standard SQL types are allowed. [FERR-M001]"
         )
     if (
         dialect == "mysql"
         and base_type not in _SQL_TYPE_ALLOWLIST
         and base_type not in {"TINYINT", "BLOB", "LONGTEXT", "DATETIME"}
     ):
-        raise FerrumMigrationError(
-            f"Unsupported SQL type {sql_type!r}. [FERR-M001]"
-        )
-    parts = [f'{_quote_ident(col["name"], dialect)} {sql_type.upper()}']
+        raise FerrumMigrationError(f"Unsupported SQL type {sql_type!r}. [FERR-M001]")
+    parts = [f"{_quote_ident(col['name'], dialect)} {sql_type.upper()}"]
     default = col.get("default")
     not_null = col.get("not_null") or not col.get("nullable", True)
     if not_null:
@@ -242,21 +239,21 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
     if kind == "create_table":
         table = op["table"]
         col_defs = ", ".join(_col_def(c, dialect=dialect) for c in op.get("columns", []))
-        sql = f'CREATE TABLE IF NOT EXISTS {_quote_ident(table, dialect)} ({col_defs})'
+        sql = f"CREATE TABLE IF NOT EXISTS {_quote_ident(table, dialect)} ({col_defs})"
         if dialect == "mysql":
             sql += " ENGINE=InnoDB"
         return sql
 
     if kind == "drop_table":
         table = op["table"]
-        return f'DROP TABLE IF EXISTS {_quote_ident(table, dialect)}'
+        return f"DROP TABLE IF EXISTS {_quote_ident(table, dialect)}"
 
     if kind == "add_column":
         table = op["table"]
         col = {**op, "kind": "add_column"}
         return (
-            f'ALTER TABLE {_quote_ident(table, dialect)} '
-            f'ADD COLUMN {_col_def(col, dialect=dialect)}'
+            f"ALTER TABLE {_quote_ident(table, dialect)} "
+            f"ADD COLUMN {_col_def(col, dialect=dialect)}"
         )
 
     if kind == "drop_column":
@@ -267,8 +264,8 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
                 "SQLite does not support DROP COLUMN in Ferrum migrations. [FERR-M001]"
             )
         return (
-            f'ALTER TABLE {_quote_ident(table, dialect)} '
-            f'DROP COLUMN IF EXISTS {_quote_ident(column, dialect)}'
+            f"ALTER TABLE {_quote_ident(table, dialect)} "
+            f"DROP COLUMN IF EXISTS {_quote_ident(column, dialect)}"
         )
 
     if kind == "rename_column":
@@ -277,14 +274,14 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
         to_col = op["to"]
         if dialect == "mysql":
             return (
-                f'ALTER TABLE {_quote_ident(table, dialect)} '
-                f'RENAME COLUMN {_quote_ident(from_col, dialect)} '
-                f'TO {_quote_ident(to_col, dialect)}'
+                f"ALTER TABLE {_quote_ident(table, dialect)} "
+                f"RENAME COLUMN {_quote_ident(from_col, dialect)} "
+                f"TO {_quote_ident(to_col, dialect)}"
             )
         return (
-            f'ALTER TABLE {_quote_ident(table, dialect)} '
-            f'RENAME COLUMN {_quote_ident(from_col, dialect)} '
-            f'TO {_quote_ident(to_col, dialect)}'
+            f"ALTER TABLE {_quote_ident(table, dialect)} "
+            f"RENAME COLUMN {_quote_ident(from_col, dialect)} "
+            f"TO {_quote_ident(to_col, dialect)}"
         )
 
     if kind == "add_index":
@@ -298,8 +295,8 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
         if using not in _INDEX_USING_ALLOWLIST:
             raise FerrumMigrationError(f"Unsupported index access method {using!r}. [FERR-M001]")
         sql = (
-            f'CREATE {unique_kw}INDEX IF NOT EXISTS {_quote_ident(name, dialect)} '
-            f'ON {_quote_ident(table, dialect)}'
+            f"CREATE {unique_kw}INDEX IF NOT EXISTS {_quote_ident(name, dialect)} "
+            f"ON {_quote_ident(table, dialect)}"
         )
         if dialect == "postgres":
             sql += f" USING {using} ({cols})"
@@ -315,26 +312,26 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
         if dialect == "mysql":
             table = op.get("table", "")
             if table:
-                return f'DROP INDEX {_quote_ident(name, dialect)} ON {_quote_ident(table, dialect)}'
-        return f'DROP INDEX IF EXISTS {_quote_ident(name, dialect)}'
+                return f"DROP INDEX {_quote_ident(name, dialect)} ON {_quote_ident(table, dialect)}"
+        return f"DROP INDEX IF EXISTS {_quote_ident(name, dialect)}"
 
     if kind == "add_fk":
         on_delete = str(op.get("on_delete", "CASCADE")).upper()
         if on_delete not in _FK_ON_DELETE_ALLOWLIST:
             raise FerrumMigrationError(f"Unsupported ON DELETE action {on_delete!r}. [FERR-M001]")
         return (
-            f'ALTER TABLE {_quote_ident(op["table"], dialect)} '
-            f'ADD CONSTRAINT {_quote_ident(op["name"], dialect)} '
-            f'FOREIGN KEY ({_quote_ident(op["column"], dialect)}) '
-            f'REFERENCES {_quote_ident(op["ref_table"], dialect)} '
-            f'({_quote_ident(op["ref_column"], dialect)})'
+            f"ALTER TABLE {_quote_ident(op['table'], dialect)} "
+            f"ADD CONSTRAINT {_quote_ident(op['name'], dialect)} "
+            f"FOREIGN KEY ({_quote_ident(op['column'], dialect)}) "
+            f"REFERENCES {_quote_ident(op['ref_table'], dialect)} "
+            f"({_quote_ident(op['ref_column'], dialect)})"
             f" ON DELETE {on_delete}"
         )
 
     if kind == "drop_fk":
         return (
-            f'ALTER TABLE {_quote_ident(op["table"], dialect)} '
-            f'DROP CONSTRAINT IF EXISTS {_quote_ident(op["name"], dialect)}'
+            f"ALTER TABLE {_quote_ident(op['table'], dialect)} "
+            f"DROP CONSTRAINT IF EXISTS {_quote_ident(op['name'], dialect)}"
         )
 
     if kind == "raw_sql":
@@ -398,7 +395,7 @@ def _index_columns_sql(
     for i, column in enumerate(columns):
         opclass = opclasses[i] if opclasses and i < len(opclasses) else ""
         if opclass and dialect == "postgres":
-            parts.append(f'{_quote_ident(column, dialect)} {opclass}')
+            parts.append(f"{_quote_ident(column, dialect)} {opclass}")
         else:
             parts.append(_quote_ident(column, dialect))
     return ", ".join(parts)

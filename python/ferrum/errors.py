@@ -24,7 +24,7 @@ try:
 
     _HAS_ASYNCPG: bool = True
 except ImportError:
-    _asyncpg_exc = None  # type: ignore
+    _asyncpg_exc = None
     _HAS_ASYNCPG = False
 
 try:
@@ -32,7 +32,7 @@ try:
 
     _HAS_ASYNCMY: bool = True
 except ImportError:
-    _asyncmy_exc = None  # type: ignore
+    _asyncmy_exc = None
     _HAS_ASYNCMY = False
 
 try:
@@ -40,7 +40,7 @@ try:
 
     _HAS_AIOSQLITE: bool = True
 except ImportError:
-    aiosqlite = None  # type: ignore
+    aiosqlite = None
     _HAS_AIOSQLITE = False
 
 

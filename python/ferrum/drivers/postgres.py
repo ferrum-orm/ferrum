@@ -45,8 +45,7 @@ class AsyncpgDriver:
             import asyncpg  # type: ignore[import-untyped]
         except ImportError as exc:
             raise FerrumConfigError(
-                "PostgreSQL driver not installed. Install with: uv add 'ferrum-orm[pg]' "
-                "[FERR-C001]"
+                "PostgreSQL driver not installed. Install with: uv add 'ferrum-orm[pg]' [FERR-C001]"
             ) from exc
 
         diag = _redacted_diag(self._dsn)

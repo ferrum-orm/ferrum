@@ -178,7 +178,7 @@ jobs:
       # test deps from PyPI — the security suite imports ferrum.cli (rich/typer).
       # ferrum-orm is already satisfied by the wheel, so pip won't refetch it.
       - run: pip install wheels/*.whl
-      - run: pip install "ferrum-orm[cli,dotenv]" pytest pytest-asyncio
+      - run: pip install "ferrum-orm[pg,cli,dotenv]" pytest pytest-asyncio
       - name: Run security qualification on the wheel
         run: pytest tests/python/security -m security -v
 
