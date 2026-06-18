@@ -18,8 +18,7 @@ async def transient_table(
     drop_sql: str,
 ) -> AsyncIterator[Connection]:
     """Create a table before the block and drop it afterward."""
-    pool = pg_conn._pool
-    assert pool is not None
+    pool = raw_pool(pg_conn)
     async with pool.acquire() as raw:
         await raw.execute(create_sql)
     try:
@@ -31,7 +30,7 @@ async def transient_table(
 
 def raw_pool(pg_conn: Connection):
     """Return the underlying asyncpg pool, asserting it is open."""
-    pool = pg_conn._pool
+    pool = getattr(pg_conn._require_driver(), "_pool", None)
     assert pool is not None
     return pool
 

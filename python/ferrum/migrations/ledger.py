@@ -10,7 +10,7 @@ try:
 
     _HAS_ASYNCPG: bool = True
 except ImportError:
-    _asyncpg_exc = None
+    _asyncpg_exc = None  # type: ignore[invalid-assignment]
     _HAS_ASYNCPG = False
 
 try:
@@ -29,7 +29,7 @@ except ImportError:
     aiosqlite = None
     _HAS_AIOSQLITE = False
 
-from ferrum.errors import FerrumMigrationError
+from ferrum.errors import FerrumIntegrityError, FerrumMigrationError
 
 if TYPE_CHECKING:
     from ferrum.connection import Connection
@@ -114,7 +114,14 @@ async def record_applied(
             environment,
             description,
         )
+    except FerrumIntegrityError:
+        # Drivers map a duplicate-digest unique violation to FerrumIntegrityError.
+        # The ledger's only unique column is `digest`, so this means a replay.
+        raise FerrumMigrationError(
+            f"Migration {description!r} has already been applied. [FERR-M003]"
+        ) from None
     except Exception as exc:
+        # Defensive fallback for raw driver integrity errors that bypass mapping.
         if (
             _HAS_ASYNCPG
             and _asyncpg_exc is not None

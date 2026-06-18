@@ -32,6 +32,8 @@ import pytest
 import ferrum
 from ferrum.errors import FerrumNotFoundError
 
+from .helpers import raw_pool
+
 # ---------------------------------------------------------------------------
 # Test 1 — native compile round-trip (no live DB required)
 # ---------------------------------------------------------------------------
@@ -122,7 +124,7 @@ async def test_queryset_all_returns_model_instances(pg_conn: ferrum.connection.C
         class Meta:
             table = "ferrum_test_widget"
 
-    pool = pg_conn._pool
+    pool = raw_pool(pg_conn)
     assert pool is not None
 
     async with pool.acquire() as raw_conn:
@@ -173,7 +175,7 @@ async def test_queryset_get_raises_not_found(pg_conn: ferrum.connection.Connecti
         class Meta:
             table = "ferrum_test_item"
 
-    pool = pg_conn._pool
+    pool = raw_pool(pg_conn)
     assert pool is not None
 
     async with pool.acquire() as raw_conn:
@@ -204,7 +206,7 @@ async def test_queryset_count(pg_conn: ferrum.connection.Connection) -> None:
         class Meta:
             table = "ferrum_test_counter"
 
-    pool = pg_conn._pool
+    pool = raw_pool(pg_conn)
     assert pool is not None
 
     async with pool.acquire() as raw_conn:
@@ -251,7 +253,7 @@ async def test_cancellation_at_python_await(pg_conn: ferrum.connection.Connectio
         class Meta:
             table = "ferrum_test_task"
 
-    pool = pg_conn._pool
+    pool = raw_pool(pg_conn)
     assert pool is not None
 
     async with pool.acquire() as raw_conn:
