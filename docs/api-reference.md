@@ -40,23 +40,23 @@ early).
 
 **Class attributes / methods**
 
-| Member | Description |
-|--------|-------------|
-| `objects` | Class-level manager; vends a fresh `QuerySet` bound to the model. Accessing it on an *instance* raises `AttributeError`. |
-| `get_metadata() -> ModelMetadata` | Returns the immutable metadata built at class definition. Raises `AttributeError` if the model declares no fields. |
+| Member                            | Description                                                                                                              |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `objects`                         | Class-level manager; vends a fresh `QuerySet` bound to the model. Accessing it on an _instance_ raises `AttributeError`. |
+| `get_metadata() -> ModelMetadata` | Returns the immutable metadata built at class definition. Raises `AttributeError` if the model declares no fields.       |
 
 **Field → type mapping** (Python annotation → Ferrum field type):
 
-| Python | Ferrum type | | Python | Ferrum type |
-|--------|-------------|---|--------|-------------|
-| `int` | `int` (PK → `big_int`) | | `datetime` | `datetime` |
-| `str` | `text` | | `date` | `date` |
-| `bool` | `bool` | | `time` | `time` |
-| `float` | `float` | | `UUID` | `uuid` |
-| `Decimal` | `decimal` | | `bytes` | `bytes` |
-| `dict` | `json` | | `Vector` | `vector` (requires `Field(vector_dimensions=n)`) |
-| | | | `TSVector` | `tsvector` |
-| | | | unknown | `text` (fallback) |
+| Python    | Ferrum type            |     | Python     | Ferrum type                                      |
+| --------- | ---------------------- | --- | ---------- | ------------------------------------------------ |
+| `int`     | `int` (PK → `big_int`) |     | `datetime` | `datetime`                                       |
+| `str`     | `text`                 |     | `date`     | `date`                                           |
+| `bool`    | `bool`                 |     | `time`     | `time`                                           |
+| `float`   | `float`                |     | `UUID`     | `uuid`                                           |
+| `Decimal` | `decimal`              |     | `bytes`    | `bytes`                                          |
+| `dict`    | `json`                 |     | `Vector`   | `vector` (requires `Field(vector_dimensions=n)`) |
+|           |                        |     | `TSVector` | `tsvector`                                       |
+|           |                        |     | unknown    | `text` (fallback)                                |
 
 `T | None` / `Optional[T]` marks the field nullable. The first `int` field named `id`
 becomes the primary key when no explicit PK is set.
@@ -66,19 +66,19 @@ becomes the primary key when no explicit PK is set.
 Configuration factory extending `pydantic.ConfigDict`. `table` sets the database table name
 (defaults to the snake_case class name). Other keyword arguments pass through to Pydantic.
 
-### `class ModelMetadata` *(returned by `Model.get_metadata()`)*
+### `class ModelMetadata` _(returned by `Model.get_metadata()`)_
 
 Immutable, frozen dataclass — the allowlist source for the Rust compiler and migration
 planner. Never carries connection info, bound values, or row data.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `table_name` | `str` | Resolved table name. |
-| `model_name` | `str` | Class name. |
-| `fields` | `tuple[FieldMeta, ...]` | Per-field descriptors. |
-| `allowed_sort_directions` | `tuple[str, ...]` | `("asc", "desc")`. |
-| `pk_index` | `int` | Index of the PK field. |
-| `to_metadata_json() -> str` | method | Serializes to the JSON shape the native compiler expects. |
+| Field                       | Type                    | Description                                               |
+| --------------------------- | ----------------------- | --------------------------------------------------------- |
+| `table_name`                | `str`                   | Resolved table name.                                      |
+| `model_name`                | `str`                   | Class name.                                               |
+| `fields`                    | `tuple[FieldMeta, ...]` | Per-field descriptors.                                    |
+| `allowed_sort_directions`   | `tuple[str, ...]`       | `("asc", "desc")`.                                        |
+| `pk_index`                  | `int`                   | Index of the PK field.                                    |
+| `to_metadata_json() -> str` | method                  | Serializes to the JSON shape the native compiler expects. |
 
 `FieldMeta` (frozen): `name`, `column_name`, `python_type_name`, `field_type`,
 `allowed_operators`, `nullable`, `pk`, plus optional `max_length`, `db_default`,
@@ -88,7 +88,7 @@ planner. Never carries connection info, bound values, or row data.
 
 ### `class Index`
 
-Declarative index for ``class Meta: indexes = [...]``. Fields: `fields`, optional `name`,
+Declarative index for `class Meta: indexes = [...]`. Fields: `fields`, optional `name`,
 `unique`, `using` (`"btree"` default; also `"gin"`, `"gist"`, `"hash"`, `"brin"`,
 `"hnsw"`, `"ivfflat"`), and optional partial-index `where`.
 
@@ -99,6 +99,7 @@ Ferrum-specific keyword arguments include `primary_key`, `db_column`, `unique`, 
 `Vector` columns). A string `default=` value is stored as a DB-side `db_default` expression.
 
 UUID PK columns auto-receive `db_default = "gen_random_uuid()"` unless overridden.
+`uuid_generate="v7"` sets `db_default = "uuidv7()"`.
 
 ---
 
@@ -111,44 +112,44 @@ Lazy, chainable, async query builder. Chaining methods return a **new** `QuerySe
 
 #### Chaining methods (no I/O, no SQL)
 
-| Method | Description |
-|--------|-------------|
-| `filter(**kwargs) -> QuerySet[M]` | Add `field__operator=value` lookups (bare `field=value` is `eq`). Field names validated against the allowlist at call time. |
-| `order_by(*fields) -> QuerySet[M]` | `ORDER BY`; prefix a field with `-` for DESC. |
-| `limit(count) -> QuerySet[M]` | Set `LIMIT`. |
-| `offset(count) -> QuerySet[M]` | Set `OFFSET`. |
-| `nearest_to(field, vector, *, metric="l2") -> QuerySet[M]` | pgvector KNN ordering (`l2`, `cosine`, `inner_product`). |
-| `to_ir_json() -> str` | Serialize current state to the ADR-002 v1 IR JSON string (runs allowlist checks). |
+| Method                                                     | Description                                                                                                                 |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `filter(**kwargs) -> QuerySet[M]`                          | Add `field__operator=value` lookups (bare `field=value` is `eq`). Field names validated against the allowlist at call time. |
+| `order_by(*fields) -> QuerySet[M]`                         | `ORDER BY`; prefix a field with `-` for DESC.                                                                               |
+| `limit(count) -> QuerySet[M]`                              | Set `LIMIT`.                                                                                                                |
+| `offset(count) -> QuerySet[M]`                             | Set `OFFSET`.                                                                                                               |
+| `nearest_to(field, vector, *, metric="l2") -> QuerySet[M]` | pgvector KNN ordering (`l2`, `cosine`, `inner_product`).                                                                    |
+| `to_ir_json() -> str`                                      | Serialize current state to the ADR-002 v1 IR JSON string (runs allowlist checks).                                           |
 
 #### Terminal coroutines (require `conn: Connection`)
 
-| Method | Returns | Notes |
-|--------|---------|-------|
-| `await create(conn, **values)` | `M` | `INSERT … RETURNING *`, hydrates the row. |
-| `await all(conn)` | `list[M]` | All matching rows. |
-| `await first(conn)` | `M \| None` | Applies `LIMIT 1`. |
-| `await get(conn, **kwargs)` | `M` | Exactly one row. Raises `FerrumNotFoundError` / `FerrumMultipleObjectsError`. |
-| `await count(conn)` | `int` | `SELECT COUNT(*)`; ignores limit/offset. |
-| `await update(conn, **assignments)` | `int` | **Requires a filter.** Returns affected rows. |
-| `await delete(conn)` | `int` | **Requires a filter.** Returns affected rows. |
-| `await danger_update_all(conn, **assignments)` | `int` | Unscoped update — explicit opt-in. |
-| `await danger_delete_all(conn)` | `int` | Unscoped delete — explicit opt-in. |
+| Method                                         | Returns     | Notes                                                                         |
+| ---------------------------------------------- | ----------- | ----------------------------------------------------------------------------- |
+| `await create(conn, **values)`                 | `M`         | `INSERT … RETURNING *`, hydrates the row.                                     |
+| `await all(conn)`                              | `list[M]`   | All matching rows.                                                            |
+| `await first(conn)`                            | `M \| None` | Applies `LIMIT 1`.                                                            |
+| `await get(conn, **kwargs)`                    | `M`         | Exactly one row. Raises `FerrumNotFoundError` / `FerrumMultipleObjectsError`. |
+| `await count(conn)`                            | `int`       | `SELECT COUNT(*)`; ignores limit/offset.                                      |
+| `await update(conn, **assignments)`            | `int`       | **Requires a filter.** Returns affected rows.                                 |
+| `await delete(conn)`                           | `int`       | **Requires a filter.** Returns affected rows.                                 |
+| `await danger_update_all(conn, **assignments)` | `int`       | Unscoped update — explicit opt-in.                                            |
+| `await danger_delete_all(conn)`                | `int`       | Unscoped delete — explicit opt-in.                                            |
 
 `update()` / `delete()` without any filter raise **`FerrumDangerApiError`** before touching
 the connection.
 
 #### Operators by field type
 
-| Field type | Allowed operators |
-|------------|-------------------|
-| `int`, `big_int`, `float`, `decimal` | `eq ne gt gte lt lte in is_null range` |
-| `text` | `eq ne iexact contains icontains startswith endswith istartswith iendswith in is_null` |
-| `datetime`, `date`, `time` | `eq ne gt gte lt lte is_null range` |
-| `bool` | `eq ne is_null` |
-| `uuid`, `bytes` | `eq ne in is_null` |
-| `json` | `eq is_null` |
-| `vector` | `is_null` (KNN via `nearest_to`) |
-| `tsvector` | `match is_null` |
+| Field type                           | Allowed operators                                                                      |
+| ------------------------------------ | -------------------------------------------------------------------------------------- |
+| `int`, `big_int`, `float`, `decimal` | `eq ne gt gte lt lte in is_null range`                                                 |
+| `text`                               | `eq ne iexact contains icontains startswith endswith istartswith iendswith in is_null` |
+| `datetime`, `date`, `time`           | `eq ne gt gte lt lte is_null range`                                                    |
+| `bool`                               | `eq ne is_null`                                                                        |
+| `uuid`, `bytes`                      | `eq ne in is_null`                                                                     |
+| `json`                               | `eq is_null`                                                                           |
+| `vector`                             | `is_null` (KNN via `nearest_to`)                                                       |
+| `tsvector`                           | `match is_null`                                                                        |
 
 An unsupported operator for a field raises `FerrumCompileError` before SQL emission.
 
@@ -156,7 +157,7 @@ An unsupported operator for a field raises `FerrumCompileError` before SQL emiss
 
 ## Connections
 
-### `connect(dsn=None, *, min_size=1, max_size=10)` *(async context manager)*
+### `connect(dsn=None, *, min_size=1, max_size=10)` _(async context manager)_
 
 Yields an open `Connection` (asyncpg pool). If `dsn` is omitted, `FERRUM_DATABASE_URL` is
 used; if neither is present, raises `FerrumConfigError`. The pool closes on exit. The DSN is
@@ -171,13 +172,13 @@ async with ferrum.connect("postgresql://user@host/db") as conn:
 
 A managed asyncpg pool. Usually obtained via `connect()`; can be constructed directly.
 
-| Member | Description |
-|--------|-------------|
-| `await open()` | Open the pool. Connection failures raise `FerrumConnectionError` with redacted diagnostics. |
-| `await close()` | Close the pool. |
-| `acquire()` *(async ctx mgr)* | Yields a raw asyncpg connection; released on exit. Driver errors mapped to the Ferrum taxonomy. |
-| `await release(raw_conn)` | Manual release (prefer `acquire()`). |
-| `async with` | Opens on enter, closes on exit. |
+| Member                        | Description                                                                                     |
+| ----------------------------- | ----------------------------------------------------------------------------------------------- |
+| `await open()`                | Open the pool. Connection failures raise `FerrumConnectionError` with redacted diagnostics.     |
+| `await close()`               | Close the pool.                                                                                 |
+| `acquire()` _(async ctx mgr)_ | Yields a raw asyncpg connection; released on exit. Driver errors mapped to the Ferrum taxonomy. |
+| `await release(raw_conn)`     | Manual release (prefer `acquire()`).                                                            |
+| `async with`                  | Opens on enter, closes on exit.                                                                 |
 
 ---
 
@@ -237,21 +238,21 @@ Apply (or dry-run) a plan JSON. Safety gates, each raising `FerrumMigrationError
 
 All subclass `FerrumError` and carry a stable `code`.
 
-| Exception | Code | Raised when |
-|-----------|------|-------------|
-| `FerrumError` | `FERR-0000` | Base class — catch-all. |
-| `FerrumConfigError` | `FERR-C001` | Missing DSN, or native extension not built. |
-| `FerrumCompileError` | `FERR-C102` | Unknown field, unsupported operator, or IR version mismatch. Carries `model`, `field`, `operator`, `category`. |
-| `FerrumNotFoundError` | `FERR-Q404` | `get()` matched no row. |
-| `FerrumMultipleObjectsError` | `FERR-Q405` | `get()` matched more than one row. |
-| `FerrumIntegrityError` | `FERR-D201` | Constraint violation (unique/FK/not-null/check). Carries `constraint`, `category`. |
-| `FerrumConnectionError` | `FERR-E101` | Connection/pool error. Diagnostics limited to host/port/db/user. |
-| `FerrumTimeoutError` | `FERR-E102` | Query/connection timed out. |
-| `FerrumInternalError` | `FERR-E500` | A Rust panic crossed the PyO3 boundary (sanitized category only). |
-| `FerrumMigrationError` | `FERR-M001` | Migration failed or rejected by a safety gate. |
-| `FerrumDangerApiError` | `FERR-U301` | Unscoped `delete()`/`update()` without the danger API. |
-| `FerrumSchemaError` | `FERR-S001` | Referenced table/column does not exist (SQLSTATE 42703 / 42P01). |
-| `FerrumDatabaseError` | `FERR-D001` | General database error with no more specific mapping. |
+| Exception                    | Code        | Raised when                                                                                                    |
+| ---------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------- |
+| `FerrumError`                | `FERR-0000` | Base class — catch-all.                                                                                        |
+| `FerrumConfigError`          | `FERR-C001` | Missing DSN, or native extension not built.                                                                    |
+| `FerrumCompileError`         | `FERR-C102` | Unknown field, unsupported operator, or IR version mismatch. Carries `model`, `field`, `operator`, `category`. |
+| `FerrumNotFoundError`        | `FERR-Q404` | `get()` matched no row.                                                                                        |
+| `FerrumMultipleObjectsError` | `FERR-Q405` | `get()` matched more than one row.                                                                             |
+| `FerrumIntegrityError`       | `FERR-D201` | Constraint violation (unique/FK/not-null/check). Carries `constraint`, `category`.                             |
+| `FerrumConnectionError`      | `FERR-E101` | Connection/pool error. Diagnostics limited to host/port/db/user.                                               |
+| `FerrumTimeoutError`         | `FERR-E102` | Query/connection timed out.                                                                                    |
+| `FerrumInternalError`        | `FERR-E500` | A Rust panic crossed the PyO3 boundary (sanitized category only).                                              |
+| `FerrumMigrationError`       | `FERR-M001` | Migration failed or rejected by a safety gate.                                                                 |
+| `FerrumDangerApiError`       | `FERR-U301` | Unscoped `delete()`/`update()` without the danger API.                                                         |
+| `FerrumSchemaError`          | `FERR-S001` | Referenced table/column does not exist (SQLSTATE 42703 / 42P01).                                               |
+| `FerrumDatabaseError`        | `FERR-D001` | General database error with no more specific mapping.                                                          |
 
 > `FerrumTimeoutError`, `FerrumInternalError`, and `FerrumDangerApiError` are part of the
 > taxonomy but are **not** re-exported at the top level today — import them from

@@ -141,7 +141,7 @@ _DEFAULT_VALUE_ALLOWLIST: frozenset[str] = frozenset(
         "CURRENT_DATE",
         "CURRENT_TIME",
         "GEN_RANDOM_UUID()",
-        "UUID_GENERATE_V7()",
+        "UUIDV7()",
         "0",
         "1",
         "''",

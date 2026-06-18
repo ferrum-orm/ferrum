@@ -490,7 +490,7 @@ def Field(  # noqa: N802
     if uuid_generate == "v4":
         ferrum_extras["db_default"] = "gen_random_uuid()"
     elif uuid_generate == "v7":
-        ferrum_extras["db_default"] = "uuid_generate_v7()"
+        ferrum_extras["db_default"] = "uuidv7()"
 
     if isinstance(default, str):
         ferrum_extras["db_default"] = default
