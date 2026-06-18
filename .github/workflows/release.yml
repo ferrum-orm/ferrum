@@ -58,7 +58,11 @@ jobs:
           # Install Rust into an isolated CARGO_HOME/RUSTUP_HOME so the pinned toolchain
           # and its components install fresh, with no preexisting binaries to collide with.
           CIBW_BEFORE_ALL_LINUX: "export CARGO_HOME=/opt/cw-cargo RUSTUP_HOME=/opt/cw-rustup && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.87.0 --no-modify-path"
-          CIBW_ENVIRONMENT_LINUX: 'PATH="/opt/cw-cargo/bin:$PATH" CARGO_HOME=/opt/cw-cargo RUSTUP_HOME=/opt/cw-rustup'
+          # RUSTUP_TOOLCHAIN pins the toolchain directly, so cargo ignores
+          # rust-toolchain.toml and never tries to sync its clippy/rustfmt
+          # components (which intermittently conflict with the image's cargo-clippy).
+          # The wheel build needs only rustc/cargo/std, which the minimal install has.
+          CIBW_ENVIRONMENT_LINUX: 'PATH="/opt/cw-cargo/bin:$PATH" CARGO_HOME=/opt/cw-cargo RUSTUP_HOME=/opt/cw-rustup RUSTUP_TOOLCHAIN=1.87.0'
           # macOS: install rust only if absent, then add the apple targets so maturin can
           # honor cibuildwheel's ARCHFLAGS and cross-compile x86_64 on the arm64 runner.
           CIBW_BEFORE_ALL_MACOS: "command -v cargo >/dev/null 2>&1 || [ -x $HOME/.cargo/bin/cargo ] || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal; export PATH=$HOME/.cargo/bin:$PATH; rustup target add x86_64-apple-darwin aarch64-apple-darwin"
