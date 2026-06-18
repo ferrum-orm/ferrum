@@ -443,6 +443,22 @@ def test_compute_plan_existing_table_adds_column() -> None:
     assert op["sql_type"] == "REAL"
 
 
+def test_compute_plan_add_column_emits_empty_string_default_for_text_field() -> None:
+    class User(ferrum.Model):
+        id: int
+        email: str
+        name: str = ferrum.Field(default="")
+
+    plan = compute_plan([User], existing_tables={"user": ["id", "email"]})
+
+    assert len(plan["ops"]) == 1
+    op = plan["ops"][0]
+    assert op["kind"] == "add_column"
+    assert op["table"] == "user"
+    assert op["name"] == "name"
+    assert op["default"] == "''"
+
+
 # ---------------------------------------------------------------------------
 # compute_plan: fully in-sync schema → no ops
 # ---------------------------------------------------------------------------

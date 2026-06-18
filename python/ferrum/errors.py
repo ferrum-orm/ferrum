@@ -18,6 +18,7 @@ from the ``ferrum._native`` PyO3 extension into the Ferrum taxonomy (ADR-006).
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 try:
     import asyncpg.exceptions as _asyncpg_exc  # type: ignore[import-untyped]
@@ -162,6 +163,76 @@ class FerrumMigrationError(FerrumError):
     """A migration operation failed or was rejected by a safety gate."""
 
     code = "FERR-M001"
+
+
+def describe_migration_op(op: dict[str, Any]) -> str:
+    """Return a short human-readable label for a migration operation dict."""
+    kind = op.get("kind", "unknown")
+    table = op.get("table")
+    if kind == "create_table":
+        return f"create_table on {table!r}"
+    if kind == "drop_table":
+        return f"drop_table {table!r}"
+    if kind == "add_column":
+        return f"add_column {op.get('name')!r} on {table!r}"
+    if kind == "drop_column":
+        return f"drop_column {op.get('column')!r} on {table!r}"
+    if kind == "rename_column":
+        return f"rename_column {op.get('from')!r} -> {op.get('to')!r} on {table!r}"
+    if kind == "add_index":
+        return f"add_index {op.get('name')!r} on {table!r}"
+    if kind == "drop_index":
+        return f"drop_index {op.get('name')!r}"
+    if kind == "add_fk":
+        return (
+            f"add_fk {op.get('name')!r} "
+            f"({op.get('column')!r} -> {op.get('ref_table')!r}.{op.get('ref_column')!r})"
+        )
+    if kind == "drop_fk":
+        return f"drop_fk {op.get('name')!r} on {table!r}"
+    if kind == "raw_sql":
+        return "raw_sql"
+    return kind
+
+
+def _postgres_ddl_error_detail(exc: Exception) -> str:
+    """Sanitized driver detail for migration DDL failures.
+
+    Includes the exception class, SQLSTATE, and the top-level PostgreSQL message.
+    ``DETAIL``/``HINT`` attributes are never included (ERR-1). Migration DDL
+    failures are schema-level and safe to surface for developer actionability.
+    """
+    if _HAS_ASYNCPG and _asyncpg_exc is not None:
+        _pg_base = getattr(_asyncpg_exc, "PostgresError", None)
+        if _pg_base is not None and isinstance(exc, _pg_base):
+            label = type(exc).__name__
+            sqlstate = getattr(exc, "sqlstate", None)
+            if sqlstate:
+                label = f"{label} (SQLSTATE {sqlstate})"
+            msg = str(exc).strip()
+            if msg and msg != type(exc).__name__:
+                return f"{label}: {msg}"
+            return label
+    return type(exc).__name__
+
+
+def migration_op_failure(
+    *,
+    action: str,
+    migration_name: str,
+    op_index: int,
+    op: dict[str, Any],
+    exc: Exception,
+    code: str = "FERR-M001",
+) -> FerrumMigrationError:
+    """Build an actionable ``FerrumMigrationError`` for a failed migration operation."""
+    verb = "apply" if action == "apply" else "revert"
+    op_label = describe_migration_op(op)
+    detail = _postgres_ddl_error_detail(exc)
+    return FerrumMigrationError(
+        f"Failed to {verb} migration {migration_name!r} "
+        f"at operation {op_index + 1} ({op_label}): {detail} [{code}]"
+    )
 
 
 class FerrumDangerApiError(FerrumError):

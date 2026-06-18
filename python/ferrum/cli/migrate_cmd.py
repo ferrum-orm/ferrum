@@ -20,7 +20,7 @@ import typer
 from rich import print as rprint
 
 from ferrum.connection import connect
-from ferrum.errors import FerrumConfigError, FerrumMigrationError
+from ferrum.errors import FerrumConfigError, FerrumMigrationError, migration_op_failure
 from ferrum.migrations import ledger as _ledger
 from ferrum.migrations import loader as _loader
 from ferrum.migrations.orchestrator import _op_to_sql
@@ -95,41 +95,56 @@ async def run_migrate(
                     rprint(f"  [dim][dry-run][/dim] would apply {len(ops)} operations")
                     continue
 
-                try:
-                    driver = conn._require_driver()
-                    dialect = conn.dialect
-                    if dialect == "postgres":
-                        pool = getattr(driver, "_pool", None)
-                        if pool is None:
-                            raise FerrumMigrationError("PostgreSQL pool is not open. [FERR-M001]")
-                        async with pool.acquire() as db_conn, db_conn.transaction():
-                            for op in ops:
-                                sql = _op_to_sql(op.to_op_dict(), dialect=dialect)
+                driver = conn._require_driver()
+                dialect = conn.dialect
+                if dialect == "postgres":
+                    pool = getattr(driver, "_pool", None)
+                    if pool is None:
+                        raise FerrumMigrationError("PostgreSQL pool is not open. [FERR-M001]")
+                    async with pool.acquire() as db_conn, db_conn.transaction():
+                        for op_index, op in enumerate(ops):
+                            op_dict = op.to_op_dict()
+                            sql = _op_to_sql(op_dict, dialect=dialect)
+                            try:
                                 await db_conn.execute(sql)
-                            await _ledger.record_applied(
-                                conn,
-                                digest,
-                                environment=env,
-                                description=module.name,
-                            )
-                    else:
-                        for op in ops:
-                            sql = _op_to_sql(op.to_op_dict(), dialect=dialect)
-                            await driver.execute(sql)
+                            except FerrumMigrationError:
+                                raise
+                            except Exception as exc:
+                                raise migration_op_failure(
+                                    action="apply",
+                                    migration_name=module.name,
+                                    op_index=op_index,
+                                    op=op_dict,
+                                    exc=exc,
+                                ) from None
                         await _ledger.record_applied(
                             conn,
                             digest,
                             environment=env,
                             description=module.name,
                         )
-                except FerrumMigrationError:
-                    raise
-                except Exception as exc:
-                    raise FerrumMigrationError(
-                        f"Failed to apply migration {module.name!r}: "
-                        f"{type(exc).__name__} [FERR-M001]"
-                    ) from None
-
+                else:
+                    for op_index, op in enumerate(ops):
+                        op_dict = op.to_op_dict()
+                        sql = _op_to_sql(op_dict, dialect=dialect)
+                        try:
+                            await driver.execute(sql)
+                        except FerrumMigrationError:
+                            raise
+                        except Exception as exc:
+                            raise migration_op_failure(
+                                action="apply",
+                                migration_name=module.name,
+                                op_index=op_index,
+                                op=op_dict,
+                                exc=exc,
+                            ) from None
+                    await _ledger.record_applied(
+                        conn,
+                        digest,
+                        environment=env,
+                        description=module.name,
+                    )
                 rprint("  [green]OK[/green]")
 
             return 0

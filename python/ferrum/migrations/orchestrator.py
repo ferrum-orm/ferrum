@@ -149,6 +149,32 @@ _DEFAULT_VALUE_ALLOWLIST: frozenset[str] = frozenset(
 )
 
 
+def _normalize_column_default(default: Any) -> str:  # noqa: ANN401
+    """Normalize a migration default value to its SQL literal token."""
+    text = str(default)
+    if text == "":
+        return "''"
+    return text
+
+
+def _python_default_to_sql(*, value: Any, field_meta: FieldMeta) -> str | None:  # noqa: ANN401
+    """Map a Python-side field default to an allowed SQL DEFAULT literal, if possible."""
+    if value is None:
+        return None
+    field_type = field_meta.field_type
+    if field_type in ("text", "varchar") and isinstance(value, str):
+        if value == "":
+            return "''"
+        return None
+    if field_type == "bool" and isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if field_type in ("int", "big_int") and isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if field_type == "float" and isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    return None
+
+
 def _quote_ident(name: str, dialect: str) -> str:
     """Quote a DDL identifier for the target dialect."""
     if dialect == "mysql":
@@ -203,12 +229,13 @@ def _col_def(col: dict[str, Any], *, dialect: str = "postgres") -> str:
             )
         parts.append("NOT NULL")
     if default is not None:
-        if str(default).upper() not in _DEFAULT_VALUE_ALLOWLIST:
+        normalized = _normalize_column_default(default)
+        if normalized.upper() not in _DEFAULT_VALUE_ALLOWLIST:
             raise FerrumMigrationError(
                 f"Unsupported DEFAULT value {default!r}. "
                 f"Only simple literals are allowed. [FERR-M001]"
             )
-        parts.append(f"DEFAULT {default}")
+        parts.append(f"DEFAULT {normalized}")
     if col.get("primary_key"):
         parts.append("PRIMARY KEY")
     if col.get("unique"):
@@ -413,11 +440,14 @@ def _field_to_col_def(field_meta: FieldMeta, *, is_pk: bool) -> dict[str, Any]:
     parameterised column types (``VARCHAR(n)``, ``NUMERIC(p,s)``) are emitted
     correctly.
     """
+    default = field_meta.db_default
+    if default is None:
+        default = _python_default_to_sql(value=field_meta.python_default, field_meta=field_meta)
     return {
         "name": field_meta.column_name,
         "sql_type": field_meta.sql_type,
         "not_null": not field_meta.nullable,
-        "default": field_meta.db_default,
+        "default": default,
         "primary_key": is_pk,
         "unique": field_meta.unique,
     }

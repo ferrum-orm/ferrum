@@ -8,7 +8,8 @@ Security invariants:
 - No credentials, bound values, or row data appear in emitted code or output.
 - All queries use parameterised ``$1`` placeholders — schema name is the only
   variable and is never interpolated into an identifier position.
-- ``ferrum_migrations`` and system tables (``pg_*``) are excluded by the query.
+- ``ferrum_migrations``, ``pg_*`` extension objects, and non-table relations
+  are excluded by the query (``BASE TABLE`` only).
 """
 
 from __future__ import annotations
@@ -42,9 +43,35 @@ _HEADER = textwrap.dedent("""\
 """)
 
 
+# Tables never scaffolded as Ferrum models.
+_EXCLUDED_TABLES: frozenset[str] = frozenset({"ferrum_migrations"})
+
+# Extension / catalog objects that may appear in ``public`` as views.
+_EXCLUDED_TABLE_PREFIXES: tuple[str, ...] = ("pg_",)
+
+
+def _is_scaffoldable_table(table_name: str) -> bool:
+    """Return True when *table_name* should become a scaffolded model."""
+    if table_name in _EXCLUDED_TABLES:
+        return False
+    return not table_name.startswith(_EXCLUDED_TABLE_PREFIXES)
+
+
+def _singularize_table_name(table_name: str) -> str:
+    """Best-effort singular form of a plural snake_case table name."""
+    if table_name.endswith("ies") and len(table_name) > 3:
+        return f"{table_name[:-3]}y"
+    if table_name.endswith(("ches", "shes", "xes", "ses", "zes")) and len(table_name) > 3:
+        return table_name[:-2]
+    if len(table_name) > 1 and table_name.endswith("s") and not table_name.endswith("ss"):
+        return table_name[:-1]
+    return table_name
+
+
 def _to_class_name(table_name: str) -> str:
-    """Convert snake_case table name to PascalCase class name."""
-    return "".join(part.capitalize() for part in table_name.split("_"))
+    """Convert a table name to a singular PascalCase model class name."""
+    singular = _singularize_table_name(table_name)
+    return "".join(part.capitalize() for part in singular.split("_"))
 
 
 def _pg_type_to_ferrum(
@@ -129,12 +156,15 @@ def _pg_type_to_ferrum(
 # ---------------------------------------------------------------------------
 
 _COL_QUERY = """\
-SELECT table_name, column_name, data_type, character_maximum_length,
-       numeric_precision, numeric_scale, is_nullable, column_default,
-       ordinal_position
-FROM information_schema.columns
-WHERE table_schema = $1 AND table_name != 'ferrum_migrations'
-ORDER BY table_name, ordinal_position
+SELECT c.table_name, c.column_name, c.data_type, c.character_maximum_length,
+       c.numeric_precision, c.numeric_scale, c.is_nullable, c.column_default,
+       c.ordinal_position
+FROM information_schema.columns c
+JOIN information_schema.tables t
+    ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+WHERE c.table_schema = $1
+  AND t.table_type = 'BASE TABLE'
+ORDER BY c.table_name, c.ordinal_position
 """
 
 _FK_QUERY = """\
@@ -148,7 +178,10 @@ JOIN information_schema.referential_constraints rc
     ON kcu.constraint_name = rc.constraint_name
 JOIN information_schema.constraint_column_usage ccu
     ON rc.unique_constraint_name = ccu.constraint_name
+JOIN information_schema.tables t
+    ON t.table_schema = kcu.table_schema AND t.table_name = kcu.table_name
 WHERE kcu.table_schema = $1
+  AND t.table_type = 'BASE TABLE'
 """
 
 _PK_QUERY = """\
@@ -156,7 +189,11 @@ SELECT kcu.table_name, kcu.column_name
 FROM information_schema.key_column_usage kcu
 JOIN information_schema.table_constraints tc
     ON kcu.constraint_name = tc.constraint_name
-WHERE tc.constraint_type = 'PRIMARY KEY' AND kcu.table_schema = $1
+JOIN information_schema.tables t
+    ON t.table_schema = kcu.table_schema AND t.table_name = kcu.table_name
+WHERE tc.constraint_type = 'PRIMARY KEY'
+  AND kcu.table_schema = $1
+  AND t.table_type = 'BASE TABLE'
 """
 
 
@@ -181,7 +218,11 @@ def _render_class(
             foreign_column_name, delete_rule).
     """
     class_name = _to_class_name(table_name)
-    lines: list[str] = [f"class {class_name}(Model):"]
+    lines: list[str] = [
+        f"class {class_name}(Model):",
+        f"    model_config = ferrum.ModelConfig(table={table_name!r})",
+        "",
+    ]
 
     for col in columns:
         col_name: str = col["column_name"]
@@ -270,21 +311,27 @@ async def run_inspectdb(
     # pk_cols_by_table: table_name → set of pk column names
     pk_cols_by_table: dict[str, set[str]] = defaultdict(set)
     for row in pk_rows:
-        pk_cols_by_table[row["table_name"]].add(row["column_name"])
+        table = row["table_name"]
+        if _is_scaffoldable_table(table):
+            pk_cols_by_table[table].add(row["column_name"])
 
     # fk_by_table: table_name → {column_name: fk info dict}
     fk_by_table: dict[str, dict[str, dict]] = defaultdict(dict)
     for row in fk_rows:
-        fk_by_table[row["table_name"]][row["column_name"]] = {
-            "foreign_table_name": row["foreign_table_name"],
-            "foreign_column_name": row["foreign_column_name"],
-            "delete_rule": row["delete_rule"],
-        }
+        table = row["table_name"]
+        if _is_scaffoldable_table(table):
+            fk_by_table[table][row["column_name"]] = {
+                "foreign_table_name": row["foreign_table_name"],
+                "foreign_column_name": row["foreign_column_name"],
+                "delete_rule": row["delete_rule"],
+            }
 
     # cols_by_table: table_name → ordered list of column dicts
     cols_by_table: dict[str, list[dict]] = defaultdict(list)
     for row in col_rows:
-        cols_by_table[row["table_name"]].append(dict(row))
+        table = row["table_name"]
+        if _is_scaffoldable_table(table):
+            cols_by_table[table].append(dict(row))
 
     tables = list(cols_by_table.keys())
 

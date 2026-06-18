@@ -114,6 +114,36 @@ def test_pg_type_to_ferrum_maps_parameterized_and_nullable_types() -> None:
     assert inspectdb_cmd._pg_type_to_ferrum("text", None, None, None, False, True) == ("str | None")
 
 
+def test_to_class_name_singularizes_plural_tables() -> None:
+    assert inspectdb_cmd._to_class_name("users") == "User"
+    assert inspectdb_cmd._to_class_name("documents") == "Document"
+    assert inspectdb_cmd._to_class_name("blog_post") == "BlogPost"
+    assert inspectdb_cmd._to_class_name("categories") == "Category"
+
+
+def test_is_scaffoldable_table_excludes_ledger_and_pg_extension_objects() -> None:
+    assert inspectdb_cmd._is_scaffoldable_table("users") is True
+    assert inspectdb_cmd._is_scaffoldable_table("ferrum_migrations") is False
+    assert inspectdb_cmd._is_scaffoldable_table("pg_stat_statements") is False
+    assert inspectdb_cmd._is_scaffoldable_table("pg_stat_statements_info") is False
+
+
+def test_render_class_emits_model_config_and_singular_class_name() -> None:
+    source = inspectdb_cmd._render_class(
+        "users",
+        [
+            _column("users", "id", "bigserial", ordinal_position=1),
+            _column("users", "email", "text", ordinal_position=2),
+        ],
+        {"id"},
+        {},
+    )
+
+    assert "class User(Model):" in source
+    assert "model_config = ferrum.ModelConfig(table='users')" in source
+    assert "id: int = Field(primary_key=True)" in source
+
+
 def test_render_class_uses_foreign_key_instead_of_raw_id_field() -> None:
     source = inspectdb_cmd._render_class(
         "blog_post",
@@ -152,7 +182,8 @@ async def test_run_inspectdb_writes_stdout_when_no_output(
 
     assert result == 0
     captured = capsys.readouterr()
-    assert "class Notes(Model):" in captured.out
+    assert "class Note(Model):" in captured.out
+    assert "model_config = ferrum.ModelConfig(table='notes')" in captured.out
     assert "id: int = Field(primary_key=True)" in captured.out
 
 
@@ -172,7 +203,7 @@ async def test_run_inspectdb_writes_to_output_file(
     result = await inspectdb_cmd.run_inspectdb(output=output, schema="public")
 
     assert result == 0
-    assert "class Notes(Model):" in output.read_text(encoding="utf-8")
+    assert "class Note(Model):" in output.read_text(encoding="utf-8")
     assert str(output) in capsys.readouterr().out
 
 
@@ -191,4 +222,27 @@ async def test_run_inspectdb_queries_are_parameterized_with_schema(
     assert all(schema == "tenant_schema" for _, schema in db_conn.fetch_calls)
     assert all("$1" in query for query, _ in db_conn.fetch_calls)
     assert all("tenant_schema" not in query for query, _ in db_conn.fetch_calls)
-    connect_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_inspectdb_skips_pg_stat_and_ledger_tables(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_conn = _FakeDbConn(
+        column_rows=[
+            _column("users", "id", "bigserial", ordinal_position=1),
+            _column("pg_stat_statements", "query", "text", ordinal_position=1),
+            _column("ferrum_migrations", "digest", "text", ordinal_position=1),
+        ],
+        pk_rows=[{"table_name": "users", "column_name": "id"}],
+    )
+    monkeypatch.setattr(inspectdb_cmd, "connect", lambda: _FakeConnect(db_conn))
+
+    result = await inspectdb_cmd.run_inspectdb(output=None, schema="public")
+
+    assert result == 0
+    captured = capsys.readouterr()
+    assert "class User(Model):" in captured.out
+    assert "PgStatStatements" not in captured.out
+    assert "FerrumMigrations" not in captured.out

@@ -166,6 +166,17 @@ class TestFieldFactoryIntegration:
         instance = FtDbDefault(id=1)
         assert instance.created_at is None
 
+    def test_empty_string_default_is_python_default_not_db_default(self) -> None:
+        class FtEmptyDefault(ferrum.Model):
+            id: int
+            name: str = ferrum.Field(default="")
+
+        field_meta = next(f for f in FtEmptyDefault.get_metadata().fields if f.name == "name")
+        assert field_meta.db_default is None
+        assert field_meta.python_default == ""
+        instance = FtEmptyDefault(id=1)
+        assert instance.name == ""
+
     def test_annotated_decimal_with_precision(self) -> None:
         class FtDecimal(ferrum.Model):
             id: int
@@ -226,6 +237,19 @@ class TestColDefAllowlist:
         """VARCHAR is in the allowlist — a well-formed VARCHAR(n) must not raise."""
         result = _col_def({"name": "y", "sql_type": "VARCHAR(50)"})
         assert '"y" VARCHAR(50)' in result
+
+    def test_empty_string_default_emits_sql_empty_string_literal(self) -> None:
+        result = _col_def(
+            {"name": "name", "sql_type": "TEXT", "not_null": True, "default": ""},
+        )
+        assert "DEFAULT ''" in result
+        assert "NOT NULL" in result
+
+    def test_sql_empty_string_literal_default_accepted(self) -> None:
+        result = _col_def(
+            {"name": "name", "sql_type": "TEXT", "not_null": True, "default": "''"},
+        )
+        assert "DEFAULT ''" in result
 
     def test_numeric_base_is_in_allowlist(self) -> None:
         """NUMERIC is in the allowlist — a parameterised NUMERIC(p,s) must not raise."""

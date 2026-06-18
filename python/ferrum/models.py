@@ -160,6 +160,7 @@ class FieldMeta:
     unique: bool = False
     db_index: bool = False
     db_default: str | None = None
+    python_default: Any | None = None
     vector_dimensions: int | None = None
 
     @property
@@ -449,6 +450,30 @@ def ModelConfig(  # noqa: N802
 # Field factory
 # ---------------------------------------------------------------------------
 
+_DB_DEFAULT_STRINGS: frozenset[str] = frozenset(
+    {
+        "NULL",
+        "TRUE",
+        "FALSE",
+        "NOW()",
+        "CURRENT_TIMESTAMP",
+        "CURRENT_DATE",
+        "CURRENT_TIME",
+        "GEN_RANDOM_UUID()",
+        "UUIDV7()",
+        "0",
+        "1",
+        "''",
+    }
+)
+
+
+def _is_db_default_expression(value: str) -> bool:
+    """Return True when *value* is a DB-side default expression, not a Python literal."""
+    if value.upper() in _DB_DEFAULT_STRINGS:
+        return True
+    return "(" in value and ")" in value
+
 
 def Field(  # noqa: N802
     *,
@@ -472,9 +497,11 @@ def Field(  # noqa: N802
 
     ``default`` handling:
     - ``...`` (no default): field is required; Pydantic treats it as required.
-    - ``str`` value (e.g. ``"NOW()"``): DB-side expression; stored as
-      ``db_default``; Python-side default is ``None``.
-    - Any other value: passed to Pydantic as ``default`` and stored in extras.
+    - ``str`` DB expression (e.g. ``"NOW()"``, ``"''"``): stored as ``db_default``;
+      Python-side default is ``None``.
+    - Plain ``str`` literals (including ``""``): Python-side default; migrations may
+      emit a matching SQL default for ``NOT NULL`` text columns.
+    - Any other value: passed to Pydantic as ``default``.
     """
     ferrum_extras: dict[str, Any] = {
         "max_length": max_length,
@@ -492,7 +519,7 @@ def Field(  # noqa: N802
     elif uuid_generate == "v7":
         ferrum_extras["db_default"] = "uuidv7()"
 
-    if isinstance(default, str):
+    if isinstance(default, str) and _is_db_default_expression(default):
         ferrum_extras["db_default"] = default
         kwargs["default"] = None
     elif default is not ...:
@@ -575,6 +602,10 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
         if is_pk and db_type == "uuid" and db_default is None:
             db_default = "gen_random_uuid()"
 
+        python_default: Any | None = None
+        if field_info.default is not ...:
+            python_default = field_info.default
+
         vector_dimensions = ferrum_extras.get("vector_dimensions")
         if db_type == "vector" and vector_dimensions is None:
             raise ValueError(
@@ -597,6 +628,7 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                 unique=bool(ferrum_extras.get("unique", False)),
                 db_index=bool(ferrum_extras.get("db_index", False)),
                 db_default=db_default,
+                python_default=python_default,
                 vector_dimensions=vector_dimensions,
             )
         )

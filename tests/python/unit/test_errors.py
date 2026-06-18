@@ -352,3 +352,59 @@ class TestTimeoutAndCancellationMapping:
         result = map_db_error(TimeoutError())
         assert isinstance(result, FerrumTimeoutError)
         assert FerrumTimeoutError.code in str(result) or "FERR-E102" in str(result)
+
+
+class TestMigrationOpFailure:
+    def test_describe_create_table_op(self) -> None:
+        from ferrum.errors import describe_migration_op
+
+        assert describe_migration_op({"kind": "create_table", "table": "users"}) == (
+            "create_table on 'users'"
+        )
+
+    def test_migration_op_failure_includes_operation_context(self) -> None:
+        from ferrum.errors import migration_op_failure
+
+        exc = asyncpg.exceptions.DatatypeMismatchError(
+            'column "embedding" is of type vector but default expression is of type uuid'
+        )
+
+        err = migration_op_failure(
+            action="apply",
+            migration_name="0001_initial",
+            op_index=0,
+            op={"kind": "create_table", "table": "documents"},
+            exc=exc,
+        )
+
+        msg = str(err)
+        assert "0001_initial" in msg
+        assert "operation 1" in msg
+        assert "create_table on 'documents'" in msg
+        assert "DatatypeMismatchError" in msg
+        assert "SQLSTATE 42804" in msg
+        assert "embedding" in msg
+        assert "vector" in msg
+        assert "FERR-M001" in msg
+
+    def test_migration_op_failure_never_includes_detail_or_hint(self) -> None:
+        from ferrum.errors import migration_op_failure
+
+        mock_exc = mock.MagicMock(spec=asyncpg.exceptions.DatatypeMismatchError)
+        mock_exc.sqlstate = "42804"
+        mock_exc.detail = "DETAIL: Key (id)=(secret-row-id) already exists."
+        mock_exc.hint = "HINT: Remove the duplicate row first."
+        mock_exc.__str__ = mock.Mock(return_value="column type mismatch")
+
+        err = migration_op_failure(
+            action="apply",
+            migration_name="0001_initial",
+            op_index=0,
+            op={"kind": "create_table", "table": "documents"},
+            exc=mock_exc,
+        )
+
+        msg = str(err)
+        assert "secret-row-id" not in msg
+        assert "DETAIL:" not in msg
+        assert "HINT:" not in msg
