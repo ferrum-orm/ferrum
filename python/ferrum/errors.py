@@ -24,7 +24,7 @@ try:
 
     _HAS_ASYNCPG: bool = True
 except ImportError:
-    _asyncpg_exc = None  # type: ignore[invalid-assignment]
+    _asyncpg_exc = None  # type: ignore
     _HAS_ASYNCPG = False
 
 try:

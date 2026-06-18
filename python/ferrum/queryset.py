@@ -131,7 +131,9 @@ def _row_to_dict(row: Any) -> dict[str, Any]:  # noqa: ANN401
     if hasattr(row, "_mapping"):
         return dict(row._mapping)
     if hasattr(row, "keys"):
-        return {k: row[k] for k in row}
+        # .keys() is required: iterating an asyncpg Record (or sqlite3.Row) yields
+        # column *values*, not names, so `for k in row` would build a broken dict.
+        return {k: row[k] for k in row.keys()}  # noqa: SIM118
     return dict(row)
 
 
