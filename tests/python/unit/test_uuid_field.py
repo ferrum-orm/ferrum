@@ -36,7 +36,7 @@ class TestUuidPkMetadata:
             name: str
 
         id_field = next(f for f in UuidV7.get_metadata().fields if f.name == "id")
-        assert id_field.db_default == "uuid_generate_v7()"
+        assert id_field.db_default == "uuidv7()"
 
     def test_explicit_db_default_overrides_auto_injection(self) -> None:
         class UuidExplicit(ferrum.Model):
@@ -62,6 +62,10 @@ class TestUuidMigrationPlan:
     def test_col_def_accepts_gen_random_uuid(self) -> None:
         result = _col_def({"name": "id", "sql_type": "UUID", "default": "gen_random_uuid()"})
         assert "DEFAULT gen_random_uuid()" in result
+
+    def test_col_def_accepts_uuidv7(self) -> None:
+        result = _col_def({"name": "id", "sql_type": "UUID", "default": "uuidv7()"})
+        assert "DEFAULT uuidv7()" in result
 
 
 class TestUuidBindEncoding:

@@ -63,7 +63,7 @@ the full DSN.
 
 ### ferrum.toml
 
-`ferrum.toml` is the optional project configuration file.  It is scaffolded automatically
+`ferrum.toml` is the optional project configuration file. It is scaffolded automatically
 by `ferrum init` with all keys commented out (so the defaults are always self-documenting).
 **Secrets never go here** — database URLs and passwords belong in `.env`.
 
@@ -85,17 +85,17 @@ by `ferrum init` with all keys commented out (so the defaults are always self-do
 
 Available keys:
 
-| Key              | Default          | Description                                                   |
-|------------------|------------------|---------------------------------------------------------------|
-| `settings`       | `None`           | Python module the CLI imports before running any subcommand.  |
-| `migrations_dir` | `"migrations"`   | Directory (relative to project root) for migration files.     |
-| `default_env`    | `"development"`  | Environment name used by `ferrum migrate`.                    |
-| `env_file`       | `".env"`         | Dotenv file loaded by the CLI (relative to project root).     |
+| Key              | Default         | Description                                                  |
+| ---------------- | --------------- | ------------------------------------------------------------ |
+| `settings`       | `None`          | Python module the CLI imports before running any subcommand. |
+| `migrations_dir` | `"migrations"`  | Directory (relative to project root) for migration files.    |
+| `default_env`    | `"development"` | Environment name used by `ferrum migrate`.                   |
+| `env_file`       | `".env"`        | Dotenv file loaded by the CLI (relative to project root).    |
 
 ### ferrum_conf.py
 
 `ferrum_conf.py` is the **model-import hook** — the file that tells the Ferrum CLI which
-models exist so that `ferrum makemigrations` can find them.  Create it in the project root:
+models exist so that `ferrum makemigrations` can find them. Create it in the project root:
 
 ```python
 # ferrum_conf.py — loaded automatically by the Ferrum CLI
@@ -116,7 +116,7 @@ after the module is imported.
 ### CLI dotenv auto-load
 
 The Ferrum CLI automatically loads the `.env` file (or the path set in `env_file`) from the
-project root **before** running any subcommand.  This means you do not need to `source .env`
+project root **before** running any subcommand. This means you do not need to `source .env`
 before running `ferrum migrate`:
 
 ```bash
@@ -125,6 +125,7 @@ ferrum migrate           # .env is loaded automatically
 ```
 
 Requirements:
+
 - `python-dotenv` must be installed (`pip install ferrum[dotenv]` or add it to your project).
 - Without `python-dotenv`, dotenv loading is silently skipped — no error.
 - Already-set environment variables are **never** overridden (`override=False`), so
@@ -133,7 +134,7 @@ Requirements:
 ### FERRUM_SETTINGS override
 
 The `FERRUM_SETTINGS` environment variable overrides the settings module for the current
-shell session.  Useful in CI or when switching between configurations:
+shell session. Useful in CI or when switching between configurations:
 
 ```bash
 FERRUM_SETTINGS=myapp.test_settings ferrum makemigrations
@@ -387,8 +388,8 @@ See [`examples/fastapi_quickstart/`](../examples/fastapi_quickstart/) for the fu
 
 ### UUID primary keys
 
-Use a ``UUID`` column as the primary key; Ferrum auto-injects
-``DEFAULT gen_random_uuid()`` at metadata build time:
+Use a `UUID` column as the primary key; Ferrum auto-injects
+`DEFAULT gen_random_uuid()` at metadata build time:
 
 ```python
 from uuid import UUID
@@ -399,13 +400,14 @@ class Session(ferrum.Model):
     user_id: int
 ```
 
-For UUIDv7 server-side defaults (requires the ``pg_uuidv7`` extension), pass
-``uuid_generate="v7"``. For Python-side UUIDv7 generation, install the optional extra
-``pip install 'ferrum[uuid7]'`` and use ``from uuid6 import uuid7``.
+For UUIDv7 server-side defaults (requires the `pg_uuidv7` extension and its
+`uuidv7()` function), pass `uuid_generate="v7"`. For Python-side UUIDv7 generation,
+install the optional extra
+`pip install 'ferrum[uuid7]'` and use `from uuid6 import uuid7`.
 
 ### Declarative indexes
 
-Define composite, unique, partial, or access-method-specific indexes on ``Meta.indexes``:
+Define composite, unique, partial, or access-method-specific indexes on `Meta.indexes`:
 
 ```python
 class Post(ferrum.Model):
@@ -420,11 +422,11 @@ class Post(ferrum.Model):
         ]
 ```
 
-``compute_plan`` emits ``add_index`` ops after ``create_table``.
+`compute_plan` emits `add_index` ops after `create_table`.
 
 ### Vector and full-text columns
 
-pgvector ``VECTOR(n)`` and PostgreSQL ``TSVECTOR`` columns use sentinel types:
+pgvector `VECTOR(n)` and PostgreSQL `TSVECTOR` columns use sentinel types:
 
 ```python
 class Document(ferrum.Model):
@@ -433,7 +435,7 @@ class Document(ferrum.Model):
     search_vector: ferrum.TSVector | None = None
 ```
 
-KNN search uses ``nearest_to``; full-text search uses the ``match`` filter operator:
+KNN search uses `nearest_to`; full-text search uses the `match` filter operator:
 
 ```python
 results = await (
