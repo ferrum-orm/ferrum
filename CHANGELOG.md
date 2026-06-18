@@ -22,4 +22,22 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-[Unreleased]: https://github.com/ferrumdb/ferrum/compare/HEAD
+## [0.1.1] - 2026-06-18
+
+### Fixed
+- Row hydration: build the model dict from `row.keys()` instead of iterating the
+  row. An asyncpg `Record` iterates *values*, not column names, so reads and
+  `create()` raised `TypeError: keywords must be strings` / `KeyError`.
+- Migration replay guard now catches the driver-mapped `FerrumIntegrityError`
+  (duplicate digest) and surfaces `FerrumMigrationError`.
+
+### Changed
+- Multi-database drivers (`pg`/`mysql`/`sqlite` extras) with a uniform driver
+  protocol; the connection pool now lives behind the driver.
+- CI/packaging: ty/ruff fixes for the driver code, native ARM64 wheel build,
+  and `pg` extra installed where the suite imports `asyncpg`.
+
+---
+
+[Unreleased]: https://github.com/ferrumdb/ferrum/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/ferrumdb/ferrum/compare/v0.1.0...v0.1.1

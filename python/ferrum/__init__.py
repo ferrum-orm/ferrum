@@ -6,7 +6,7 @@ Import paths are stable API; internal module paths are not.
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = [
     "FerrumCompileError",
     "FerrumConfigError",
