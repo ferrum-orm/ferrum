@@ -266,19 +266,27 @@ jobs:
       - name: Create virtualenv
         run: python -m venv .venv
 
-      # setup-python ships python313.lib (etc.) but PyO3's linker still looks
-      # for python3.lib on some Windows/Python combos (LNK1181).
+      # setup-python ships python313.lib (etc.) but PyO3's abi3 linker looks for
+      # python3.lib (LNK1181). The libs dir is $env:pythonLocation\libs — NOT
+      # under python-path, which is the interpreter exe. Copy a python*.lib to
+      # python3.lib there and export LIB so the MSVC linker can find it.
       - name: Ensure python3.lib for PyO3 linker
+        shell: pwsh
         run: |
-          LIBS="${{ steps.setup-python.outputs.python-path }}/libs"
-          if [ ! -f "$LIBS/python3.lib" ]; then
-            for lib in "$LIBS"/python*.lib; do
-              if [ -f "$lib" ]; then
-                cp "$lib" "$LIBS/python3.lib"
-                break
-              fi
-            done
-          fi
+          $libs = Join-Path $env:pythonLocation 'libs'
+          $target = Join-Path $libs 'python3.lib'
+          if (-not (Test-Path $target)) {
+            $src = Get-ChildItem -Path (Join-Path $libs 'python*.lib') -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($null -ne $src) {
+              Copy-Item $src.FullName $target
+              Write-Host "Copied $($src.Name) -> python3.lib in $libs"
+            } else {
+              Write-Host "WARNING: no python*.lib found in $libs"
+            }
+          } else {
+            Write-Host "python3.lib already present in $libs"
+          }
+          "LIB=$libs" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       # Do not `pip install -e ".[dev]"` on Windows: PEP 517 triggers a release
       # maturin build that is flaky here; maturin develop is the supported path.
@@ -300,7 +308,6 @@ jobs:
           PY
         env:
           PYO3_PYTHON: ${{ steps.setup-python.outputs.python-path }}
-          LIB: ${{ steps.setup-python.outputs.python-path }}/libs
 
       - name: Build extension (debug)
         run: |
@@ -308,7 +315,6 @@ jobs:
           maturin develop
         env:
           PYO3_PYTHON: ${{ steps.setup-python.outputs.python-path }}
-          LIB: ${{ steps.setup-python.outputs.python-path }}/libs
 
       - name: Run unit + property tests
         run: |
