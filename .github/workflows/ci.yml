@@ -302,7 +302,8 @@ jobs:
           data = tomllib.loads(Path("pyproject.toml").read_text())
           optional = data["project"]["optional-dependencies"]
           deps = [d for d in optional["dev"] if not d.startswith("ferrum-orm")]
-          for extra in ("cli", "dotenv"):
+          # pg too: test_errors.py imports asyncpg.exceptions to test error mapping.
+          for extra in ("pg", "cli", "dotenv"):
               deps.extend(optional.get(extra, []))
           subprocess.check_call(["pip", "install", *deps])
           PY
