@@ -168,9 +168,10 @@ jobs:
         with:
           python-version: "3.12"
       # Install the built wheel WITH the cli/dotenv extras (the security suite
-      # imports ferrum.cli, which needs rich/typer). --find-links resolves
-      # ferrum to the local wheel so we still qualify the built artifact.
-      - run: pip install "ferrum-orm[cli,dotenv]" --find-links wheels/ pytest pytest-asyncio
+      # imports ferrum.cli, which needs rich/typer). --no-index is required:
+      # v0.1.0 may already be on PyPI from a prior tag push, and pip would
+      # otherwise prefer that stale release over the wheel we just built.
+      - run: pip install --no-index --find-links wheels/ "ferrum-orm[cli,dotenv]" pytest pytest-asyncio
       - name: Run security qualification on the wheel
         run: pytest tests/python/security -m security -v
 
@@ -183,7 +184,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     permissions:
-      id-token: write  # Trusted Publishing (OIDC) — no long-lived PyPI token (§7.3)
+      id-token: write # Trusted Publishing (OIDC) — no long-lived PyPI token (§7.3)
     steps:
       - uses: actions/download-artifact@v4
         with:

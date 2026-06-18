@@ -266,11 +266,38 @@ jobs:
       - name: Create virtualenv
         run: python -m venv .venv
 
+      # setup-python ships python313.lib (etc.) but PyO3's linker still looks
+      # for python3.lib on some Windows/Python combos (LNK1181).
+      - name: Ensure python3.lib for PyO3 linker
+        run: |
+          LIBS="${{ steps.setup-python.outputs.python-path }}/libs"
+          if [ ! -f "$LIBS/python3.lib" ]; then
+            for lib in "$LIBS"/python*.lib; do
+              if [ -f "$lib" ]; then
+                cp "$lib" "$LIBS/python3.lib"
+                break
+              fi
+            done
+          fi
+
+      # Do not `pip install -e ".[dev]"` on Windows: PEP 517 triggers a release
+      # maturin build that is flaky here; maturin develop is the supported path.
       - name: Install maturin and dev deps
         run: |
           . .venv/Scripts/activate
           pip install maturin
-          pip install -e ".[dev]"
+          python <<'PY'
+          import subprocess
+          import tomllib
+          from pathlib import Path
+
+          data = tomllib.loads(Path("pyproject.toml").read_text())
+          optional = data["project"]["optional-dependencies"]
+          deps = [d for d in optional["dev"] if not d.startswith("ferrum-orm")]
+          for extra in ("cli", "dotenv"):
+              deps.extend(optional.get(extra, []))
+          subprocess.check_call(["pip", "install", *deps])
+          PY
         env:
           PYO3_PYTHON: ${{ steps.setup-python.outputs.python-path }}
           LIB: ${{ steps.setup-python.outputs.python-path }}/libs
