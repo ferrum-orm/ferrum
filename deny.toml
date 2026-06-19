@@ -1,11 +1,19 @@
+# cargo-deny configuration (schema for cargo-deny 0.18.x).
+# Vulnerabilities and unsound advisories are errors by default.
+
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
-unsound = "deny"
 yanked = "deny"
-notice = "warn"
+# Known pyo3 0.22.6 advisories. Fixes require pyo3 >=0.29, a major bump that
+# changes the PyO3 boundary API (SecurityEngineer review + code migration).
+# Tracked for a dedicated upgrade; ignored here so the audit stays actionable.
+ignore = [
+    "RUSTSEC-2025-0020",  # buffer overflow in PyString::from_object (fixed >=0.24.1)
+    "RUSTSEC-2026-0177",  # missing Sync bound on PyCFunction::new_closure (fixed >=0.29.0)
+]
 
 [licenses]
+# Anything not in `allow` is denied, so copyleft licenses (GPL/AGPL/LGPL) fail
+# by default — no separate deny list is needed in this schema.
 allow = [
     "MIT",
     "Apache-2.0",
@@ -14,30 +22,24 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Unicode-DFS-2016",
+    "Unicode-3.0",
     "CC0-1.0",
     "Zlib",
 ]
-deny = [
-    "GPL-2.0",
-    "GPL-3.0",
-    "LGPL-2.0",
-    "LGPL-3.0",
-    "AGPL-3.0",
-]
-copyleft = "deny"
-allow-osi-fsf-free = "neither"
-default = "deny"
 confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
-highlight = "all"
+# Workspace-internal crates are referenced by path with no version; that is not
+# a real wildcard-dependency risk.
+allow-wildcard-paths = true
 
-# Ensure only ferrum-pyo3 depends on pyo3.
+# Only ferrum-pyo3 may depend on pyo3 (boundary; also enforced structurally in
+# ci.yml). `wrappers` permits pyo3 solely when pulled in via ferrum-pyo3.
 [[bans.deny]]
 name = "pyo3"
-# This bans pyo3 from non-pyo3 crates; see CI check for structural enforcement.
+wrappers = ["ferrum-pyo3"]
 
 [sources]
 unknown-registry = "deny"

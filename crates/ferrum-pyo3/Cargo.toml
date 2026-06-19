@@ -1,5 +1,6 @@
 [package]
 name = "ferrum-pyo3"
+publish = false
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

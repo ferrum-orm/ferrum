@@ -10,14 +10,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Full matrix including all macOS × Python cells
+  # Linux full matrix — postgres service is available, so all tests run.
   full-matrix:
-    name: Full matrix (${{ matrix.os }} / py${{ matrix.python-version }})
-    runs-on: ${{ matrix.os }}
+    name: Full matrix (ubuntu / py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
         python-version: ["3.11", "3.12", "3.13"]
 
     services:
@@ -58,6 +57,41 @@ jobs:
           . .venv/bin/activate
           pytest tests/python/ -m "not benchmark" -v
 
+  # macOS full matrix — service containers are Linux-only (no Docker on macOS
+  # runners), so no postgres here; build the extension and run unit/property
+  # tests only, as ci.yml does.
+  full-matrix-macos:
+    name: Full matrix (macos / py${{ matrix.python-version }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Create virtualenv
+        run: python -m venv .venv
+      - name: Install maturin and dev deps
+        run: |
+          . .venv/bin/activate
+          pip install maturin
+          pip install -e ".[dev]"
+      - name: Build extension (debug)
+        run: |
+          . .venv/bin/activate
+          maturin develop
+      - name: Run unit + property tests
+        run: |
+          . .venv/bin/activate
+          pytest tests/python/unit tests/python/property -v
+
   # Windows sdist smoke
   windows-sdist:
     name: Windows sdist smoke
@@ -87,8 +121,8 @@ jobs:
         with:
           toolchain: stable
       - name: Install cargo-deny
-        # Build cargo-deny with the latest stable; rust-toolchain.toml pins 1.87
-        # for the repo, but recent cargo-deny needs a newer rustc.
+        # Build with the latest stable: rust-toolchain.toml pins 1.87 for the repo,
+        # but a current cargo-deny is needed to parse CVSS 4.0 RUSTSEC advisories.
         run: cargo +stable install cargo-deny --locked
       - run: cargo deny check
       - uses: actions/setup-python@v5
