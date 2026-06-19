@@ -7,10 +7,12 @@ on:
     # release workflow). Add more paths here as needed.
     paths-ignore:
       - ".github/workflows/release.yml"
+      - ".github/workflows/nightly.yml"
   pull_request:
     branches: [main]
     paths-ignore:
       - ".github/workflows/release.yml"
+      - ".github/workflows/nightly.yml"
 
 # Cancel in-progress runs for the same ref to save CI budget.
 concurrency:
