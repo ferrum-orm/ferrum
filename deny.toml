@@ -3,13 +3,6 @@
 
 [advisories]
 yanked = "deny"
-# Known pyo3 0.22.6 advisories. Fixes require pyo3 >=0.29, a major bump that
-# changes the PyO3 boundary API (SecurityEngineer review + code migration).
-# Tracked for a dedicated upgrade; ignored here so the audit stays actionable.
-ignore = [
-    "RUSTSEC-2025-0020",  # buffer overflow in PyString::from_object (fixed >=0.24.1)
-    "RUSTSEC-2026-0177",  # missing Sync bound on PyCFunction::new_closure (fixed >=0.29.0)
-]
 
 [licenses]
 # Anything not in `allow` is denied, so copyleft licenses (GPL/AGPL/LGPL) fail

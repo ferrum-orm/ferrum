@@ -9,16 +9,23 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.1.2] - 2026-06-19
+
 ### Added
-- Repository scaffold: monorepo layout, Cargo workspace, pyproject.toml, maturin configuration.
-- `ferrum-core` crate: IR types (`QuerySetIR`, `ModelMetadata`), allowlist-based compiler skeleton, hydration and migration plan placeholders.
-- `ferrum-sql` crate: PostgreSQL dialect (identifier quoting, placeholder style), `emit_select` with full WHERE/ORDER BY/LIMIT/OFFSET emission and SQL-2 verified tests.
-- `ferrum-pyo3` crate: thin PyO3 bridge with `compile_query`, structured error types (`FerrumInternalError`, `FerrumCompileError`), panic catch wrapper.
-- `python/ferrum` package skeleton: `Model`, `QuerySet` (danger-API guards), `Connection` (redacted DSN diagnostics), `hooks` (Tier A/B/C dispatcher with redaction), `errors` (complete taxonomy), `migrations` (orchestrator, ledger, tokens, gates), `cli` (init scaffold, migrations subcommand), `contrib/fastapi` lifespan helper.
-- Test suite scaffold: unit, integration, property, and security qualification layers.
-- Security qualification tests covering SQL-1/2/3, CRED-1, LOG-1/2, MIG-1/2/5/6/7/8, INIT-1/2.
-- CI workflows: `ci.yml` (PR gate), `release.yml` (abi3 wheel + publish), `nightly.yml` (full matrix + audit + benchmarks).
-- Developer tooling: `rustfmt.toml`, `deny.toml`, `.importlinter`, `.pre-commit-config.yaml`, `Makefile`.
+- `Connection.transaction()` and `Transaction`: async context manager for units of work
+  with commit-on-success / rollback-on-error, optional isolation / readonly / deferrable
+  modifiers, optional deadline, and nested `savepoint()` support (PostgreSQL/asyncpg).
+- QuerySet terminals accept a `Transaction` anywhere a `Connection` is accepted so
+  multiple statements share one pinned connection inside a transaction.
+
+### Fixed
+- Upgraded PyO3 from 0.22 to 0.29, resolving RUSTSEC-2025-0020 and RUSTSEC-2026-0177;
+  removed the corresponding `deny.toml` advisory ignores.
+
+### Changed
+- PyO3 0.29 API migration in `ferrum-pyo3` (`Bound` → unbound types, `IntoPyObjectExt`).
 
 ---
 
@@ -39,5 +46,6 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-[Unreleased]: https://github.com/ferrumdb/ferrum/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/ferrumdb/ferrum/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/ferrumdb/ferrum/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/ferrumdb/ferrum/compare/v0.1.0...v0.1.1

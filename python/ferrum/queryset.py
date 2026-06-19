@@ -37,8 +37,12 @@ from ferrum.errors import (
 )
 
 if TYPE_CHECKING:
-    from ferrum.connection import Connection
+    from ferrum.connection import Connection, Transaction
     from ferrum.models import Model, ModelMetadata
+
+    # Terminals accept an open Connection or an active Transaction interchangeably:
+    # both expose the ``dialect`` / ``_require_driver()`` surface the terminals use.
+    ConnectionLike = Connection | Transaction
 
 _M = TypeVar("_M", bound="Model")
 
@@ -556,7 +560,7 @@ class QuerySet(Generic[_M]):
     # Danger API guards (AGENTS.md §3 / ARCHITECTURE.md §3.9)
     # ------------------------------------------------------------------
 
-    async def create(self, conn: Connection, **values: Any) -> _M:  # noqa: ANN401
+    async def create(self, conn: ConnectionLike, **values: Any) -> _M:  # noqa: ANN401
         """Insert a single row. Returns the hydrated model instance.
 
         Builds an INSERT IR from ``values``, compiles it through the Rust
@@ -622,7 +626,7 @@ class QuerySet(Generic[_M]):
         )
         return self._model.model_construct(**_row_to_dict(row))
 
-    async def delete(self, conn: Connection | None = None) -> int:
+    async def delete(self, conn: ConnectionLike | None = None) -> int:
         """Delete filtered rows. Returns the row count.
 
         Requires at least one filter. Use ``danger_delete_all()`` for an
@@ -694,7 +698,7 @@ class QuerySet(Generic[_M]):
         )
         return row_count
 
-    async def danger_delete_all(self, conn: Connection) -> int:
+    async def danger_delete_all(self, conn: ConnectionLike) -> int:
         """Delete ALL rows in the table without a filter.
 
         This is an explicit escape hatch. Prefer ``filter(...).delete()`` for
@@ -749,7 +753,7 @@ class QuerySet(Generic[_M]):
         _hooks.query_success(fingerprint=fingerprint, duration_ms=duration_ms, row_count=row_count)
         return row_count
 
-    async def update(self, conn: Connection | None = None, **assignments: Any) -> int:  # noqa: ANN401
+    async def update(self, conn: ConnectionLike | None = None, **assignments: Any) -> int:  # noqa: ANN401
         """Update filtered rows. Returns the row count.
 
         Requires at least one filter. Use ``danger_update_all()`` for an
@@ -824,7 +828,7 @@ class QuerySet(Generic[_M]):
         )
         return row_count
 
-    async def danger_update_all(self, conn: Connection, **assignments: Any) -> int:  # noqa: ANN401
+    async def danger_update_all(self, conn: ConnectionLike, **assignments: Any) -> int:  # noqa: ANN401
         """Update ALL rows in the table without a filter.
 
         This is an explicit escape hatch. Prefer ``filter(...).update()`` for
@@ -884,7 +888,7 @@ class QuerySet(Generic[_M]):
     # Terminal coroutines (async) — require open Connection
     # ------------------------------------------------------------------
 
-    async def all(self, conn: Connection) -> list[_M]:
+    async def all(self, conn: ConnectionLike) -> list[_M]:
         """Fetch all matching rows and return model instances.
 
         Compiles the QuerySet IR via the Rust extension, executes the
@@ -936,7 +940,7 @@ class QuerySet(Generic[_M]):
         )
         return _hydrate_rows(self._model, rows)
 
-    async def first(self, conn: Connection) -> _M | None:
+    async def first(self, conn: ConnectionLike) -> _M | None:
         """Fetch the first matching row, or ``None`` if no rows match.
 
         Applies ``LIMIT 1`` to avoid fetching unnecessary rows.
@@ -952,7 +956,7 @@ class QuerySet(Generic[_M]):
         results = await self.limit(1).all(conn)
         return results[0] if results else None
 
-    async def get(self, conn: Connection, **kwargs: Any) -> _M:  # noqa: ANN401
+    async def get(self, conn: ConnectionLike, **kwargs: Any) -> _M:  # noqa: ANN401
         """Fetch exactly one matching row, applying optional extra filters.
 
         Returns the single matching model instance.
@@ -982,7 +986,7 @@ class QuerySet(Generic[_M]):
             )
         return results[0]
 
-    async def count(self, conn: Connection) -> int:
+    async def count(self, conn: ConnectionLike) -> int:
         """Return the count of rows matching the current filters.
 
         Rewrites the compiled SELECT to ``SELECT COUNT(*) FROM ...`` so that

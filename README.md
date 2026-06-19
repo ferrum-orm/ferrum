@@ -56,6 +56,10 @@ users = await (
     .limit(10)
     .all(conn)
 )
+
+async with conn.transaction() as tx:
+    user = await User.objects.create(tx, email="jane@example.com")
+    await AuditLog.objects.create(tx, user_id=user.id, action="signup")
 ```
 
 ---
@@ -148,7 +152,7 @@ This allows Ferrum to maintain a Pythonic API without sacrificing performance.
 ### v0.2
 
 - [ ] Relationships
-- [ ] Transactions
+- [x] Transactions
 - [ ] Query optimization
 - [ ] Bulk operations
 

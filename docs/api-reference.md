@@ -10,6 +10,7 @@ from ferrum import (
     Model, ModelConfig, QuerySet,          # modeling + querying
     Field, Index, Vector, TSVector,        # field types + indexes
     connect,                               # connections
+    Transaction,                           # transaction-scoped handle
     register_hook, clear_hooks,            # observability
     MigrationResult,                       # migrations
     FerrumError, FerrumCompileError, FerrumConfigError, FerrumConnectionError,
@@ -178,7 +179,25 @@ A managed asyncpg pool. Usually obtained via `connect()`; can be constructed dir
 | `await close()`               | Close the pool.                                                                                 |
 | `acquire()` _(async ctx mgr)_ | Yields a raw asyncpg connection; released on exit. Driver errors mapped to the Ferrum taxonomy. |
 | `await release(raw_conn)`     | Manual release (prefer `acquire()`).                                                            |
+| `transaction(...)` _(async ctx mgr)_ | Yields a `Transaction` on one pinned connection; commits on clean exit, rolls back on exception or cancellation. Optional `isolation`, `readonly`, `deferrable`, and `deadline` (seconds). |
 | `async with`                  | Opens on enter, closes on exit.                                                                 |
+
+### `class Transaction`
+
+Transaction-scoped handle obtained from `Connection.transaction()`. Accepted anywhere a
+`Connection` is accepted by QuerySet terminals — all statements share the pinned connection.
+
+| Member                        | Description                                                                                     |
+| ----------------------------- | ----------------------------------------------------------------------------------------------- |
+| `dialect`                     | Same dialect as the parent connection (`postgres`, etc.).                                       |
+| `savepoint()` _(async ctx mgr)_ | Nested savepoint; rolls back independently of the enclosing transaction on error.             |
+
+```python
+async with conn.transaction(isolation="serializable") as tx:
+    await Account.objects.create(tx, name="alice", balance=100)
+    async with tx.savepoint() as sp:
+        await Account.objects.create(sp, name="bob", balance=50)  # rolled back on error
+```
 
 ---
 

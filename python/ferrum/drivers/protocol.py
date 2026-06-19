@@ -14,6 +14,16 @@ class RowProtocol(Protocol):
 
 
 @runtime_checkable
+class QueryExecutorProtocol(Protocol):
+    """Minimal async SQL surface QuerySet terminals call on ``_require_driver()``."""
+
+    async def fetch(self, sql: str, *params: object) -> list[Any]: ...
+    async def fetchrow(self, sql: str, *params: object) -> Any | None: ...
+    async def fetchval(self, sql: str, *params: object) -> Any: ...
+    async def execute(self, sql: str, *params: object) -> str: ...
+
+
+@runtime_checkable
 class DriverProtocol(Protocol):
     """Uniform async driver surface for QuerySet and migrations."""
 

@@ -11,14 +11,29 @@ This module owns the async I/O path; no SQL building or Rust calls happen here.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 from collections.abc import AsyncGenerator
 from typing import Any
 from urllib.parse import urlparse
 
-from ferrum.drivers import DriverProtocol, get_driver_for_dsn
-from ferrum.errors import FerrumConfigError, FerrumConnectionError, FerrumError, map_db_error
+from ferrum.drivers import get_driver_for_dsn
+from ferrum.drivers.protocol import DriverProtocol, QueryExecutorProtocol
+from ferrum.errors import (
+    FerrumConfigError,
+    FerrumConnectionError,
+    FerrumError,
+    FerrumTimeoutError,
+    map_db_error,
+)
+
+# PostgreSQL transaction isolation levels accepted by ``Connection.transaction``.
+# Validated as a fixed allowlist so an unknown value fails with a clear Ferrum
+# error before it ever reaches the driver (no interpolation of caller input).
+_ISOLATION_LEVELS: frozenset[str] = frozenset(
+    {"serializable", "repeatable_read", "read_committed", "read_uncommitted"}
+)
 
 
 def _redacted_dsn_info(dsn: str) -> dict[str, str]:
@@ -77,7 +92,7 @@ class Connection:
             return "sqlite"
         return "postgres"
 
-    def _require_driver(self) -> DriverProtocol:
+    def _require_driver(self) -> QueryExecutorProtocol:
         """Return the open driver or raise FerrumConnectionError if not open."""
         if self._driver is None:
             raise FerrumConnectionError(
@@ -141,12 +156,120 @@ class Connection:
             except Exception as exc:
                 raise map_db_error(exc) from None
 
+    @contextlib.asynccontextmanager
+    async def transaction(
+        self,
+        *,
+        isolation: str | None = None,
+        readonly: bool = False,
+        deferrable: bool = False,
+        deadline: float | None = None,
+    ) -> AsyncGenerator[Transaction, None]:
+        """Run a unit of work inside a database transaction.
+
+        Yields a :class:`Transaction` that is accepted anywhere a ``Connection`` is
+        — pass it to QuerySet terminals and they all share one pinned connection::
+
+            async with conn.transaction() as tx:
+                user = await User.objects.create(tx, email="a@example.com")
+                await AuditLog.objects.create(tx, user_id=user.id, action="created")
+
+        Commits on clean exit; rolls back on any exception or cancellation and
+        releases the pinned connection. ``isolation`` (one of ``serializable`` /
+        ``repeatable_read`` / ``read_committed`` / ``read_uncommitted``),
+        ``readonly``, and ``deferrable`` map to the BEGIN modifiers. ``deadline``
+        (seconds) bounds the whole block at the Python await point — never inside
+        Rust — and rolls back with :class:`FerrumTimeoutError` if exceeded.
+
+        Args:
+            isolation: Transaction isolation level, or ``None`` for the server default.
+            readonly: Open the transaction in READ ONLY mode.
+            deferrable: DEFERRABLE mode (only meaningful for SERIALIZABLE READ ONLY).
+            deadline: Optional wall-clock budget in seconds for the entire block.
+
+        Raises:
+            FerrumConfigError: if ``isolation`` is not an allowed level, or the
+                active driver does not support transactions.
+            FerrumTimeoutError: if ``deadline`` is exceeded (after rollback).
+        """
+        if isolation is not None and isolation not in _ISOLATION_LEVELS:
+            raise FerrumConfigError(
+                f"Unknown transaction isolation level {isolation!r}. Expected one of: "
+                f"{', '.join(sorted(_ISOLATION_LEVELS))}. [FERR-C001]"
+            )
+        driver = self._require_driver()
+        tx_factory = getattr(driver, "transaction", None)
+        if tx_factory is None or not callable(tx_factory):
+            raise FerrumConfigError(
+                f"The active {self.dialect!r} driver does not support transactions. "
+                "Transactions require the PostgreSQL (asyncpg) driver in v0.1. [FERR-C001]"
+            )
+        tx_cm = tx_factory(isolation=isolation, readonly=readonly, deferrable=deferrable)
+        dialect = self.dialect
+        try:
+            if deadline is not None:
+                async with asyncio.timeout(deadline), tx_cm as bound:
+                    yield Transaction(bound, dialect)
+            else:
+                async with tx_cm as bound:
+                    yield Transaction(bound, dialect)
+        except TimeoutError:
+            raise FerrumTimeoutError(
+                f"Transaction exceeded its deadline of {deadline}s and was rolled back. [FERR-E102]"
+            ) from None
+
     async def __aenter__(self) -> Connection:
         await self.open()
         return self
 
     async def __aexit__(self, *_: object) -> None:
         await self.close()
+
+
+class Transaction:
+    """A transaction-scoped handle, usable anywhere a :class:`Connection` is.
+
+    Holds a single connection pinned by ``Connection.transaction`` for the life of
+    the transaction and exposes the same minimal surface QuerySet terminals rely on
+    — ``dialect`` and ``_require_driver()`` — so terminals execute against the
+    pinned connection instead of acquiring a fresh pooled one. Obtain it via
+    ``async with conn.transaction() as tx:``; do not construct it directly.
+    """
+
+    def __init__(self, bound: Any, dialect: str) -> None:  # noqa: ANN401
+        self._bound = bound
+        self._dialect = dialect
+
+    @property
+    def dialect(self) -> str:
+        """Dialect for Rust SQL compilation, inherited from the parent connection."""
+        return self._dialect
+
+    def _require_driver(self) -> QueryExecutorProtocol:
+        """Return the pinned execution surface (matches ``Connection._require_driver``)."""
+        return self._bound
+
+    @contextlib.asynccontextmanager
+    async def savepoint(self) -> AsyncGenerator[Transaction, None]:
+        """Nest a SAVEPOINT inside this transaction.
+
+        The yielded :class:`Transaction` runs on the same pinned connection. An
+        exception inside the block rolls back only to the savepoint, leaving the
+        enclosing transaction intact; clean exit releases the savepoint::
+
+            async with conn.transaction() as tx:
+                await A.objects.create(tx, ...)
+                try:
+                    async with tx.savepoint() as sp:
+                        await B.objects.create(sp, ...)   # rolled back on error
+                except FerrumError:
+                    ...                                    # A's insert survives
+        """
+        sp = getattr(self._bound, "savepoint", None)
+        if sp is None or not callable(sp):
+            raise FerrumConfigError("The active driver does not support savepoints. [FERR-C001]")
+        async with sp() as sp_bound:
+            yield Transaction(sp_bound, self._dialect)
 
 
 @contextlib.asynccontextmanager

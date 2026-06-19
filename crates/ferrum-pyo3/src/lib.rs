@@ -13,16 +13,9 @@
 //! - Error payloads carry structured fields only — no trace blobs, no raw `PostgreSQL`
 //!   DETAIL/HINT, no memory addresses, no local paths.
 
-// PyO3 0.22.x uses an internal `cfg(gil-refs)` feature gate that Rust's
-// `unexpected_cfgs` lint flags. This is a known upstream issue resolved in
-// PyO3 0.23+. Suppress here until the pyo3 dependency is upgraded.
-#![allow(unexpected_cfgs)]
-// PyO3 0.22's `#[pyfunction]` macro expands code that triggers `useless_conversion`
-// (false positive: macro-generated `PyErr → PyErr` coercions). Remove on pyo3 >= 0.23.
-#![allow(clippy::useless_conversion)]
-
 use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError};
 use pyo3::prelude::*;
+use pyo3::IntoPyObjectExt;
 
 // With abi3, PyO3 does not support subclassing native types via `extends`.
 // Use `create_exception!` to define custom exception classes that inherit from
@@ -100,8 +93,8 @@ fn compile_query(
 
     match result {
         Ok(Ok((compiled, operation_name))) => {
-            let dict = pyo3::types::PyDict::new_bound(py);
-            dict.set_item("sql_text", &compiled.sql_text)?;
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("sql_text", compiled.sql_text.as_str())?;
             // `bound_params` are JSON-encoded so Python can deserialize them into
             // native types for the asyncpg driver. Never log these in Tier A hooks.
             let params: Vec<String> = compiled
@@ -111,10 +104,10 @@ fn compile_query(
                 .collect();
             dict.set_item("bound_params", params)?;
             dict.set_item("param_type_summary", compiled.param_type_summary)?;
-            dict.set_item("fingerprint", &compiled.fingerprint)?;
+            dict.set_item("fingerprint", compiled.fingerprint.as_str())?;
             // Python routes on this: "select"/"insert"/"update"/"delete".
             dict.set_item("operation", operation_name)?;
-            Ok(dict.into())
+            Ok(dict.into_any().unbind())
         }
         Ok(Err(compile_err)) => {
             // Structured compile error → catchable Python exception.
@@ -134,20 +127,20 @@ fn compile_query(
 ///
 /// Mapping: `null` → `None`, `bool` → `bool`, `number` → `int` or `float`,
 /// `string` → `str`, `array` → `list`, `object` → `dict`.
-fn json_value_to_pyobj(py: Python<'_>, val: &serde_json::Value) -> PyResult<PyObject> {
+fn json_value_to_pyobj(py: Python<'_>, val: &serde_json::Value) -> PyResult<Py<PyAny>> {
     match val {
         serde_json::Value::Null => Ok(py.None()),
-        serde_json::Value::Bool(b) => Ok(b.into_py(py)),
+        serde_json::Value::Bool(b) => (*b).into_py_any(py),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Ok(i.into_py(py))
+                i.into_py_any(py)
             } else if let Some(f) = n.as_f64() {
-                Ok(f.into_py(py))
+                f.into_py_any(py)
             } else {
                 // u64 values > i64::MAX are represented as u64 in serde_json.
                 // Try widening to u64 before giving up.
                 if let Some(u) = n.as_u64() {
-                    Ok(u.into_py(py))
+                    u.into_py_any(py)
                 } else {
                     Err(FerrumHydrationError::new_err(
                         "numeric value is out of representable range",
@@ -155,20 +148,20 @@ fn json_value_to_pyobj(py: Python<'_>, val: &serde_json::Value) -> PyResult<PyOb
                 }
             }
         }
-        serde_json::Value::String(s) => Ok(s.as_str().into_py(py)),
+        serde_json::Value::String(s) => s.as_str().into_py_any(py),
         serde_json::Value::Array(arr) => {
-            let list = pyo3::types::PyList::empty_bound(py);
+            let list = pyo3::types::PyList::empty(py);
             for item in arr {
                 list.append(json_value_to_pyobj(py, item)?)?;
             }
-            Ok(list.into())
+            Ok(list.into_any().unbind())
         }
         serde_json::Value::Object(obj) => {
-            let dict = pyo3::types::PyDict::new_bound(py);
+            let dict = pyo3::types::PyDict::new(py);
             for (k, v) in obj {
                 dict.set_item(k, json_value_to_pyobj(py, v)?)?;
             }
-            Ok(dict.into())
+            Ok(dict.into_any().unbind())
         }
     }
 }
@@ -184,7 +177,7 @@ fn json_value_to_pyobj(py: Python<'_>, val: &serde_json::Value) -> PyResult<PyOb
 ///   column is missing/null in a row.
 /// - `FerrumInternalError` — Rust panic (should never occur in normal use; ERR-2).
 #[pyfunction]
-fn hydrate_rows(py: Python<'_>, metadata_json: &str, rows_json: &str) -> PyResult<PyObject> {
+fn hydrate_rows(py: Python<'_>, metadata_json: &str, rows_json: &str) -> PyResult<Py<PyAny>> {
     // `AssertUnwindSafe` is sound: only `&str` (Copy, RefUnwindSafe) crosses the
     // panic boundary, called exactly once.
     let unwind_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -198,15 +191,15 @@ fn hydrate_rows(py: Python<'_>, metadata_json: &str, rows_json: &str) -> PyResul
 
     match unwind_result {
         Ok(Ok(rows)) => {
-            let list = pyo3::types::PyList::empty_bound(py);
+            let list = pyo3::types::PyList::empty(py);
             for row in &rows {
-                let dict = pyo3::types::PyDict::new_bound(py);
+                let dict = pyo3::types::PyDict::new(py);
                 for (k, v) in row {
                     dict.set_item(k, json_value_to_pyobj(py, v)?)?;
                 }
                 list.append(dict)?;
             }
-            Ok(list.into())
+            Ok(list.into_any().unbind())
         }
         Ok(Err(msg)) => Err(FerrumHydrationError::new_err(msg)),
         Err(_panic_payload) => Err(FerrumInternalError::new_err(
@@ -238,15 +231,15 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(plan_migration, m)?)?;
     m.add(
         "FerrumInternalError",
-        py.get_type_bound::<FerrumInternalError>(),
+        py.get_type::<FerrumInternalError>(),
     )?;
     m.add(
         "FerrumCompileError",
-        py.get_type_bound::<FerrumCompileError>(),
+        py.get_type::<FerrumCompileError>(),
     )?;
     m.add(
         "FerrumHydrationError",
-        py.get_type_bound::<FerrumHydrationError>(),
+        py.get_type::<FerrumHydrationError>(),
     )?;
     Ok(())
 }

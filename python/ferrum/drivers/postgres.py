@@ -6,7 +6,59 @@ import contextlib
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from ferrum.errors import FerrumConfigError, FerrumConnectionError, map_db_error
+from ferrum.errors import FerrumConfigError, FerrumConnectionError, FerrumError, map_db_error
+
+
+class _BoundConnection:
+    """Execution surface pinned to a single raw connection inside a transaction.
+
+    QuerySet terminals only call ``fetch``/``fetchrow``/``fetchval``/``execute`` on
+    the object returned by ``Connection._require_driver()``; binding those to one
+    pinned ``asyncpg`` connection (instead of acquiring a fresh pooled connection
+    per statement) is what makes multiple terminals share a transaction.
+
+    Errors are mapped through the same ``map_db_error`` seam as the pooled driver
+    (ADR-006) so callers see the sanitized Ferrum taxonomy either way.
+    """
+
+    dialect = "postgres"
+
+    def __init__(self, raw_conn: Any) -> None:
+        self._raw = raw_conn
+
+    async def fetch(self, sql: str, *params: object) -> list[Any]:
+        try:
+            return await self._raw.fetch(sql, *params)
+        except Exception as exc:
+            raise map_db_error(exc) from None
+
+    async def fetchrow(self, sql: str, *params: object) -> Any | None:
+        try:
+            return await self._raw.fetchrow(sql, *params)
+        except Exception as exc:
+            raise map_db_error(exc) from None
+
+    async def fetchval(self, sql: str, *params: object) -> Any:
+        try:
+            return await self._raw.fetchval(sql, *params)
+        except Exception as exc:
+            raise map_db_error(exc) from None
+
+    async def execute(self, sql: str, *params: object) -> str:
+        try:
+            return await self._raw.execute(sql, *params)
+        except Exception as exc:
+            raise map_db_error(exc) from None
+
+    @contextlib.asynccontextmanager
+    async def savepoint(self) -> AsyncGenerator[_BoundConnection, None]:
+        """Nested transaction = PostgreSQL SAVEPOINT (asyncpg auto-detects nesting).
+
+        Rolls the savepoint back on any exception (including cancellation) and
+        releases it on clean exit, independently of the enclosing transaction.
+        """
+        async with self._raw.transaction():
+            yield _BoundConnection(self._raw)
 
 
 def _redacted_diag(dsn: str) -> dict[str, str]:
@@ -117,5 +169,33 @@ class AsyncpgDriver:
         pool = self._require_driver()
         try:
             await pool.release(raw_conn)
+        except Exception as exc:
+            raise map_db_error(exc) from None
+
+    @contextlib.asynccontextmanager
+    async def transaction(
+        self,
+        *,
+        isolation: str | None = None,
+        readonly: bool = False,
+        deferrable: bool = False,
+    ) -> AsyncGenerator[_BoundConnection, None]:
+        """Pin one pooled connection and run a transaction on it.
+
+        Delegates BEGIN/COMMIT/ROLLBACK to asyncpg's own transaction context
+        manager, which commits on clean exit and rolls back on any exception —
+        including ``CancelledError`` — before the connection is returned to the
+        pool. ``isolation`` is passed to asyncpg's typed API (never interpolated);
+        the caller (``Connection.transaction``) validates it against an allowlist.
+        """
+        pool = self._require_driver()
+        try:
+            async with pool.acquire() as raw_conn:
+                async with raw_conn.transaction(
+                    isolation=isolation, readonly=readonly, deferrable=deferrable
+                ):
+                    yield _BoundConnection(raw_conn)
+        except FerrumError:
+            raise
         except Exception as exc:
             raise map_db_error(exc) from None
