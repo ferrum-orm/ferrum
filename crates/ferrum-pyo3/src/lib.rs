@@ -229,14 +229,8 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compile_query, m)?)?;
     m.add_function(wrap_pyfunction!(hydrate_rows, m)?)?;
     m.add_function(wrap_pyfunction!(plan_migration, m)?)?;
-    m.add(
-        "FerrumInternalError",
-        py.get_type::<FerrumInternalError>(),
-    )?;
-    m.add(
-        "FerrumCompileError",
-        py.get_type::<FerrumCompileError>(),
-    )?;
+    m.add("FerrumInternalError", py.get_type::<FerrumInternalError>())?;
+    m.add("FerrumCompileError", py.get_type::<FerrumCompileError>())?;
     m.add(
         "FerrumHydrationError",
         py.get_type::<FerrumHydrationError>(),

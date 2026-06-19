@@ -6,7 +6,7 @@ import contextlib
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from ferrum.errors import FerrumConfigError, FerrumConnectionError, FerrumError, map_db_error
+from ferrum.errors import FerrumConfigError, FerrumConnectionError, map_db_error
 
 
 class _BoundConnection:
@@ -189,13 +189,8 @@ class AsyncpgDriver:
         the caller (``Connection.transaction``) validates it against an allowlist.
         """
         pool = self._require_driver()
-        try:
-            async with pool.acquire() as raw_conn:
-                async with raw_conn.transaction(
-                    isolation=isolation, readonly=readonly, deferrable=deferrable
-                ):
-                    yield _BoundConnection(raw_conn)
-        except FerrumError:
-            raise
-        except Exception as exc:
-            raise map_db_error(exc) from None
+        async with pool.acquire() as raw_conn:
+            async with raw_conn.transaction(
+                isolation=isolation, readonly=readonly, deferrable=deferrable
+            ):
+                yield _BoundConnection(raw_conn)
