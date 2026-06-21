@@ -10,7 +10,7 @@
 //!   parameter, never interpolated into the SQL text.
 //! - `bound_params` never contains SQL identifier strings.
 
-use crate::dialect::Dialect;
+use crate::dialect::{Dialect, ReturningSyntax};
 use ferrum_core::{
     compile::CompiledQuery,
     error::CompileError,
@@ -170,18 +170,22 @@ pub fn emit_insert(
     // RETURNING all model fields so the Python side can hydrate the inserted row.
     let returning = returning_all_fields(dialect, metadata);
 
-    let sql = if dialect.supports_returning() {
-        format!(
+    let sql = match dialect.returning_syntax() {
+        ReturningSyntax::Trailing => format!(
             "INSERT INTO {table} ({cols}) VALUES ({vals}) RETURNING {returning}",
             cols = col_names.join(", "),
             vals = placeholders.join(", "),
-        )
-    } else {
-        format!(
+        ),
+        ReturningSyntax::Output => format!(
+            "INSERT INTO {table} ({cols}) OUTPUT {returning} VALUES ({vals})",
+            cols = col_names.join(", "),
+            vals = placeholders.join(", "),
+        ),
+        ReturningSyntax::None => format!(
             "INSERT INTO {table} ({cols}) VALUES ({vals})",
             cols = col_names.join(", "),
             vals = placeholders.join(", "),
-        )
+        ),
     };
     let fingerprint = sql_fingerprint(&sql);
 
@@ -247,8 +251,11 @@ pub fn emit_update(
     let returning = returning_all_fields(dialect, metadata);
 
     let mut sql = format!("UPDATE {table} SET {}", set_clauses.join(", "));
+    if dialect.returning_syntax() == ReturningSyntax::Output {
+        write!(sql, " OUTPUT {returning}").expect("write to String is infallible");
+    }
     write!(sql, " WHERE {}", where_clauses.join(" AND ")).expect("write to String is infallible");
-    if dialect.supports_returning() {
+    if dialect.returning_syntax() == ReturningSyntax::Trailing {
         write!(sql, " RETURNING {returning}").expect("write to String is infallible");
     }
 
@@ -309,14 +316,14 @@ pub fn emit_delete(
     })
 }
 
-/// Build the `RETURNING` list for all model fields (used by INSERT and UPDATE).
+/// Build the returning projection list for all model fields (used by INSERT and UPDATE).
 ///
 /// Uses the metadata allowlist, never user input.
 fn returning_all_fields(dialect: Dialect, metadata: &ModelMetadata) -> String {
     metadata
         .fields
         .iter()
-        .map(|f| dialect.quote_ident(&f.column_name))
+        .map(|f| dialect.format_returning_field(&f.column_name))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -732,6 +739,21 @@ mod tests {
         assert!(q.sql_text.contains("\"email\""));
     }
 
+    #[test]
+    fn emit_insert_mssql_output_contains_all_fields() {
+        let meta = make_metadata();
+        let ir = insert_ir(vec![(
+            FieldRef {
+                name: "id".into(),
+                index: 0,
+            },
+            BindValue::Int(1),
+        )]);
+        let q = emit_insert(Dialect::Mssql, &meta, &ir).unwrap();
+        // OUTPUT inserted.* must be present for MSSQL
+        assert!(q.sql_text.contains("OUTPUT inserted.[id], inserted.[email]"));
+    }
+
     // ── UPDATE tests ─────────────────────────────────────────────────────────
 
     fn update_ir(assignments: Vec<(FieldRef, BindValue)>, filters: Vec<Filter>) -> QuerySetIR {
@@ -801,6 +823,35 @@ mod tests {
         assert!(q.sql_text.contains("$2"));
         assert!(q.sql_text.contains("RETURNING"));
         assert_eq!(q.bound_params.len(), 2);
+    }
+
+    #[test]
+    fn emit_update_mssql_output_contains_all_fields() {
+        let meta = make_metadata();
+        let ir = update_ir(
+            vec![(
+                FieldRef {
+                    name: "email".into(),
+                    index: 1,
+                },
+                BindValue::Text("new@example.com".into()),
+            )],
+            vec![Filter {
+                field: FieldRef {
+                    name: "id".into(),
+                    index: 0,
+                },
+                operator: "eq".into(),
+                value: BindValue::Int(42),
+            }],
+        );
+        let q = emit_update(Dialect::Mssql, &meta, &ir).unwrap();
+        // OUTPUT inserted.* must be present for MSSQL
+        assert!(q.sql_text.contains("OUTPUT inserted.[id], inserted.[email]"));
+        
+        let output_idx = q.sql_text.find("OUTPUT").unwrap();
+        let where_idx = q.sql_text.find("WHERE").unwrap();
+        assert!(output_idx < where_idx, "OUTPUT must precede WHERE");
     }
 
     // ── DELETE tests ─────────────────────────────────────────────────────────

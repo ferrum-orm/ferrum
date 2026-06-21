@@ -12,7 +12,7 @@ PostgreSQL. Every example here mirrors the runnable demo in
 ## 1. Prerequisites
 
 - Python 3.11+
-- PostgreSQL 14+ (the only supported database in v0.1)
+- PostgreSQL 14+ (the default supported database in v0.1; MySQL, MSSQL, and SQLite via optional extras)
 - The compiled native extension (`ferrum._native`), built via maturin
 - For CLI commands (`ferrum init`, `migrate`, `makemigrations`, …): install the optional
   CLI extra — `pip install 'ferrum[cli]'` or `pip install 'ferrum[cli,dotenv]'` for automatic

@@ -32,6 +32,7 @@ dependencies = [
 [project.optional-dependencies]
 pg = ["asyncpg>=0.29"]
 mysql = ["asyncmy>=0.2"]
+mssql = ["aioodbc>=0.5.0"]
 sqlite = ["aiosqlite>=0.19"]
 cli = [
     "typer>=0.12",
@@ -43,6 +44,7 @@ fastapi = []  # uses the host's FastAPI; no extra deps needed
 all = [
     "ferrum-orm[pg]",
     "ferrum-orm[mysql]",
+    "ferrum-orm[mssql]",
     "ferrum-orm[sqlite]",
     "ferrum-orm[cli]",
     "ferrum-orm[dotenv]",
@@ -133,7 +135,7 @@ extra-paths = ["python"]
 include = ["python/ferrum"]
 
 [tool.ty.analysis]
-allowed-unresolved-imports = ["asyncpg.**", "asyncmy.**", "aiosqlite.**", "testcontainers.**"]
+allowed-unresolved-imports = ["asyncpg.**", "asyncmy.**", "aioodbc.**", "aiosqlite.**", "testcontainers.**"]
 
 # ---------------------------------------------------------------------------
 # pytest

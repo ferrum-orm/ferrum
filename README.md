@@ -24,7 +24,7 @@ Ferrum aims to provide all four.
 - Pydantic-first models
 - Django-inspired ORM experience
 - Rust-powered query engine
-- PostgreSQL-first architecture (MySQL and SQLite via optional extras)
+- PostgreSQL-first architecture (MySQL, MSSQL, and SQLite via optional extras)
 - Type-safe query construction
 - Automatic migrations
 - High-performance result hydration
@@ -143,6 +143,8 @@ This allows Ferrum to maintain a Pythonic API without sacrificing performance.
 ### v0.1
 
 - [ ] PostgreSQL support
+- [ ] MySQL support
+- [ ] MSSQL support
 - [ ] Basic CRUD operations
 - [ ] Async query execution
 - [ ] Pydantic models
@@ -187,6 +189,9 @@ pip install 'ferrum-orm[pg,cli]'
 # MySQL
 pip install 'ferrum-orm[mysql]'
 
+# MSSQL (Microsoft SQL Server)
+pip install 'ferrum-orm[mssql]'
+
 # SQLite + migrations CLI (testing / local dev)
 pip install 'ferrum-orm[sqlite,cli]'
 
@@ -198,7 +203,7 @@ pip install ferrum-orm
 ```
 
 Bare `ferrum-orm` installs Pydantic and the Rust core only. Choose a driver extra
-(`pg`, `mysql`, or `sqlite`) before calling `ferrum.connect()`.
+(`pg`, `mysql`, `mssql`, or `sqlite`) before calling `ferrum.connect()`.
 
 From source, build the native extension with `maturin develop` (or `mise run dev`).
 
