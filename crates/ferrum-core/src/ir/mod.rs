@@ -149,4 +149,6 @@ pub enum BindValue {
     Datetime(String),
     /// pgvector query vector — list of f64 components.
     FloatArray(Vec<f64>),
+    /// Generic array of bind values for IN operators.
+    Array(Vec<BindValue>),
 }

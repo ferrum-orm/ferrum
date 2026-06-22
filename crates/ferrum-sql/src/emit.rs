@@ -57,15 +57,15 @@ pub fn emit_select(
 
     for filter in &ir.filters {
         let col = dialect.quote_ident(&metadata.fields[filter.field.index].column_name);
-        let (clause, param) = filter_clause(
+        let (clause, params) = filter_clause(
             dialect,
             &col,
             &filter.operator,
             bound_params.len() + 1,
             filter.value.clone(),
-        );
+        )?;
         where_clauses.push(clause);
-        if let Some(value) = param {
+        for value in params {
             param_type_summary.push(format!("{}:{}", filter.field.name, filter.operator));
             bound_params.push(value);
         }
@@ -77,12 +77,10 @@ pub fn emit_select(
         sql.push_str(&where_clauses.join(" AND "));
     }
 
+    let mut order_parts: Vec<String> = Vec::new();
     if !ir.order_by.is_empty() {
-        let mut order_parts: Vec<String> = Vec::new();
         for o in &ir.order_by {
             let col = dialect.quote_ident(&metadata.fields[o.field.index].column_name);
-            // `Unknown` is already rejected by ferrum_core::compile above;
-            // this arm is here for exhaustiveness (Defense in Depth).
             let dir = match o.direction {
                 SortDirection::Asc => "ASC",
                 SortDirection::Desc => "DESC",
@@ -96,15 +94,20 @@ pub fn emit_select(
             };
             order_parts.push(format!("{col} {dir}"));
         }
-        sql.push_str(" ORDER BY ");
-        sql.push_str(&order_parts.join(", "));
-    } else if let Some(vector_order) = &ir.vector_order_by {
+    }
+    
+    if let Some(vector_order) = &ir.vector_order_by {
         let col = dialect.quote_ident(&metadata.fields[vector_order.field.index].column_name);
         let op = vector_metric_to_sql(vector_order.metric);
         let placeholder = dialect.placeholder(bound_params.len() + 1);
-        write!(sql, " ORDER BY {col} {op} {placeholder}").expect("write to String is infallible");
+        order_parts.push(format!("{col} {op} {placeholder}"));
         param_type_summary.push(format!("{}:nearest_to", vector_order.field.name));
         bound_params.push(vector_order.value.clone());
+    }
+
+    if !order_parts.is_empty() {
+        sql.push_str(" ORDER BY ");
+        sql.push_str(&order_parts.join(", "));
     }
 
     // LIMIT and OFFSET are bound parameters — values are never interpolated
@@ -234,15 +237,15 @@ pub fn emit_update(
     let mut where_clauses: Vec<String> = Vec::new();
     for filter in &ir.filters {
         let col = dialect.quote_ident(&metadata.fields[filter.field.index].column_name);
-        let (clause, param) = filter_clause(
+        let (clause, params) = filter_clause(
             dialect,
             &col,
             &filter.operator,
             bound_params.len() + 1,
             filter.value.clone(),
-        );
+        )?;
         where_clauses.push(clause);
-        if let Some(value) = param {
+        for value in params {
             param_type_summary.push(format!("{}:{}", filter.field.name, filter.operator));
             bound_params.push(value);
         }
@@ -291,21 +294,31 @@ pub fn emit_delete(
 
     for filter in &ir.filters {
         let col = dialect.quote_ident(&metadata.fields[filter.field.index].column_name);
-        let (clause, param) = filter_clause(
+        let (clause, params) = filter_clause(
             dialect,
             &col,
             &filter.operator,
             bound_params.len() + 1,
             filter.value.clone(),
-        );
+        )?;
         where_clauses.push(clause);
-        if let Some(value) = param {
+        for value in params {
             param_type_summary.push(format!("{}:{}", filter.field.name, filter.operator));
             bound_params.push(value);
         }
     }
 
-    let sql = format!("DELETE FROM {table} WHERE {}", where_clauses.join(" AND "));
+    use std::fmt::Write;
+    let returning = returning_all_fields(dialect, metadata);
+    let mut sql = format!("DELETE FROM {table}");
+    if dialect.returning_syntax() == ReturningSyntax::Output {
+        write!(sql, " OUTPUT {returning}").expect("write to String is infallible");
+    }
+    write!(sql, " WHERE {}", where_clauses.join(" AND ")).expect("write to String is infallible");
+    if dialect.returning_syntax() == ReturningSyntax::Trailing {
+        write!(sql, " RETURNING {returning}").expect("write to String is infallible");
+    }
+    
     let fingerprint = sql_fingerprint(&sql);
 
     Ok(CompiledQuery {
@@ -335,25 +348,54 @@ fn filter_clause(
     operator: &str,
     param_index: usize,
     value: BindValue,
-) -> (String, Option<BindValue>) {
+) -> Result<(String, Vec<BindValue>), CompileError> {
     match operator {
-        "is_null" => (format!("{col} IS NULL"), None),
-        "is_not_null" => (format!("{col} IS NOT NULL"), None),
-        "match" => {
-            if dialect != Dialect::Postgres {
-                let placeholder = dialect.placeholder(param_index);
-                return (format!("{col} LIKE {placeholder}"), Some(value));
-            }
+        "is_null" => Ok((format!("{col} IS NULL"), vec![])),
+        "is_not_null" => Ok((format!("{col} IS NOT NULL"), vec![])),
+        "contains" => {
             let placeholder = dialect.placeholder(param_index);
-            (
-                format!("{col} @@ plainto_tsquery({placeholder})"),
-                Some(value),
-            )
+            Ok((dialect.concat_wildcards(col, &placeholder), vec![value]))
+        }
+        "icontains" => {
+            let placeholder = dialect.placeholder(param_index);
+            Ok((dialect.concat_wildcards_ilike(col, &placeholder), vec![value]))
+        }
+        "match" => {
+            let placeholder = dialect.placeholder(param_index);
+            if dialect == Dialect::Postgres {
+                Ok((
+                    format!("{col} @@ plainto_tsquery({placeholder})"),
+                    vec![value],
+                ))
+            } else {
+                Ok((dialect.concat_wildcards_ilike(col, &placeholder), vec![value]))
+            }
+        }
+        "in" => {
+            if dialect == Dialect::Postgres {
+                let placeholder = dialect.placeholder(param_index);
+                Ok((format!("{col} = ANY({placeholder})"), vec![value]))
+            } else {
+                let BindValue::Array(arr) = value else {
+                    return Err(CompileError::MalformedIr {
+                        reason: format!("'in' operator requires an Array BindValue"),
+                    });
+                };
+                if arr.is_empty() {
+                    Ok((format!("1=0"), vec![]))
+                } else {
+                    let mut phs = Vec::with_capacity(arr.len());
+                    for i in 0..arr.len() {
+                        phs.push(dialect.placeholder(param_index + i));
+                    }
+                    Ok((format!("{col} IN ({})", phs.join(", ")), arr))
+                }
+            }
         }
         op => {
             let placeholder = dialect.placeholder(param_index);
             let sql_op = operator_to_sql(op, dialect);
-            (format!("{col} {sql_op} {placeholder}"), Some(value))
+            Ok((format!("{col} {sql_op} {placeholder}"), vec![value]))
         }
     }
 }
@@ -419,7 +461,7 @@ mod tests {
                     name: "id".into(),
                     column_name: "id".into(),
                     field_type: FieldType::Int,
-                    allowed_operators: vec!["eq".into(), "gt".into()],
+                    allowed_operators: vec!["eq".into(), "gt".into(), "in".into()],
                     nullable: false,
                     vector_dimensions: None,
                 },
@@ -427,7 +469,7 @@ mod tests {
                     name: "email".into(),
                     column_name: "email".into(),
                     field_type: FieldType::Text,
-                    allowed_operators: vec!["eq".into(), "icontains".into()],
+                    allowed_operators: vec!["eq".into(), "icontains".into(), "contains".into()],
                     nullable: false,
                     vector_dimensions: None,
                 },
@@ -536,6 +578,60 @@ mod tests {
         assert_eq!(q.bound_params.len(), 2);
         assert!(matches!(q.bound_params[0], BindValue::Int(10)));
         assert!(matches!(q.bound_params[1], BindValue::Int(5)));
+    }
+
+    #[test]
+    fn emit_select_with_contains_uses_concat() {
+        let meta = make_metadata();
+        let mut ir = select_ir(vec![FieldRef { name: "id".into(), index: 0 }]);
+        ir.filters.push(Filter {
+            field: FieldRef { name: "email".into(), index: 1 },
+            operator: "contains".into(),
+            value: BindValue::Text("gmail".into()),
+        });
+        
+        let q_pg = emit_select(Dialect::Postgres, &meta, &ir).unwrap();
+        assert!(q_pg.sql_text.contains("LIKE '%' || $1 || '%'"));
+        
+        let q_ms = emit_select(Dialect::Mssql, &meta, &ir).unwrap();
+        assert!(q_ms.sql_text.contains("LIKE CONCAT('%', ?, '%')"));
+    }
+
+    #[test]
+    fn emit_select_with_in_operator_expands_array() {
+        let meta = make_metadata();
+        let mut ir = select_ir(vec![FieldRef { name: "id".into(), index: 0 }]);
+        ir.filters.push(Filter {
+            field: FieldRef { name: "id".into(), index: 0 },
+            operator: "in".into(),
+            value: BindValue::Array(vec![BindValue::Int(1), BindValue::Int(2)]),
+        });
+        
+        let q_pg = emit_select(Dialect::Postgres, &meta, &ir).unwrap();
+        assert!(q_pg.sql_text.contains("= ANY($1)"));
+        assert_eq!(q_pg.bound_params.len(), 1);
+
+        let q_ms = emit_select(Dialect::Mssql, &meta, &ir).unwrap();
+        assert!(q_ms.sql_text.contains("IN (?, ?)"));
+        assert_eq!(q_ms.bound_params.len(), 2);
+    }
+
+    #[test]
+    fn emit_select_combines_vector_and_standard_order_by() {
+        let meta = make_metadata();
+        let mut ir = select_ir(vec![FieldRef { name: "id".into(), index: 0 }]);
+        ir.order_by.push(OrderBy {
+            field: FieldRef { name: "id".into(), index: 0 },
+            direction: SortDirection::Desc,
+        });
+        ir.vector_order_by = Some(ferrum_core::ir::VectorOrderBy {
+            field: FieldRef { name: "id".into(), index: 0 },
+            metric: ferrum_core::ir::VectorMetric::L2,
+            value: BindValue::FloatArray(vec![0.1, 0.2]),
+        });
+
+        let q = emit_select(Dialect::Postgres, &meta, &ir).unwrap();
+        assert!(q.sql_text.contains("ORDER BY \"id\" DESC, \"id\" <-> $1"));
     }
 
     // --- Rejection paths ---

@@ -67,6 +67,26 @@ impl Dialect {
         }
     }
 
+    /// Construct a wildcard string matching clause (e.g. `LIKE '%' || ? || '%'`).
+    #[must_use]
+    pub fn concat_wildcards(&self, col: &str, placeholder: &str) -> String {
+        match self {
+            Self::Postgres | Self::Sqlite => format!("{col} LIKE '%' || {placeholder} || '%'"),
+            Self::Mysql | Self::Mssql => format!("{col} LIKE CONCAT('%', {placeholder}, '%')"),
+        }
+    }
+
+    /// Construct a case-insensitive wildcard string matching clause.
+    #[must_use]
+    pub fn concat_wildcards_ilike(&self, col: &str, placeholder: &str) -> String {
+        if *self == Self::Postgres {
+            format!("{col} ILIKE '%' || {placeholder} || '%'")
+        } else {
+            // Other DBs typically have case-insensitive LIKE by default
+            self.concat_wildcards(col, placeholder)
+        }
+    }
+
     /// How this dialect supports returning rows from INSERT/UPDATE.
     #[must_use]
     pub fn returning_syntax(&self) -> ReturningSyntax {

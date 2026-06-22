@@ -94,16 +94,12 @@ def _encode_bind_value(value: object) -> dict[str, object]:
     if isinstance(value, list) and value and all(isinstance(v, (int, float)) for v in value):
         floats: list[float] = [float(v) for v in value if isinstance(v, (int, float))]
         return {"type": "float_array", "value": floats}
+    if isinstance(value, list):
+        return {"type": "array", "value": [_encode_bind_value(v) for v in value]}
     return {"type": "text", "value": str(value)}
 
 
-def _decode_bound_param(param_json: str) -> object:
-    """Decode a BindValue JSON string (from ``compile_query``) to a Python value.
-
-    Reverses ``_encode_bind_value`` so that bound parameters can be passed to
-    asyncpg. Called on each element of ``compiled["bound_params"]``.
-    """
-    parsed: dict[str, Any] = json.loads(param_json)
+def _decode_bind_value_dict(parsed: dict[str, Any]) -> object:
     typ: str = parsed["type"]
     if typ == "null":
         return None
@@ -125,7 +121,18 @@ def _decode_bound_param(param_json: str) -> object:
             return str(val)
     if typ == "float_array":
         return [float(v) for v in val]
+    if typ == "array":
+        return [_decode_bind_value_dict(v) for v in val]
     return val
+
+
+def _decode_bound_param(param_json: str) -> object:
+    """Decode a BindValue JSON string (from ``compile_query``) to a Python value.
+
+    Reverses ``_encode_bind_value`` so that bound parameters can be passed to
+    asyncpg. Called on each element of ``compiled["bound_params"]``.
+    """
+    return _decode_bind_value_dict(json.loads(param_json))
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:  # noqa: ANN401
@@ -698,6 +705,68 @@ class QuerySet(Generic[_M]):
         )
         return row_count
 
+    async def delete_and_return(self, conn: ConnectionLike | None = None) -> list[_M]:
+        """Delete filtered rows and return the deleted models.
+
+        Requires at least one filter. Use ``danger_delete_all_and_return()`` for an
+        unscoped delete.
+
+        Dispatches Tier A ``query_start`` / ``query_success`` / ``query_failure``
+        hook payloads.
+
+        Args:
+            conn: An open ``Connection`` (obtained from ``ferrum.connect()``).
+
+        Raises:
+            FerrumDangerApiError: if called without any filter.
+            FerrumConfigError: if the native extension is not built.
+        """
+        if not self._is_filtered:
+            raise FerrumDangerApiError(
+                "Refusing unscoped delete(). Use QuerySet.danger_delete_all_and_return() "
+                "to explicitly delete all rows in the table."
+            )
+        if _native_ext is None:
+            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
+        if conn is None:
+            raise FerrumConfigError(
+                "delete_and_return() requires an active Connection. "
+                "Obtain one from ferrum.connect(). [FERR-C001]"
+            )
+        metadata = self._get_metadata()
+        compiled = self._compile_ir(self._build_delete_ir(), dialect=conn.dialect)
+        sql_text: str = compiled["sql_text"]
+        bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
+        fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
+        driver = conn._require_driver()
+        model_name = self._model.__name__
+        table = metadata.table_name if metadata is not None else model_name
+        _hooks.query_start(
+            fingerprint=fingerprint,
+            model=model_name,
+            operation="delete_and_return",
+            table=table,
+        )
+        t0 = time.monotonic()
+        try:
+            rows = await driver.fetch(sql_text, *bound_params)
+        except Exception as exc:
+            duration_ms = (time.monotonic() - t0) * 1000
+            mapped = map_db_error(exc, context={"model": model_name, "operation": "delete_and_return"})
+            _hooks.query_failure(
+                fingerprint=fingerprint,
+                duration_ms=duration_ms,
+                failure_category=type(mapped).__name__,
+            )
+            raise mapped from None
+        duration_ms = (time.monotonic() - t0) * 1000
+        _hooks.query_success(
+            fingerprint=fingerprint,
+            duration_ms=duration_ms,
+            row_count=len(rows),
+        )
+        return _hydrate_rows(self._model, rows, fingerprint=fingerprint)
+
     async def danger_delete_all(self, conn: ConnectionLike) -> int:
         """Delete ALL rows in the table without a filter.
 
@@ -752,6 +821,55 @@ class QuerySet(Generic[_M]):
             row_count = 0
         _hooks.query_success(fingerprint=fingerprint, duration_ms=duration_ms, row_count=row_count)
         return row_count
+
+    async def danger_delete_all_and_return(self, conn: ConnectionLike) -> list[_M]:
+        """Delete ALL rows in the table without a filter, returning the deleted models.
+
+        This is an explicit escape hatch. Prefer ``filter(...).delete_and_return()`` for
+        scoped deletes.
+
+        Args:
+            conn: An open ``Connection`` (obtained from ``ferrum.connect()``).
+
+        Raises:
+            FerrumConfigError: if the native extension is not built.
+        """
+        if _native_ext is None:
+            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
+        if conn is None:
+            raise FerrumConfigError(
+                "danger_delete_all_and_return() requires an active Connection. "
+                "Obtain one from ferrum.connect(). [FERR-C001]"
+            )
+        qs_all: QuerySet[_M] = QuerySet(self._model)
+        delete_ir = qs_all._build_delete_ir()
+        delete_ir["operation"]["danger"] = True  # bypass Rust MissingFilter for danger API
+        compiled = qs_all._compile_ir(delete_ir, dialect=conn.dialect)
+        sql_text: str = compiled["sql_text"]
+        bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
+        fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
+        driver = conn._require_driver()
+        model_name = self._model.__name__
+        metadata_all = qs_all._get_metadata()
+        table = metadata_all.table_name if metadata_all is not None else model_name
+        _hooks.query_start(
+            fingerprint=fingerprint, model=model_name, operation="delete_and_return", table=table
+        )
+        t0 = time.monotonic()
+        try:
+            rows = await driver.fetch(sql_text, *bound_params)
+        except Exception as exc:
+            duration_ms = (time.monotonic() - t0) * 1000
+            mapped = map_db_error(exc)
+            _hooks.query_failure(
+                fingerprint=fingerprint,
+                duration_ms=duration_ms,
+                failure_category=type(mapped).__name__,
+            )
+            raise mapped from None
+        duration_ms = (time.monotonic() - t0) * 1000
+        _hooks.query_success(fingerprint=fingerprint, duration_ms=duration_ms, row_count=len(rows))
+        return _hydrate_rows(self._model, rows, fingerprint=fingerprint)
 
     async def update(self, conn: ConnectionLike | None = None, **assignments: Any) -> int:  # noqa: ANN401
         """Update filtered rows. Returns the row count.
