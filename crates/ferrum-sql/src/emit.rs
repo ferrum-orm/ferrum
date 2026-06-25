@@ -720,18 +720,13 @@ fn emit_predicate(
 }
 
 /// Build a WHERE predicate and optional bound parameter for a filter.
-///
-/// `field_type` is used to dispatch type-specific operators (array `@>`,
-/// JSONB `?`, etc.) that share a name like `"contains"` with text operators.
 fn filter_clause(
     dialect: Dialect,
     col: &str,
     operator: &str,
-    field_type: ferrum_core::ir::metadata::FieldType,
     param_index: usize,
     value: BindValue,
 ) -> (String, Option<BindValue>) {
-    use ferrum_core::ir::metadata::FieldType;
     match operator {
         "is_null" => (format!("{col} IS NULL"), None),
         "is_not_null" => (format!("{col} IS NOT NULL"), None),
@@ -745,56 +740,6 @@ fn filter_clause(
                 format!("{col} @@ plainto_tsquery({placeholder})"),
                 Some(value),
             )
-        }
-        // Array containment operators.
-        "contains"
-            if matches!(
-                field_type,
-                FieldType::ArrayText
-                    | FieldType::ArrayInt
-                    | FieldType::ArrayUuid
-                    | FieldType::ArrayFloat
-            ) =>
-        {
-            let placeholder = dialect.placeholder(param_index);
-            (format!("{col} @> {placeholder}"), Some(value))
-        }
-        "contained_by"
-            if matches!(
-                field_type,
-                FieldType::ArrayText
-                    | FieldType::ArrayInt
-                    | FieldType::ArrayUuid
-                    | FieldType::ArrayFloat
-            ) =>
-        {
-            let placeholder = dialect.placeholder(param_index);
-            (format!("{col} <@ {placeholder}"), Some(value))
-        }
-        "overlap"
-            if matches!(
-                field_type,
-                FieldType::ArrayText
-                    | FieldType::ArrayInt
-                    | FieldType::ArrayUuid
-                    | FieldType::ArrayFloat
-            ) =>
-        {
-            let placeholder = dialect.placeholder(param_index);
-            (format!("{col} && {placeholder}"), Some(value))
-        }
-        // JSONB operators.
-        "contains" if field_type == FieldType::Json => {
-            let placeholder = dialect.placeholder(param_index);
-            (format!("{col} @> {placeholder}"), Some(value))
-        }
-        "has_key" if field_type == FieldType::Json => {
-            let placeholder = dialect.placeholder(param_index);
-            (format!("{col} ? {placeholder}"), Some(value))
-        }
-        "has_any_keys" if field_type == FieldType::Json => {
-            let placeholder = dialect.placeholder(param_index);
-            (format!("{col} ?| {placeholder}"), Some(value))
         }
         op => {
             let placeholder = dialect.placeholder(param_index);
