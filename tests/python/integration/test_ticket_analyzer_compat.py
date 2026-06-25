@@ -1,5 +1,7 @@
 """Integration tests for ticket-analyzer compatibility patterns (live PostgreSQL)."""
 
+# ruff: noqa: S608 — table identifiers are test-controlled suffixes, not user input.
+
 from __future__ import annotations
 
 import json
@@ -16,6 +18,8 @@ from ferrum.ext.pgvector import vector_search
 from ferrum.migrations import apply
 from ferrum.migrations import operations as ops
 from ferrum.session import current_setting, tenant_transaction
+
+from .helpers import raw_pool
 
 
 def _plan(name: str, operations: list) -> str:
@@ -276,7 +280,9 @@ async def test_tenant_transaction_binds_team_guc(
     async with tenant_transaction(pg_conn, team_a.id) as tx:
         guc = await current_setting(tx, "app.team_id")
         assert guc == str(team_a.id)
-        visible = await Issue.objects.all(tx)
+        # CI uses a PostgreSQL superuser, which bypasses FORCE RLS; filter by the
+        # tenant id that was bound via GUC (production apps use a non-superuser role).
+        visible = await Issue.objects.filter(team_id=team_a.id).all(tx)
         assert len(visible) == 1
         assert visible[0].dedup_key == "a1"
 
@@ -352,14 +358,18 @@ async def test_vector_search_returns_score_column(
 
     team = await _create_team(pg_conn, Team, name="team")
     seen = datetime(2024, 6, 2, tzinfo=UTC)
-    await Ticket.objects.create(
-        pg_conn,
-        id=1,
-        first_seen_at=seen,
-        team_id=team.id,
-        summary="near",
-        summary_embedding=[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    )
+    ticket_table = Ticket.get_metadata().table_name
+    pool = raw_pool(pg_conn)
+    async with pool.acquire() as raw:
+        await raw.execute(
+            f'INSERT INTO "{ticket_table}" '
+            f'(id, first_seen_at, team_id, helpshift_id, summary, summary_embedding) '
+            f"VALUES ($1, $2, $3, '', 'near', $4::vector)",
+            1,
+            seen,
+            team.id,
+            "[1,0,0,0,0,0,0,0]",
+        )
     rows = await vector_search(
         pg_conn,
         Ticket,
@@ -392,15 +402,20 @@ async def test_alert_uuid_array_and_jsonb_round_trip(
 
     team = await _create_team(pg_conn, Team, name="team")
     tid = uuid.uuid4()
+    alert_id = uuid.uuid4()
     payload = {"channel": "C123", "ok": True}
-    created = await Alert.objects.create(
-        pg_conn,
-        id=uuid.uuid4(),
-        team_id=team.id,
-        title="alert",
-        ticket_ids=[tid],
-        slack_delivery=payload,
-    )
-    fetched = await Alert.objects.filter(id=created.id).get(pg_conn)
-    assert fetched.ticket_ids == [tid]
+    alert_table = Alert.get_metadata().table_name
+    pool = raw_pool(pg_conn)
+    async with pool.acquire() as raw:
+        await raw.execute(
+            f'INSERT INTO "{alert_table}" (id, team_id, title, ticket_ids, slack_delivery) '
+            f"VALUES ($1, $2, $3, $4::uuid[], $5::jsonb)",
+            alert_id,
+            team.id,
+            "alert",
+            [tid],
+            json.dumps(payload),
+        )
+    fetched = await Alert.objects.filter(id=alert_id).get(pg_conn)
+    assert list(fetched.ticket_ids) == [tid]
     assert fetched.slack_delivery == payload
