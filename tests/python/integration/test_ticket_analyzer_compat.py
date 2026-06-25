@@ -363,7 +363,7 @@ async def test_vector_search_returns_score_column(
     async with pool.acquire() as raw:
         await raw.execute(
             f'INSERT INTO "{ticket_table}" '
-            f'(id, first_seen_at, team_id, helpshift_id, summary, summary_embedding) '
+            f"(id, first_seen_at, team_id, helpshift_id, summary, summary_embedding) "
             f"VALUES ($1, $2, $3, '', 'near', $4::vector)",
             1,
             seen,
