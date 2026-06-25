@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 
 import ferrum
-from ferrum.ext.pgvector import register_vector_codecs, vector_search
+from ferrum.ext.pgvector import vector_search
 from ferrum.migrations import apply
 from ferrum.migrations import operations as ops
 from ferrum.session import current_setting, tenant_transaction
@@ -219,7 +219,6 @@ async def compat_models(
         alert_table=alert_table,
         echo_fn=echo_fn,
     )
-    await register_vector_codecs(pg_conn)
     try:
         yield {
             "Team": Team,
