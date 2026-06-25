@@ -198,6 +198,10 @@ async def _drop_schema(
     )
 
 
+async def _create_team(pg_conn: ferrum.connection.Connection, team_cls: type, *, name: str) -> Any:
+    return await team_cls.objects.create(pg_conn, id=uuid.uuid4(), name=name)
+
+
 @pytest_asyncio.fixture
 async def compat_models(
     pg_conn: ferrum.connection.Connection,
@@ -248,22 +252,26 @@ async def test_tenant_transaction_binds_team_guc(
     Team = compat_models["Team"]
     Issue = compat_models["Issue"]
 
-    team_a = await Team.objects.create(pg_conn, name="A")
-    team_b = await Team.objects.create(pg_conn, name="B")
-    await Issue.objects.create(
-        pg_conn,
-        team_id=team_a.id,
-        dedup_key="a1",
-        title="for-a",
-        summary="",
-    )
-    await Issue.objects.create(
-        pg_conn,
-        team_id=team_b.id,
-        dedup_key="b1",
-        title="for-b",
-        summary="",
-    )
+    team_a = await _create_team(pg_conn, Team, name="A")
+    team_b = await _create_team(pg_conn, Team, name="B")
+    async with tenant_transaction(pg_conn, team_a.id) as tx:
+        await Issue.objects.create(
+            tx,
+            id=uuid.uuid4(),
+            team_id=team_a.id,
+            dedup_key="a1",
+            title="for-a",
+            summary="",
+        )
+    async with tenant_transaction(pg_conn, team_b.id) as tx:
+        await Issue.objects.create(
+            tx,
+            id=uuid.uuid4(),
+            team_id=team_b.id,
+            dedup_key="b1",
+            title="for-b",
+            summary="",
+        )
 
     async with tenant_transaction(pg_conn, team_a.id) as tx:
         guc = await current_setting(tx, "app.team_id")
@@ -281,7 +289,7 @@ async def test_ticket_composite_pk_create_and_get(
     Team = compat_models["Team"]
     Ticket = compat_models["Ticket"]
 
-    team = await Team.objects.create(pg_conn, name="team")
+    team = await _create_team(pg_conn, Team, name="team")
     seen = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
     created = await Ticket.objects.create(
         pg_conn,
@@ -305,26 +313,30 @@ async def test_issue_upsert_on_team_and_dedup_key(
     Team = compat_models["Team"]
     Issue = compat_models["Issue"]
 
-    team = await Team.objects.create(pg_conn, name="team")
-    first = await Issue.objects.upsert(
-        pg_conn,
-        conflict_fields=["team_id", "dedup_key"],
-        update_fields=["title", "summary"],
-        team_id=team.id,
-        dedup_key="dup-1",
-        title="v1",
-        summary="s1",
-    )
-    assert first is not None
-    second = await Issue.objects.upsert(
-        pg_conn,
-        conflict_fields=["team_id", "dedup_key"],
-        update_fields=["title", "summary"],
-        team_id=team.id,
-        dedup_key="dup-1",
-        title="v2",
-        summary="s2",
-    )
+    team = await _create_team(pg_conn, Team, name="team")
+    issue_id = uuid.uuid4()
+    async with tenant_transaction(pg_conn, team.id) as tx:
+        first = await Issue.objects.upsert(
+            tx,
+            conflict_fields=["team_id", "dedup_key"],
+            update_fields=["title", "summary"],
+            id=issue_id,
+            team_id=team.id,
+            dedup_key="dup-1",
+            title="v1",
+            summary="s1",
+        )
+        assert first is not None
+        second = await Issue.objects.upsert(
+            tx,
+            conflict_fields=["team_id", "dedup_key"],
+            update_fields=["title", "summary"],
+            id=issue_id,
+            team_id=team.id,
+            dedup_key="dup-1",
+            title="v2",
+            summary="s2",
+        )
     assert second is not None
     assert second.id == first.id
     assert second.title == "v2"
@@ -338,7 +350,7 @@ async def test_vector_search_returns_score_column(
     Team = compat_models["Team"]
     Ticket = compat_models["Ticket"]
 
-    team = await Team.objects.create(pg_conn, name="team")
+    team = await _create_team(pg_conn, Team, name="team")
     seen = datetime(2024, 6, 2, tzinfo=UTC)
     await Ticket.objects.create(
         pg_conn,
@@ -378,11 +390,12 @@ async def test_alert_uuid_array_and_jsonb_round_trip(
     Team = compat_models["Team"]
     Alert = compat_models["Alert"]
 
-    team = await Team.objects.create(pg_conn, name="team")
+    team = await _create_team(pg_conn, Team, name="team")
     tid = uuid.uuid4()
     payload = {"channel": "C123", "ok": True}
     created = await Alert.objects.create(
         pg_conn,
+        id=uuid.uuid4(),
         team_id=team.id,
         title="alert",
         ticket_ids=[tid],
