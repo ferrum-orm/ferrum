@@ -158,9 +158,7 @@ async def vector_search(
         FerrumConfigError: If the connection is not a PostgreSQL connection.
     """
     if conn.dialect != "postgres":
-        raise FerrumConfigError(
-            "vector_search requires a PostgreSQL connection. [FERR-C001]"
-        )
+        raise FerrumConfigError("vector_search requires a PostgreSQL connection. [FERR-C001]")
 
     if metric not in _VALID_METRICS:
         raise FerrumCompileError(

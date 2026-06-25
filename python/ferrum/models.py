@@ -42,7 +42,7 @@ _SUPPORTED_TYPES: dict[type, str] = {
     UUID: "uuid",
     bytes: "bytes",
     dict: "json",
-    list: "array_text",  # bare list defaults to text[]; parameterized list[T] handled in _build_metadata
+    list: "array_text",  # bare list -> text[]; list[T] in _build_metadata
 }
 
 

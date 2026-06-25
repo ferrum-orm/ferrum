@@ -368,9 +368,7 @@ class TestTenantTransaction:
 
         conn.transaction = _fake_transaction
 
-        async with tenant_transaction(
-            conn, "t", isolation="serializable", readonly=True
-        ):
+        async with tenant_transaction(conn, "t", isolation="serializable", readonly=True):
             pass
 
         assert received_kwargs.get("isolation") == "serializable"

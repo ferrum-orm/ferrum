@@ -139,6 +139,11 @@ _SQL_TYPE_ALLOWLIST: frozenset[str] = frozenset(
         "INET",
         "VECTOR",
         "TSVECTOR",
+        # PostgreSQL array types
+        "TEXT[]",
+        "INTEGER[]",
+        "UUID[]",
+        "FLOAT8[]",
     }
 )
 
@@ -228,16 +233,26 @@ def _col_def(col: dict[str, Any], *, dialect: str = "postgres") -> str:
     Parameterised types (e.g. ``VARCHAR(100)``, ``NUMERIC(10,2)``) are accepted:
     the base token before the first ``(`` is checked against the allowlist so the
     parameter portion is never interpolated without the token being whitelisted.
+
+    For composite-PK tables ``primary_key`` may be ``False`` on individual columns
+    (the table-level constraint is emitted by ``_op_to_sql`` for ``create_table``).
     """
     sql_type = _map_sql_type(col.get("sql_type", "TEXT"), dialect)
     base_type = sql_type.split("(")[0].upper()
-    if base_type not in _SQL_TYPE_ALLOWLIST and dialect != "mysql":
+    # Array types end with "[]"; strip that suffix before allowlist check.
+    base_type_check = base_type.rstrip("[]") if base_type.endswith("[]") else base_type
+    if (
+        base_type not in _SQL_TYPE_ALLOWLIST
+        and base_type_check not in _SQL_TYPE_ALLOWLIST
+        and dialect != "mysql"
+    ):
         raise FerrumMigrationError(
             f"Unsupported SQL type {sql_type!r}. Only standard SQL types are allowed. [FERR-M001]"
         )
     if (
         dialect == "mysql"
         and base_type not in _SQL_TYPE_ALLOWLIST
+        and base_type_check not in _SQL_TYPE_ALLOWLIST
         and base_type not in {"TINYINT", "BLOB", "LONGTEXT", "DATETIME"}
     ):
         raise FerrumMigrationError(f"Unsupported SQL type {sql_type!r}. [FERR-M001]")
@@ -258,10 +273,14 @@ def _col_def(col: dict[str, Any], *, dialect: str = "postgres") -> str:
                 f"Only simple literals are allowed. [FERR-M001]"
             )
         parts.append(f"DEFAULT {normalized}")
-    if col.get("primary_key"):
+    # Emit inline PRIMARY KEY only for single-column PKs. Composite PKs are emitted
+    # as a separate table-level constraint in _op_to_sql.
+    if col.get("primary_key") and not col.get("composite_pk"):
         parts.append("PRIMARY KEY")
     if col.get("unique"):
         parts.append("UNIQUE")
+    if col.get("enum_check"):
+        parts.append(str(col["enum_check"]))
     return " ".join(parts)
 
 
@@ -287,7 +306,14 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
 
     if kind == "create_table":
         table = op["table"]
-        col_defs = ", ".join(_col_def(c, dialect=dialect) for c in op.get("columns", []))
+        col_defs_list = [_col_def(c, dialect=dialect) for c in op.get("columns", [])]
+        # Table-level composite PRIMARY KEY constraint: emitted when the op carries
+        # a "composite_pk_columns" key (set by compute_plan for multi-PK models).
+        composite_pk_cols: list[str] = op.get("composite_pk_columns", [])
+        if composite_pk_cols:
+            pk_cols_sql = ", ".join(_quote_ident(col, dialect) for col in composite_pk_cols)
+            col_defs_list.append(f"PRIMARY KEY ({pk_cols_sql})")
+        col_defs = ", ".join(col_defs_list)
         sql = f"CREATE TABLE IF NOT EXISTS {_quote_ident(table, dialect)} ({col_defs})"
         if dialect == "mysql":
             sql += " ENGINE=InnoDB"
@@ -328,9 +354,7 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
                 raise FerrumMigrationError(
                     f"SQL type {sql_type!r} is not in the migration allowlist. [FERR-M001]"
                 )
-            parts.append(
-                f"ALTER COLUMN {_quote_ident(column, dialect)} TYPE {mapped}"
-            )
+            parts.append(f"ALTER COLUMN {_quote_ident(column, dialect)} TYPE {mapped}")
         if op.get("not_null") is True:
             parts.append(f"ALTER COLUMN {_quote_ident(column, dialect)} SET NOT NULL")
         elif op.get("not_null") is False:
@@ -464,18 +488,13 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
         table = op["table"]
         using_expr = op["using"]
         command = str(op.get("command", "ALL")).upper()
-        _valid_commands: frozenset[str] = frozenset(
-            {"ALL", "SELECT", "INSERT", "UPDATE", "DELETE"}
-        )
+        _valid_commands: frozenset[str] = frozenset({"ALL", "SELECT", "INSERT", "UPDATE", "DELETE"})
         if command not in _valid_commands:
             raise FerrumMigrationError(
                 f"Unsupported policy command {command!r}. "
                 f"Expected one of: {', '.join(sorted(_valid_commands))}. [FERR-M001]"
             )
-        sql = (
-            f"CREATE POLICY {_quote_ident(name, dialect)} "
-            f"ON {_quote_ident(table, dialect)}"
-        )
+        sql = f"CREATE POLICY {_quote_ident(name, dialect)} ON {_quote_ident(table, dialect)}"
         if command != "ALL":
             sql += f" FOR {command}"
         role = op.get("role")
@@ -491,8 +510,7 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
         name = op["name"]
         table = op["table"]
         return (
-            f"DROP POLICY IF EXISTS {_quote_ident(name, dialect)} "
-            f"ON {_quote_ident(table, dialect)}"
+            f"DROP POLICY IF EXISTS {_quote_ident(name, dialect)} ON {_quote_ident(table, dialect)}"
         )
 
     # ------------------------------------------------------------------
@@ -653,8 +671,34 @@ def compute_plan(
         table = metadata.table_name
 
         if table not in existing_tables:
-            col_defs = [_field_to_col_def(f, is_pk=(f.pk)) for f in metadata.fields]
-            ops.append({"kind": "create_table", "table": table, "columns": col_defs})
+            # Detect composite PK: more than one field has pk=True.
+            pk_fields_list = [f for f in metadata.fields if f.pk]
+            is_composite_pk = len(pk_fields_list) > 1
+
+            # For composite PKs, mark each PK column with composite_pk=True so
+            # _col_def skips the inline PRIMARY KEY (the constraint is table-level).
+            col_defs: list[dict[str, Any]] = []
+            for f in metadata.fields:
+                cd = _field_to_col_def(f, is_pk=f.pk)
+                if is_composite_pk and f.pk:
+                    cd = {**cd, "primary_key": False, "composite_pk": True}
+                # Enum columns get an inline CHECK constraint in the DDL.
+                if f.field_type == "enum" and f.enum_values:
+                    quoted_vals = ", ".join(f"'{v}'" for v in f.enum_values)
+                    # Store check expression; _col_def doesn't handle it, so we embed
+                    # it as a suffix directly on the column entry via a post-pass.
+                    check = f"CHECK ({_quote_ident(f.column_name, 'postgres')} IN ({quoted_vals}))"
+                    cd = {**cd, "enum_check": check}
+                col_defs.append(cd)
+
+            create_op: dict[str, Any] = {
+                "kind": "create_table",
+                "table": table,
+                "columns": col_defs,
+            }
+            if is_composite_pk:
+                create_op["composite_pk_columns"] = [f.column_name for f in pk_fields_list]
+            ops.append(create_op)
             # Emit AddIndex ops for db_index=True fields (after create_table).
             for f in metadata.fields:
                 if f.db_index:

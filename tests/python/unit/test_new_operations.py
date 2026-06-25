@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from ferrum.errors import FerrumCompileError
+from ferrum.errors import FerrumCompileError, FerrumMigrationError
 from ferrum.migrations.operations import (
     CreateExtension,
     CreateFunction,
@@ -226,7 +226,7 @@ class TestCreatePolicy:
 
     def test_sql_emission_invalid_command_raises(self) -> None:
         op = CreatePolicy("bad_pol", "t", "true", command="TRUNCATE")
-        with pytest.raises(Exception):  # FerrumMigrationError
+        with pytest.raises(FerrumMigrationError):
             _op_to_sql(op.to_op_dict())
 
 

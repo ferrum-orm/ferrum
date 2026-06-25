@@ -22,7 +22,7 @@ import time
 import types
 from collections.abc import Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, cast
 from uuid import UUID
 
 import ferrum.hooks as _hooks
@@ -99,18 +99,19 @@ def _encode_bind_value(value: object) -> dict[str, object]:
             return {"type": "text_array", "value": []}
         # Check element type to select array variant.
         first = next((v for v in value if v is not None), None)
-        if first is not None and isinstance(first, (int, float)) and not isinstance(first, bool):
+        if first is not None and isinstance(first, (int, float)) and not isinstance(first, bool):  # noqa: SIM102
             # pgvector float array (used by nearest_to) or int/float array column
             if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value):
                 # Distinguish int_array vs float_array by element type
                 if all(isinstance(v, int) and not isinstance(v, bool) for v in value):
-                    return {"type": "int_array", "value": [int(v) for v in value]}
-                floats: list[float] = [float(v) for v in value]
+                    return {"type": "int_array", "value": [cast(int, v) for v in value]}
+                floats: list[float] = [cast(float, v) for v in value]
                 return {"type": "float_array", "value": floats}
         if first is not None and isinstance(first, UUID):
             return {"type": "text_array", "value": [str(v) for v in value]}
         # Default: text array (covers list[str] and mixed/unknown types)
-        return {"type": "text_array", "value": [str(v) if not isinstance(v, str) else v for v in value]}
+        strs = [str(v) if not isinstance(v, str) else v for v in value]
+        return {"type": "text_array", "value": strs}
     return {"type": "text", "value": str(value)}
 
 
@@ -1138,7 +1139,9 @@ class QuerySet(Generic[_M]):
                     rows = []
             except Exception as exc:
                 duration_ms = (time.monotonic() - t0) * 1000
-                mapped = map_db_error(exc, context={"model": model_name, "operation": "bulk_insert"})
+                mapped = map_db_error(
+                    exc, context={"model": model_name, "operation": "bulk_insert"}
+                )
                 _hooks.query_failure(
                     fingerprint=fingerprint,
                     duration_ms=duration_ms,
@@ -1147,9 +1150,7 @@ class QuerySet(Generic[_M]):
                 raise mapped from None
             duration_ms = (time.monotonic() - t0) * 1000
             if returning:
-                batch_instances = [
-                    self._model.model_construct(**_row_to_dict(row)) for row in rows
-                ]
+                batch_instances = [self._model.model_construct(**_row_to_dict(row)) for row in rows]
                 created.extend(batch_instances)
                 _hooks.query_success(
                     fingerprint=fingerprint,
@@ -1242,7 +1243,9 @@ class QuerySet(Generic[_M]):
                 result: str = await driver.execute(sql_text, *bound_params)
             except Exception as exc:
                 duration_ms = (time.monotonic() - t0) * 1000
-                mapped = map_db_error(exc, context={"model": model_name, "operation": "bulk_update"})
+                mapped = map_db_error(
+                    exc, context={"model": model_name, "operation": "bulk_update"}
+                )
                 _hooks.query_failure(
                     fingerprint=fingerprint,
                     duration_ms=duration_ms,
@@ -1312,7 +1315,9 @@ class QuerySet(Generic[_M]):
                 result: str = await driver.execute(sql_text, *bound_params)
             except Exception as exc:
                 duration_ms = (time.monotonic() - t0) * 1000
-                mapped = map_db_error(exc, context={"model": model_name, "operation": "bulk_delete"})
+                mapped = map_db_error(
+                    exc, context={"model": model_name, "operation": "bulk_delete"}
+                )
                 _hooks.query_failure(
                     fingerprint=fingerprint,
                     duration_ms=duration_ms,
@@ -1338,7 +1343,7 @@ class QuerySet(Generic[_M]):
 
     def _build_upsert_sql(
         self,
-        metadata: "ModelMetadata",
+        metadata: ModelMetadata,
         values: dict[str, Any],
         *,
         conflict_fields: list[str],
@@ -1366,13 +1371,10 @@ class QuerySet(Generic[_M]):
             placeholders.append(f"${i}")
             bound.append(fval)
 
-        conflict_cols = ", ".join(
-            f'"{field_by_name[cf].column_name}"' for cf in conflict_fields
-        )
+        conflict_cols = ", ".join(f'"{field_by_name[cf].column_name}"' for cf in conflict_fields)
 
         insert_part = (
-            f"INSERT INTO {table} ({', '.join(col_names)}) "
-            f"VALUES ({', '.join(placeholders)})"
+            f"INSERT INTO {table} ({', '.join(col_names)}) VALUES ({', '.join(placeholders)})"
         )
 
         if update_fields is None:
@@ -1391,9 +1393,7 @@ class QuerySet(Generic[_M]):
                 f'"{field_by_name[uf].column_name}" = EXCLUDED."{field_by_name[uf].column_name}"'
                 for uf in update_fields
             ]
-            conflict_clause = (
-                f"ON CONFLICT ({conflict_cols}) DO UPDATE SET {', '.join(set_parts)}"
-            )
+            conflict_clause = f"ON CONFLICT ({conflict_cols}) DO UPDATE SET {', '.join(set_parts)}"
 
         sql = f"{insert_part} {conflict_clause}"
         if returning:
@@ -1403,13 +1403,13 @@ class QuerySet(Generic[_M]):
 
     async def upsert(
         self,
-        conn: "ConnectionLike",
+        conn: ConnectionLike,
         *,
         conflict_fields: list[str],
         update_fields: list[str] | None = None,
         returning: bool = True,
         **values: Any,  # noqa: ANN401
-    ) -> "_M | None":
+    ) -> _M | None:
         """Insert a row or update it on conflict (``INSERT … ON CONFLICT … DO UPDATE``).
 
         Args:
@@ -1509,14 +1509,14 @@ class QuerySet(Generic[_M]):
 
     async def bulk_upsert(
         self,
-        conn: "ConnectionLike",
-        objects: "Sequence[_M | dict[str, Any]]",
+        conn: ConnectionLike,
+        objects: Sequence[_M | dict[str, Any]],
         *,
         conflict_fields: list[str],
         update_fields: list[str] | None = None,
         batch_size: int = 1000,
         returning: bool = False,
-    ) -> "list[_M] | int":
+    ) -> list[_M] | int:
         """Upsert many rows in batched ``INSERT … ON CONFLICT`` statements.
 
         Args:
@@ -1878,7 +1878,7 @@ class QuerySet(Generic[_M]):
     # Terminal coroutines (async) — require open Connection
     # ------------------------------------------------------------------
 
-    async def all(self, conn: ConnectionLike) -> list[_M]:
+    async def all(self, conn: ConnectionLike) -> list[_M] | list[dict[str, Any]] | list[Any]:
         """Fetch all matching rows and return model instances.
 
         Compiles the QuerySet IR via the Rust extension, executes the
@@ -1950,7 +1950,8 @@ class QuerySet(Generic[_M]):
         if self._select_related and metadata is not None:
             from ferrum.relations import build_join_ir, set_relation, split_joined_row
 
-            joins = [build_join_ir(metadata, n, {f.name: i for i, f in enumerate(metadata.fields)}) for n in self._select_related]
+            field_index = {f.name: i for i, f in enumerate(metadata.fields)}
+            joins = [build_join_ir(metadata, n, field_index) for n in self._select_related]
             for inst, row in zip(instances, rows, strict=True):
                 row_dict = _row_to_dict(row)
                 related = split_joined_row(row_dict, joins)
@@ -1983,7 +1984,7 @@ class QuerySet(Generic[_M]):
         if _native_ext is None:
             raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
         results = await self.limit(1).all(conn)
-        return results[0] if results else None
+        return cast(_M, results[0]) if results else None
 
     async def get(self, conn: ConnectionLike, **kwargs: Any) -> _M:  # noqa: ANN401
         """Fetch exactly one matching row, applying optional extra filters.
@@ -2013,7 +2014,7 @@ class QuerySet(Generic[_M]):
                 f"get() returned more than one {model_name}. "
                 "Use filter() to narrow the query. [FERR-Q405]"
             )
-        return results[0]
+        return cast(_M, results[0])
 
     async def count(self, conn: ConnectionLike) -> int:
         """Return the count of rows matching the current filters.

@@ -132,13 +132,12 @@ pub fn compile(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<CompiledQuer
                     });
                 }
                 for (field_ref, _value) in row {
-                    metadata
-                        .fields
-                        .get(field_ref.index)
-                        .ok_or_else(|| CompileError::UnknownField {
+                    metadata.fields.get(field_ref.index).ok_or_else(|| {
+                        CompileError::UnknownField {
                             model: metadata.model_name.clone(),
                             field: field_ref.name.clone(),
-                        })?;
+                        }
+                    })?;
                 }
             }
         }
@@ -285,14 +284,18 @@ pub fn ir_has_where_clause(ir: &QuerySetIR) -> bool {
     !ir.filters.is_empty() || ir.predicate.is_some()
 }
 
-fn validate_filter(metadata: &ModelMetadata, filter: &crate::ir::Filter) -> Result<(), CompileError> {
-    let field_meta = metadata
-        .fields
-        .get(filter.field.index)
-        .ok_or_else(|| CompileError::UnknownField {
-            model: metadata.model_name.clone(),
-            field: filter.field.name.clone(),
-        })?;
+fn validate_filter(
+    metadata: &ModelMetadata,
+    filter: &crate::ir::Filter,
+) -> Result<(), CompileError> {
+    let field_meta =
+        metadata
+            .fields
+            .get(filter.field.index)
+            .ok_or_else(|| CompileError::UnknownField {
+                model: metadata.model_name.clone(),
+                field: filter.field.name.clone(),
+            })?;
 
     if !field_meta.allowed_operators.contains(&filter.operator) {
         return Err(CompileError::UnsupportedOperator {

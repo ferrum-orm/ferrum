@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import ClassVar
 
 from ferrum.cli import sqlmigrate_cmd
 from ferrum.migrations.base import Migration
@@ -11,10 +12,13 @@ from ferrum.migrations.operations import Column, CreateTable
 
 def test_sqlmigrate_renders_create_table(tmp_path: Path) -> None:
     class InitMigration(Migration):
-        operations = [
+        operations: ClassVar[list] = [
             CreateTable(
                 "widgets",
-                [Column("id", "BIGSERIAL", primary_key=True), Column("name", "TEXT", not_null=True)],
+                [
+                    Column("id", "BIGSERIAL", primary_key=True),
+                    Column("name", "TEXT", not_null=True),
+                ],
             ),
         ]
 

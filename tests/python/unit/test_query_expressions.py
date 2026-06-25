@@ -66,8 +66,10 @@ class TestCompileWithNative:
         assert "SELECT DISTINCT" in compiled["sql_text"]
 
     def test_exists_compiles(self, require_native: None) -> None:
-        compiled = QuerySet(Note).filter(published=True)._compile_ir(
-            QuerySet(Note).filter(published=True)._build_exists_ir()
+        compiled = (
+            QuerySet(Note)
+            .filter(published=True)
+            ._compile_ir(QuerySet(Note).filter(published=True)._build_exists_ir())
         )
         assert compiled["sql_text"].startswith("SELECT EXISTS(")
 

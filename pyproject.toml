@@ -117,12 +117,14 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "ANN"]  # asserts and missing annotations are fine in tests
+"tests/**" = ["S101", "ANN", "N806"]  # asserts and missing annotations are fine in tests
 "python/ferrum/cli/app.py" = ["B008"]  # Typer Option/Argument in parameter defaults
 "python/ferrum/drivers/**" = ["ANN401", "SIM117", "S608"]  # driver boundary; table names from compiler allowlists
 "python/ferrum/migrations/ledger.py" = ["S608"]  # LEDGER_TABLE is a fixed constant identifier
 "python/ferrum/cli/resetdb_cmd.py" = ["S608"]  # LEDGER_TABLE is a fixed constant
-"python/ferrum/ext/pgvector.py" = ["S608"]  # identifiers from metadata allowlists; values are bound params
+"python/ferrum/ext/pgvector.py" = ["S608"]
+"python/ferrum/relations.py" = ["S608"]
+"python/ferrum/queryset.py" = ["S608"]  # identifiers from metadata allowlists; values are bound params
 
 # ---------------------------------------------------------------------------
 # ty
@@ -135,7 +137,7 @@ extra-paths = ["python"]
 include = ["python/ferrum"]
 
 [tool.ty.analysis]
-allowed-unresolved-imports = ["asyncpg.**", "asyncmy.**", "aiosqlite.**", "testcontainers.**"]
+allowed-unresolved-imports = ["asyncpg.**", "asyncmy.**", "aiosqlite.**", "testcontainers.**", "opentelemetry.**"]
 
 # ---------------------------------------------------------------------------
 # pytest

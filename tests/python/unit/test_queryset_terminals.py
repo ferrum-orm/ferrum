@@ -10,6 +10,7 @@ These tests run without the native Rust extension built, verifying:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -212,9 +213,7 @@ class TestFERRUM_DATABASE_URL:  # noqa: N801
 
     def test_missing_dsn_and_env_raises_config_error(self) -> None:
         env = {
-            k: v
-            for k, v in os.environ.items()
-            if k not in {"FERRUM_DATABASE_URL", "DATABASE_URL"}
+            k: v for k, v in os.environ.items() if k not in {"FERRUM_DATABASE_URL", "DATABASE_URL"}
         }
         with (
             patch.dict(os.environ, env, clear=True),
@@ -232,9 +231,7 @@ class TestFERRUM_DATABASE_URL:  # noqa: N801
 
     def test_config_error_message_contains_env_var_name(self) -> None:
         env = {
-            k: v
-            for k, v in os.environ.items()
-            if k not in {"FERRUM_DATABASE_URL", "DATABASE_URL"}
+            k: v for k, v in os.environ.items() if k not in {"FERRUM_DATABASE_URL", "DATABASE_URL"}
         }
         with patch.dict(os.environ, env, clear=True), pytest.raises(FerrumConfigError) as exc_info:
             Connection()
@@ -243,15 +240,13 @@ class TestFERRUM_DATABASE_URL:  # noqa: N801
     def test_config_error_does_not_contain_dsn_value(self) -> None:
         """Error message must never include the DSN value (CRED-1)."""
         env = {
-            k: v
-            for k, v in os.environ.items()
-            if k not in {"FERRUM_DATABASE_URL", "DATABASE_URL"}
+            k: v for k, v in os.environ.items() if k not in {"FERRUM_DATABASE_URL", "DATABASE_URL"}
         }
         with patch.dict(os.environ, env, clear=True), pytest.raises(FerrumConfigError) as exc_info:
             Connection()
         assert "postgresql://" not in str(exc_info.value)
 
-    def test_uses_database_url_env_from_ferrum_toml(self, tmp_path: pathlib.Path) -> None:
+    def test_uses_database_url_env_from_ferrum_toml(self, tmp_path: Path) -> None:
         dsn = "postgresql://from-toml@host/db"
         (tmp_path / "ferrum.toml").write_text('[ferrum]\ndatabase_url_env = "DATABASE_URL"\n')
         env = {k: v for k, v in os.environ.items() if k != "FERRUM_DATABASE_URL"}

@@ -281,7 +281,11 @@ async def test_run_revert_with_target_reverts_migrations_after_target(
     monkeypatch.setattr(revert_cmd, "connect", lambda: _FakeConnect(fake_conn))
     monkeypatch.setattr(revert_cmd._ledger, "ensure_ledger", AsyncMock(return_value=None))
     monkeypatch.setattr(revert_cmd._loader, "scan", lambda migrations_dir: [mod1, mod2])
-    monkeypatch.setattr(revert_cmd._ledger, "is_applied", AsyncMock(side_effect=is_applied_side_effect))
+    monkeypatch.setattr(
+        revert_cmd._ledger,
+        "is_applied",
+        AsyncMock(side_effect=is_applied_side_effect),
+    )
     monkeypatch.setattr(revert_cmd._ledger, "verify_checksum", AsyncMock(return_value=None))
     monkeypatch.setattr(revert_cmd._ledger, "delete_applied", delete_mock)
 

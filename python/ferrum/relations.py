@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
+from ferrum.connection import ConnectionLike
 from ferrum.errors import FerrumCompileError, FerrumRelationNotLoadedError
+from ferrum.models import Model
 from ferrum.registry import get_model
 
 if TYPE_CHECKING:
-    from ferrum.connection import ConnectionLike
     from ferrum.models import Model, ModelMetadata, RelationMeta
 
 
@@ -83,7 +84,7 @@ class _ForwardRelationDescriptor:
     def __get__(self, obj: object, owner: type | None = None) -> Any:  # noqa: ANN401
         if obj is None:
             return self
-        return get_loaded_relation(obj, self.field_name)  # type: ignore[arg-type]
+        return get_loaded_relation(cast(Model, obj), self.field_name)
 
 
 class _ReverseRelationDescriptor:
@@ -93,7 +94,7 @@ class _ReverseRelationDescriptor:
     def __get__(self, obj: object, owner: type | None = None) -> Any:  # noqa: ANN401
         if obj is None:
             return self
-        cache = relation_cache(obj)  # type: ignore[arg-type]
+        cache = relation_cache(cast(Model, obj))
         if self._meta.accessor in cache:
             return cache[self._meta.accessor]
         if self._meta.kind == "m2m":
@@ -162,7 +163,9 @@ def build_join_ir(
     }
 
 
-def split_joined_row(row_dict: dict[str, Any], joins: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def split_joined_row(
+    row_dict: dict[str, Any], joins: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
     """Split flat JOIN columns ``alias__col`` into per-relation row dicts."""
     result: dict[str, dict[str, Any]] = {}
     for join in joins:
@@ -176,7 +179,9 @@ def split_joined_row(row_dict: dict[str, Any], joins: list[dict[str, Any]]) -> d
     return result
 
 
-def resolve_prefetch_name(metadata: ModelMetadata, name: str) -> tuple[str, RelationMeta | ReverseRelationMeta]:
+def resolve_prefetch_name(
+    metadata: ModelMetadata, name: str
+) -> tuple[str, RelationMeta | ReverseRelationMeta]:
     """Resolve a prefetch name to forward M2M or reverse relation metadata."""
     for rel in metadata.relations:
         if rel.field_name == name:
@@ -218,10 +223,24 @@ async def prefetch_related_objects(
     for name in prefetch_names:
         kind, meta = resolve_prefetch_name(metadata, name)
         if kind == "m2m":
-            await _prefetch_m2m(instances, metadata, meta, name, parent_ids, pk_name, conn)  # type: ignore[arg-type]
+            await _prefetch_m2m(
+                instances,
+                metadata,
+                cast(RelationMeta, meta),
+                name,
+                parent_ids,
+                pk_name,
+                conn,
+            )
         elif kind == "reverse":
             await _prefetch_reverse_fk(
-                instances, metadata, meta, name, parent_ids, pk_name, conn  # type: ignore[arg-type]
+                instances,
+                metadata,
+                cast(ReverseRelationMeta, meta),
+                name,
+                parent_ids,
+                pk_name,
+                conn,
             )
 
 
@@ -238,15 +257,12 @@ async def _prefetch_reverse_fk(
     related_meta = related_model.get_metadata()
     driver = conn._require_driver()
     placeholders = ", ".join(f"${i}" for i in range(1, len(parent_ids) + 1))
-    sql = (
-        f'SELECT * FROM "{related_meta.table_name}" '
-        f'WHERE "{rev.fk_column}" IN ({placeholders})'
-    )
+    sql = f'SELECT * FROM "{related_meta.table_name}" WHERE "{rev.fk_column}" IN ({placeholders})'
     raw_rows = await driver.fetch(sql, *parent_ids)
     grouped: dict[Any, list[Any]] = {pid: [] for pid in parent_ids}
     for raw in raw_rows:
         row_dict = dict(raw) if hasattr(raw, "keys") else raw
-        obj = related_model.model_construct(**{k: row_dict[k] for k in row_dict.keys()})
+        obj = related_model.model_construct(**{k: row_dict[k] for k in row_dict})
         fk_val = getattr(obj, rev.fk_column, None)
         if fk_val in grouped:
             grouped[fk_val].append(obj)

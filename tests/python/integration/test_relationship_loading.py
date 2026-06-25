@@ -64,14 +64,17 @@ async def test_select_related_populates_author(
     Author = _author_model(author_table)
     Post = _post_model(post_table, Author.__name__)
 
-    async with transient_table(
-        pg_conn,
-        create_sql=_AUTHOR.format(t=author_table),
-        drop_sql=f'DROP TABLE "{author_table}"',
-    ), transient_table(
-        pg_conn,
-        create_sql=_POST.format(t=post_table, a=author_table),
-        drop_sql=f'DROP TABLE "{post_table}"',
+    async with (
+        transient_table(
+            pg_conn,
+            create_sql=_AUTHOR.format(t=author_table),
+            drop_sql=f'DROP TABLE "{author_table}"',
+        ),
+        transient_table(
+            pg_conn,
+            create_sql=_POST.format(t=post_table, a=author_table),
+            drop_sql=f'DROP TABLE "{post_table}"',
+        ),
     ):
         author = await Author.objects.create(pg_conn, email="a@example.com")
         post = await Post.objects.create(pg_conn, author_id=author.id, title="hello")
@@ -89,14 +92,17 @@ async def test_prefetch_related_populates_reverse_posts(
     Author = _author_model(author_table)
     Post = _post_model(post_table, Author.__name__)
 
-    async with transient_table(
-        pg_conn,
-        create_sql=_AUTHOR.format(t=author_table),
-        drop_sql=f'DROP TABLE "{author_table}"',
-    ), transient_table(
-        pg_conn,
-        create_sql=_POST.format(t=post_table, a=author_table),
-        drop_sql=f'DROP TABLE "{post_table}"',
+    async with (
+        transient_table(
+            pg_conn,
+            create_sql=_AUTHOR.format(t=author_table),
+            drop_sql=f'DROP TABLE "{author_table}"',
+        ),
+        transient_table(
+            pg_conn,
+            create_sql=_POST.format(t=post_table, a=author_table),
+            drop_sql=f'DROP TABLE "{post_table}"',
+        ),
     ):
         author = await Author.objects.create(pg_conn, email="u@example.com")
         await Post.objects.create(pg_conn, author_id=author.id, title="one")

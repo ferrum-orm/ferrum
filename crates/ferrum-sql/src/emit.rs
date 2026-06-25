@@ -60,7 +60,10 @@ pub fn emit_select(
         let alias = dialect.quote_ident(&join.alias);
         for rf in &join.remote_fields {
             let col = dialect.quote_ident(&rf.column);
-            select_parts.push(format!("{alias}.{col} AS \"{}__{}\"", join.alias, rf.column));
+            select_parts.push(format!(
+                "{alias}.{col} AS \"{}__{}\"",
+                join.alias, rf.column
+            ));
         }
     }
     let fields = select_parts.join(", ");
@@ -253,7 +256,8 @@ pub fn emit_update(
 
     let mut sql = format!("UPDATE {table} SET {}", set_clauses.join(", "));
     if !where_clauses.is_empty() {
-        write!(sql, " WHERE {}", where_clauses.join(" AND ")).expect("write to String is infallible");
+        write!(sql, " WHERE {}", where_clauses.join(" AND "))
+            .expect("write to String is infallible");
     }
     if dialect.supports_returning() {
         write!(sql, " RETURNING {returning}").expect("write to String is infallible");
@@ -404,7 +408,11 @@ pub fn emit_bulk_update(
     let mut param_type_summary: Vec<String> = Vec::new();
 
     let col_names: Vec<&str> = std::iter::once(pk_name.as_str())
-        .chain(fields.iter().map(|f| metadata.fields[f.index].column_name.as_str()))
+        .chain(
+            fields
+                .iter()
+                .map(|f| metadata.fields[f.index].column_name.as_str()),
+        )
         .collect();
 
     let mut value_rows: Vec<String> = Vec::new();
@@ -508,12 +516,7 @@ fn returning_all_fields(dialect: Dialect, metadata: &ModelMetadata) -> String {
         .join(", ")
 }
 
-fn qualify_base_column(
-    dialect: Dialect,
-    table: &str,
-    column_name: &str,
-    qualify: bool,
-) -> String {
+fn qualify_base_column(dialect: Dialect, table: &str, column_name: &str, qualify: bool) -> String {
     let col = dialect.quote_ident(column_name);
     if qualify {
         format!("{table}.{col}")
@@ -717,13 +720,18 @@ fn emit_predicate(
 }
 
 /// Build a WHERE predicate and optional bound parameter for a filter.
+///
+/// `field_type` is used to dispatch type-specific operators (array `@>`,
+/// JSONB `?`, etc.) that share a name like `"contains"` with text operators.
 fn filter_clause(
     dialect: Dialect,
     col: &str,
     operator: &str,
+    field_type: ferrum_core::ir::metadata::FieldType,
     param_index: usize,
     value: BindValue,
 ) -> (String, Option<BindValue>) {
+    use ferrum_core::ir::metadata::FieldType;
     match operator {
         "is_null" => (format!("{col} IS NULL"), None),
         "is_not_null" => (format!("{col} IS NOT NULL"), None),
@@ -738,6 +746,56 @@ fn filter_clause(
                 Some(value),
             )
         }
+        // Array containment operators.
+        "contains"
+            if matches!(
+                field_type,
+                FieldType::ArrayText
+                    | FieldType::ArrayInt
+                    | FieldType::ArrayUuid
+                    | FieldType::ArrayFloat
+            ) =>
+        {
+            let placeholder = dialect.placeholder(param_index);
+            (format!("{col} @> {placeholder}"), Some(value))
+        }
+        "contained_by"
+            if matches!(
+                field_type,
+                FieldType::ArrayText
+                    | FieldType::ArrayInt
+                    | FieldType::ArrayUuid
+                    | FieldType::ArrayFloat
+            ) =>
+        {
+            let placeholder = dialect.placeholder(param_index);
+            (format!("{col} <@ {placeholder}"), Some(value))
+        }
+        "overlap"
+            if matches!(
+                field_type,
+                FieldType::ArrayText
+                    | FieldType::ArrayInt
+                    | FieldType::ArrayUuid
+                    | FieldType::ArrayFloat
+            ) =>
+        {
+            let placeholder = dialect.placeholder(param_index);
+            (format!("{col} && {placeholder}"), Some(value))
+        }
+        // JSONB operators.
+        "contains" if field_type == FieldType::Json => {
+            let placeholder = dialect.placeholder(param_index);
+            (format!("{col} @> {placeholder}"), Some(value))
+        }
+        "has_key" if field_type == FieldType::Json => {
+            let placeholder = dialect.placeholder(param_index);
+            (format!("{col} ? {placeholder}"), Some(value))
+        }
+        "has_any_keys" if field_type == FieldType::Json => {
+            let placeholder = dialect.placeholder(param_index);
+            (format!("{col} ?| {placeholder}"), Some(value))
+        }
         op => {
             let placeholder = dialect.placeholder(param_index);
             let sql_op = operator_to_sql(op, dialect);
@@ -746,7 +804,10 @@ fn filter_clause(
     }
 }
 
-fn postgres_value_cast(field_type: ferrum_core::ir::metadata::FieldType, placeholder: &str) -> String {
+fn postgres_value_cast(
+    field_type: ferrum_core::ir::metadata::FieldType,
+    placeholder: &str,
+) -> String {
     use ferrum_core::ir::metadata::FieldType;
     let cast = match field_type {
         FieldType::Int | FieldType::BigInt => "bigint",

@@ -57,9 +57,7 @@ async def test_retry_policy_retries_deadlock() -> None:
     from ferrum.runtime import RuntimeConfig
 
     guard = _LifecycleGuard()
-    executor = TimedQueryExecutor(
-        inner, runtime=RuntimeConfig(retry=policy), lifecycle=guard
-    )
+    executor = TimedQueryExecutor(inner, runtime=RuntimeConfig(retry=policy), lifecycle=guard)
     assert await executor.fetchval("SELECT 1") == 1
     assert inner.calls == 2
 

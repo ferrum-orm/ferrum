@@ -83,9 +83,7 @@ async def set_config(tx: Transaction, name: str, value: str) -> None:
     await driver.execute(f"SELECT set_config('{name}', $1, true)", value)
 
 
-async def current_setting(
-    tx: Transaction, name: str, *, missing_ok: bool = True
-) -> str | None:
+async def current_setting(tx: Transaction, name: str, *, missing_ok: bool = True) -> str | None:
     """Read a GUC value from the current transaction context.
 
     Args:
@@ -106,9 +104,7 @@ async def current_setting(
     driver = tx._require_driver()
     # GUC name is allowlist-validated above.
     # missing_ok is a bool bound parameter — not user-controlled SQL.
-    result = await driver.fetchval(
-        f"SELECT current_setting('{name}', $1::boolean)", missing_ok
-    )
+    result = await driver.fetchval(f"SELECT current_setting('{name}', $1::boolean)", missing_ok)
     if result is None or result == "":
         return None
     return str(result)

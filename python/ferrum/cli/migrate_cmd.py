@@ -74,7 +74,7 @@ async def run_migrate(
                         for table, diff in drift_report.column_diffs.items():
                             for col in diff.get("missing_columns", []):
                                 print(f"  - missing column: {table}.{col}")
-            except Exception:
+            except Exception:  # noqa: S110 — schema drift hint is best-effort only
                 pass
 
             # Pair each module with its content-keyed digest and filter applied.

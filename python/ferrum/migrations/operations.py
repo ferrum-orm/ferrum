@@ -552,10 +552,7 @@ class CreatePolicy(Operation):
         if self.role is not None:
             extras.append(f"role={self.role!r}")
         extra_str = (", " + ", ".join(extras)) if extras else ""
-        return (
-            f"CreatePolicy({self.policy_name!r}, {self.table_name!r}, "
-            f"{self.using!r}{extra_str})"
-        )
+        return f"CreatePolicy({self.policy_name!r}, {self.table_name!r}, {self.using!r}{extra_str})"
 
 
 class DropPolicy(Operation):

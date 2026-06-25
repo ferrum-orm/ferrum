@@ -513,6 +513,10 @@ class Transaction:
         return [dict(row) for row in rows]
 
 
+# Shared by QuerySet terminals and relation prefetch helpers.
+ConnectionLike = Connection | Transaction
+
+
 @contextlib.asynccontextmanager
 async def connect(
     dsn: str | None = None,
