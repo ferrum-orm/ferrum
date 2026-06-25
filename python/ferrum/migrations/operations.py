@@ -73,16 +73,28 @@ class Column:
 class CreateTable(Operation):
     """Create a new table with the given columns."""
 
-    def __init__(self, table_name: str, columns: list[Column]) -> None:
+    def __init__(
+        self,
+        table_name: str,
+        columns: list[Column],
+        *,
+        composite_pk_columns: list[str] | None = None,
+    ) -> None:
         self.table_name = table_name
         self.columns = columns
+        self.composite_pk_columns = (
+            list(composite_pk_columns) if composite_pk_columns is not None else None
+        )
 
     def to_op_dict(self) -> dict[str, Any]:
-        return {
+        op: dict[str, Any] = {
             "kind": "create_table",
             "table": self.table_name,
             "columns": [c.to_col_dict() for c in self.columns],
         }
+        if self.composite_pk_columns:
+            op["composite_pk_columns"] = list(self.composite_pk_columns)
+        return op
 
     @property
     def classification(self) -> str:

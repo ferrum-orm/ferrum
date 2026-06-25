@@ -50,7 +50,7 @@ pub struct QuerySetIR {
     #[serde(default)]
     pub predicate: Option<Predicate>,
 
-    /// Emit ``SELECT DISTINCT`` (PostgreSQL).
+    /// Emit ``SELECT DISTINCT`` (`PostgreSQL`).
     #[serde(default)]
     pub distinct: bool,
 
@@ -63,7 +63,7 @@ pub struct QuerySetIR {
     pub joins: Vec<JoinSpec>,
 }
 
-/// JOIN metadata for ``select_related`` (PostgreSQL LEFT JOIN).
+/// JOIN metadata for ``select_related`` (`PostgreSQL` LEFT JOIN).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinSpec {
     pub relation: String,
@@ -108,20 +108,25 @@ pub enum Operation {
     BulkInsert {
         /// Each inner vec is one row: ``(FieldRef, BindValue)`` pairs in column order.
         rows: Vec<Vec<(FieldRef, BindValue)>>,
-        /// When ``true``, emit ``RETURNING *`` (PostgreSQL).
+        /// When ``true``, emit ``RETURNING *`` (`PostgreSQL`).
         #[serde(default = "default_true")]
         returning: bool,
     },
     /// PK-keyed multi-row UPDATE (``QuerySet.bulk_update``).
+    /// ``pk_fields`` carries one entry per PK column (composite PK support).
     BulkUpdate {
-        pk_field: FieldRef,
+        /// All PK fields in definition order (one for single-PK, many for composite).
+        pk_fields: Vec<FieldRef>,
         fields: Vec<FieldRef>,
         rows: Vec<BulkUpdateRow>,
     },
     /// PK-keyed multi-row DELETE (``QuerySet.bulk_delete``).
+    /// Each element of ``ids`` is a parallel vec of values, one per PK field.
     BulkDelete {
-        pk_field: FieldRef,
-        ids: Vec<BindValue>,
+        /// All PK fields in definition order.
+        pk_fields: Vec<FieldRef>,
+        /// Each inner vec is one row's PK values in ``pk_fields`` order.
+        ids: Vec<Vec<BindValue>>,
     },
 }
 
@@ -130,9 +135,11 @@ fn default_true() -> bool {
 }
 
 /// One row payload for :variant:`Operation::BulkUpdate`.
+/// ``pk_values`` has one entry per PK field (single entry for single-PK models).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkUpdateRow {
-    pub pk: BindValue,
+    /// PK column values in the same order as ``BulkUpdate::pk_fields``.
+    pub pk_values: Vec<BindValue>,
     pub values: Vec<BindValue>,
 }
 
@@ -224,4 +231,8 @@ pub enum BindValue {
     Datetime(String),
     /// pgvector query vector — list of f64 components.
     FloatArray(Vec<f64>),
+    /// `PostgreSQL` text[] array parameter.
+    TextArray(Vec<String>),
+    /// `PostgreSQL` integer[] array parameter.
+    IntArray(Vec<i64>),
 }

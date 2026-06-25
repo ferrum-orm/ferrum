@@ -50,6 +50,7 @@ fn bench_metadata() -> ModelMetadata {
             },
         ],
         pk_index: 0,
+        pk_fields: vec![0],
     }
 }
 

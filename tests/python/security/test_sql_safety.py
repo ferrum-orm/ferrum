@@ -66,8 +66,8 @@ class TestSQL1UnknownFieldRejection:
         for field_name in allowed:
             qs = QuerySet(_User).filter(**{field_name: "x"})
             ir = qs._build_ir()
-            assert ir["filters"][0]["field"]["name"] == field_name
-            assert isinstance(ir["filters"][0]["field"]["index"], int)
+            assert ir["predicate"]["filter"]["field"]["name"] == field_name
+            assert isinstance(ir["predicate"]["filter"]["field"]["index"], int)
 
         # A field not declared on the model is always rejected.
         # Single-underscore join avoids the Django-style __ separator so

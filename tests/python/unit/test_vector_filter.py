@@ -23,9 +23,11 @@ class TestVectorBindEncoding:
         encoded = _encode_bind_value([0.1, 0.2, 0.3])
         assert encoded == {"type": "float_array", "value": [0.1, 0.2, 0.3]}
 
-    def test_int_list_encodes_as_float_array(self) -> None:
+    def test_int_list_encodes_as_int_array(self) -> None:
+        # A list of Python ints maps to int_array (INTEGER[] column filter).
+        # Vector nearest-to queries should use float lists, e.g. [1.0, 2.0, 3.0].
         encoded = _encode_bind_value([1, 2, 3])
-        assert encoded == {"type": "float_array", "value": [1.0, 2.0, 3.0]}
+        assert encoded == {"type": "int_array", "value": [1, 2, 3]}
 
 
 class TestNearestToIr:

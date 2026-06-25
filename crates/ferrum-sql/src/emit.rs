@@ -25,6 +25,7 @@ use std::fmt::Write as _;
 ///
 /// # Errors
 /// Propagates `CompileError` from allowlist validation or malformed IR.
+#[allow(clippy::too_many_lines)]
 pub fn emit_select(
     dialect: Dialect,
     metadata: &ModelMetadata,
@@ -316,6 +317,9 @@ pub fn emit_delete(
 }
 
 /// Emit a multi-row parameterized INSERT from a `QuerySetIR`.
+///
+/// # Errors
+/// Returns [`CompileError`] if field validation fails or the IR is malformed.
 pub fn emit_bulk_insert(
     dialect: Dialect,
     metadata: &ModelMetadata,
@@ -375,7 +379,14 @@ pub fn emit_bulk_insert(
     })
 }
 
-/// Emit a PK-keyed multi-row UPDATE (PostgreSQL ``UPDATE … FROM (VALUES …)``).
+/// Emit a PK-keyed multi-row UPDATE (`PostgreSQL` `UPDATE … FROM (VALUES …)`).
+///
+/// Supports composite PKs: when `pk_fields` has multiple entries the WHERE clause
+/// keys on all PK columns joined with `AND`.
+///
+/// # Errors
+/// Returns [`CompileError`] if field validation fails, the IR is malformed, or
+/// the dialect is not `Postgres`.
 pub fn emit_bulk_update(
     dialect: Dialect,
     metadata: &ModelMetadata,
@@ -384,7 +395,7 @@ pub fn emit_bulk_update(
     ferrum_core::compile::compile(metadata, ir)?;
 
     let ferrum_core::ir::Operation::BulkUpdate {
-        pk_field,
+        pk_fields,
         fields,
         rows,
     } = &ir.operation
@@ -400,31 +411,41 @@ pub fn emit_bulk_update(
         });
     }
 
+    if pk_fields.is_empty() {
+        return Err(CompileError::MalformedIr {
+            reason: "BulkUpdate requires at least one pk_field".into(),
+        });
+    }
+
     let table = dialect.quote_ident(&metadata.table_name);
-    let pk_col = dialect.quote_ident(&metadata.fields[pk_field.index].column_name);
-    let pk_name = &metadata.fields[pk_field.index].column_name;
 
     let mut bound_params: Vec<BindValue> = Vec::new();
     let mut param_type_summary: Vec<String> = Vec::new();
 
-    let col_names: Vec<&str> = std::iter::once(pk_name.as_str())
-        .chain(
-            fields
-                .iter()
-                .map(|f| metadata.fields[f.index].column_name.as_str()),
-        )
+    // VALUES column list: PK columns first, then update columns.
+    let pk_col_names: Vec<&str> = pk_fields
+        .iter()
+        .map(|pf| metadata.fields[pf.index].column_name.as_str())
         .collect();
+    let update_col_names: Vec<&str> = fields
+        .iter()
+        .map(|f| metadata.fields[f.index].column_name.as_str())
+        .collect();
+    let mut all_col_names: Vec<&str> = pk_col_names.clone();
+    all_col_names.extend_from_slice(&update_col_names);
 
     let mut value_rows: Vec<String> = Vec::new();
     for row in rows {
         let mut placeholders: Vec<String> = Vec::new();
-        let ph_pk = dialect.placeholder(bound_params.len() + 1);
-        placeholders.push(postgres_value_cast(
-            metadata.fields[pk_field.index].field_type,
-            &ph_pk,
-        ));
-        param_type_summary.push(format!("{}:bulk_update_pk", pk_field.name));
-        bound_params.push(row.pk.clone());
+        for (pk_field_ref, pk_val) in pk_fields.iter().zip(row.pk_values.iter()) {
+            let ph = dialect.placeholder(bound_params.len() + 1);
+            placeholders.push(postgres_value_cast(
+                metadata.fields[pk_field_ref.index].field_type,
+                &ph,
+            ));
+            param_type_summary.push(format!("{}:bulk_update_pk", pk_field_ref.name));
+            bound_params.push(pk_val.clone());
+        }
         for (field_ref, value) in fields.iter().zip(row.values.iter()) {
             let ph = dialect.placeholder(bound_params.len() + 1);
             placeholders.push(postgres_value_cast(
@@ -446,12 +467,23 @@ pub fn emit_bulk_update(
         })
         .collect();
 
+    // WHERE clause: AND over all PK columns.
+    let where_parts: Vec<String> = pk_fields
+        .iter()
+        .map(|pf| {
+            let t_col = dialect.quote_ident(&metadata.fields[pf.index].column_name);
+            let v_name = &metadata.fields[pf.index].column_name;
+            format!("t.{t_col} = v.{v_name}")
+        })
+        .collect();
+    let where_clause = where_parts.join(" AND ");
+
     let sql = format!(
-        "UPDATE {table} AS t SET {sets} FROM (VALUES {rows}) AS v({cols}) WHERE t.{pk_col} = v.{pk_name}",
+        "UPDATE {table} AS t SET {sets} FROM (VALUES {rows}) AS v({cols}) WHERE {where_clause}",
         sets = set_clauses.join(", "),
         rows = value_rows.join(", "),
-        cols = col_names.join(", "),
-        pk_name = pk_name,
+        cols = all_col_names.join(", "),
+        where_clause = where_clause,
     );
     let fingerprint = sql_fingerprint(&sql);
 
@@ -463,7 +495,13 @@ pub fn emit_bulk_update(
     })
 }
 
-/// Emit a PK-keyed multi-row DELETE (``WHERE pk IN ($1, $2, …)``).
+/// Emit a PK-keyed multi-row DELETE.
+///
+/// Single-PK models emit `WHERE pk IN ($1, $2, …)`.
+/// Composite-PK models emit `WHERE (pk1, pk2) IN (($1, $2), ($3, $4), …)`.
+///
+/// # Errors
+/// Returns [`CompileError`] if field validation fails or the IR is malformed.
 pub fn emit_bulk_delete(
     dialect: Dialect,
     metadata: &ModelMetadata,
@@ -471,29 +509,62 @@ pub fn emit_bulk_delete(
 ) -> Result<CompiledQuery, CompileError> {
     ferrum_core::compile::compile(metadata, ir)?;
 
-    let ferrum_core::ir::Operation::BulkDelete { pk_field, ids } = &ir.operation else {
+    let ferrum_core::ir::Operation::BulkDelete { pk_fields, ids } = &ir.operation else {
         return Err(CompileError::MalformedIr {
             reason: "emit_bulk_delete called with non-BulkDelete operation".into(),
         });
     };
 
-    let table = dialect.quote_ident(&metadata.table_name);
-    let pk_col = dialect.quote_ident(&metadata.fields[pk_field.index].column_name);
-    let mut bound_params: Vec<BindValue> = Vec::new();
-    let mut param_type_summary: Vec<String> = Vec::new();
-    let mut placeholders: Vec<String> = Vec::new();
-
-    for id in ids {
-        let ph = dialect.placeholder(bound_params.len() + 1);
-        placeholders.push(ph);
-        param_type_summary.push(format!("{}:bulk_delete", pk_field.name));
-        bound_params.push(id.clone());
+    if pk_fields.is_empty() {
+        return Err(CompileError::MalformedIr {
+            reason: "BulkDelete requires at least one pk_field".into(),
+        });
     }
 
-    let sql = format!(
-        "DELETE FROM {table} WHERE {pk_col} IN ({placeholders})",
-        placeholders = placeholders.join(", "),
-    );
+    let table = dialect.quote_ident(&metadata.table_name);
+    let mut bound_params: Vec<BindValue> = Vec::new();
+    let mut param_type_summary: Vec<String> = Vec::new();
+
+    let sql = if pk_fields.len() == 1 {
+        // Single-PK fast path: WHERE pk IN ($1, $2, …)
+        let pk_col = dialect.quote_ident(&metadata.fields[pk_fields[0].index].column_name);
+        let mut placeholders: Vec<String> = Vec::new();
+        for row_id in ids {
+            let id = row_id.first().ok_or_else(|| CompileError::MalformedIr {
+                reason: "BulkDelete id row is empty".into(),
+            })?;
+            let ph = dialect.placeholder(bound_params.len() + 1);
+            placeholders.push(ph);
+            param_type_summary.push(format!("{}:bulk_delete", pk_fields[0].name));
+            bound_params.push(id.clone());
+        }
+        format!(
+            "DELETE FROM {table} WHERE {pk_col} IN ({placeholders})",
+            placeholders = placeholders.join(", "),
+        )
+    } else {
+        // Composite-PK path: WHERE (pk1, pk2) IN (($1, $2), ($3, $4), …)
+        let pk_cols: Vec<String> = pk_fields
+            .iter()
+            .map(|pf| dialect.quote_ident(&metadata.fields[pf.index].column_name))
+            .collect();
+        let pk_tuple = format!("({})", pk_cols.join(", "));
+        let mut row_placeholders: Vec<String> = Vec::new();
+        for row_id in ids {
+            let mut phs: Vec<String> = Vec::new();
+            for (pk_field_ref, val) in pk_fields.iter().zip(row_id.iter()) {
+                let ph = dialect.placeholder(bound_params.len() + 1);
+                phs.push(ph);
+                param_type_summary.push(format!("{}:bulk_delete", pk_field_ref.name));
+                bound_params.push(val.clone());
+            }
+            row_placeholders.push(format!("({})", phs.join(", ")));
+        }
+        format!(
+            "DELETE FROM {table} WHERE {pk_tuple} IN ({rows})",
+            rows = row_placeholders.join(", "),
+        )
+    };
     let fingerprint = sql_fingerprint(&sql);
 
     Ok(CompiledQuery {
@@ -525,6 +596,7 @@ fn qualify_base_column(dialect: Dialect, table: &str, column_name: &str, qualify
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_order_limit_offset(
     dialect: Dialect,
     metadata: &ModelMetadata,
@@ -757,7 +829,7 @@ fn postgres_value_cast(
     let cast = match field_type {
         FieldType::Int | FieldType::BigInt => "bigint",
         FieldType::Float | FieldType::Decimal => "double precision",
-        FieldType::Text | FieldType::Uuid | FieldType::TsVector => "text",
+        FieldType::Text | FieldType::Uuid | FieldType::TsVector | FieldType::Enum => "text",
         FieldType::Bool => "boolean",
         FieldType::Datetime => "timestamptz",
         FieldType::Date => "date",
@@ -765,6 +837,9 @@ fn postgres_value_cast(
         FieldType::Json => "jsonb",
         FieldType::Bytes => "bytea",
         FieldType::Vector => "vector",
+        FieldType::ArrayText | FieldType::ArrayUuid => "text[]",
+        FieldType::ArrayInt => "bigint[]",
+        FieldType::ArrayFloat => "double precision[]",
     };
     format!("{placeholder}::{cast}")
 }
@@ -844,6 +919,7 @@ mod tests {
                 },
             ],
             pk_index: 0,
+            pk_fields: vec![0],
         }
     }
 

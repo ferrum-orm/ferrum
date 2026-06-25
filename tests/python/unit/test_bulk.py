@@ -49,7 +49,7 @@ class TestBulkIrBuilders:
             ["name"],
         )
         assert ir["operation"]["kind"] == "bulk_update"
-        assert ir["operation"]["pk_field"]["name"] == "id"
+        assert ir["operation"]["pk_fields"][0]["name"] == "id"
         assert len(ir["operation"]["rows"]) == 2
 
     def test_build_bulk_delete_ir_shape(self) -> None:

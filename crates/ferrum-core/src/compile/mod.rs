@@ -118,82 +118,13 @@ pub fn compile(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<CompiledQuer
                 });
             }
         }
-        Operation::BulkInsert { rows, .. } => {
-            if rows.is_empty() {
-                return Err(CompileError::MalformedIr {
-                    reason: "bulk_insert requires at least one row".into(),
-                });
-            }
-            let first_len = rows[0].len();
-            for row in rows {
-                if row.len() != first_len {
-                    return Err(CompileError::MalformedIr {
-                        reason: "bulk_insert rows must share the same columns".into(),
-                    });
-                }
-                for (field_ref, _value) in row {
-                    metadata.fields.get(field_ref.index).ok_or_else(|| {
-                        CompileError::UnknownField {
-                            model: metadata.model_name.clone(),
-                            field: field_ref.name.clone(),
-                        }
-                    })?;
-                }
-            }
-        }
+        Operation::BulkInsert { rows, .. } => validate_bulk_insert(metadata, rows)?,
         Operation::BulkUpdate {
-            pk_field,
+            pk_fields,
             fields,
             rows,
-        } => {
-            if rows.is_empty() {
-                return Err(CompileError::MalformedIr {
-                    reason: "bulk_update requires at least one row".into(),
-                });
-            }
-            if fields.is_empty() {
-                return Err(CompileError::MalformedIr {
-                    reason: "bulk_update requires at least one field".into(),
-                });
-            }
-            metadata
-                .fields
-                .get(pk_field.index)
-                .ok_or_else(|| CompileError::UnknownField {
-                    model: metadata.model_name.clone(),
-                    field: pk_field.name.clone(),
-                })?;
-            for field_ref in fields {
-                metadata
-                    .fields
-                    .get(field_ref.index)
-                    .ok_or_else(|| CompileError::UnknownField {
-                        model: metadata.model_name.clone(),
-                        field: field_ref.name.clone(),
-                    })?;
-            }
-            for row in rows {
-                if row.values.len() != fields.len() {
-                    return Err(CompileError::MalformedIr {
-                        reason: "bulk_update row value count must match fields".into(),
-                    });
-                }
-            }
-        }
-        Operation::BulkDelete { pk_field, ids } => {
-            if ids.is_empty() {
-                return Err(CompileError::MalformedIr {
-                    reason: "bulk_delete requires at least one id".into(),
-                });
-            }
-            metadata
-                .fields
-                .get(pk_field.index)
-                .ok_or_else(|| CompileError::UnknownField {
-                    model: metadata.model_name.clone(),
-                    field: pk_field.name.clone(),
-                })?;
-        }
+        } => validate_bulk_update(metadata, pk_fields, fields, rows)?,
+        Operation::BulkDelete { pk_fields, ids } => validate_bulk_delete(metadata, pk_fields, ids)?,
     }
 
     // Validate all field references in filters before touching SQL.
@@ -205,6 +136,21 @@ pub fn compile(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<CompiledQuer
         validate_predicate(metadata, predicate)?;
     }
 
+    validate_joins(metadata, ir)?;
+    validate_order_by(metadata, ir)?;
+    validate_vector_order_by(metadata, ir)?;
+
+    // Validation passed. Return empty CompiledQuery — sql_text and bound_params
+    // are populated by the SQL emitter in `ferrum-sql::emit`.
+    Ok(CompiledQuery {
+        sql_text: String::new(),
+        bound_params: Vec::new(),
+        param_type_summary: Vec::new(),
+        fingerprint: String::new(),
+    })
+}
+
+fn validate_joins(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<(), CompileError> {
     for join in &ir.joins {
         metadata
             .fields
@@ -219,8 +165,10 @@ pub fn compile(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<CompiledQuer
             });
         }
     }
+    Ok(())
+}
 
-    // Validate ORDER BY field indices and sort directions before touching SQL.
+fn validate_order_by(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<(), CompileError> {
     for order in &ir.order_by {
         metadata
             .fields
@@ -229,7 +177,6 @@ pub fn compile(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<CompiledQuer
                 model: metadata.model_name.clone(),
                 field: order.field.name.clone(),
             })?;
-
         // The `Unknown` variant is produced by serde when the JSON direction
         // string is neither "asc" nor "desc". Reject it here before SQL exists.
         if order.direction == SortDirection::Unknown {
@@ -240,17 +187,117 @@ pub fn compile(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<CompiledQuer
             });
         }
     }
+    Ok(())
+}
 
-    validate_vector_order_by(metadata, ir)?;
+fn validate_bulk_insert(
+    metadata: &ModelMetadata,
+    rows: &[Vec<(crate::ir::FieldRef, BindValue)>],
+) -> Result<(), CompileError> {
+    if rows.is_empty() {
+        return Err(CompileError::MalformedIr {
+            reason: "bulk_insert requires at least one row".into(),
+        });
+    }
+    let first_len = rows[0].len();
+    for row in rows {
+        if row.len() != first_len {
+            return Err(CompileError::MalformedIr {
+                reason: "bulk_insert rows must share the same columns".into(),
+            });
+        }
+        for (field_ref, _value) in row {
+            metadata
+                .fields
+                .get(field_ref.index)
+                .ok_or_else(|| CompileError::UnknownField {
+                    model: metadata.model_name.clone(),
+                    field: field_ref.name.clone(),
+                })?;
+        }
+    }
+    Ok(())
+}
 
-    // Validation passed. Return empty CompiledQuery — sql_text and bound_params
-    // are populated by the SQL emitter in `ferrum-sql::emit`.
-    Ok(CompiledQuery {
-        sql_text: String::new(),
-        bound_params: Vec::new(),
-        param_type_summary: Vec::new(),
-        fingerprint: String::new(),
-    })
+fn validate_bulk_update(
+    metadata: &ModelMetadata,
+    pk_fields: &[crate::ir::FieldRef],
+    fields: &[crate::ir::FieldRef],
+    rows: &[crate::ir::BulkUpdateRow],
+) -> Result<(), CompileError> {
+    if rows.is_empty() {
+        return Err(CompileError::MalformedIr {
+            reason: "bulk_update requires at least one row".into(),
+        });
+    }
+    if fields.is_empty() {
+        return Err(CompileError::MalformedIr {
+            reason: "bulk_update requires at least one field".into(),
+        });
+    }
+    if pk_fields.is_empty() {
+        return Err(CompileError::MalformedIr {
+            reason: "bulk_update requires at least one pk_field".into(),
+        });
+    }
+    for pk_field_ref in pk_fields {
+        metadata
+            .fields
+            .get(pk_field_ref.index)
+            .ok_or_else(|| CompileError::UnknownField {
+                model: metadata.model_name.clone(),
+                field: pk_field_ref.name.clone(),
+            })?;
+    }
+    for field_ref in fields {
+        metadata
+            .fields
+            .get(field_ref.index)
+            .ok_or_else(|| CompileError::UnknownField {
+                model: metadata.model_name.clone(),
+                field: field_ref.name.clone(),
+            })?;
+    }
+    for row in rows {
+        if row.values.len() != fields.len() {
+            return Err(CompileError::MalformedIr {
+                reason: "bulk_update row value count must match fields".into(),
+            });
+        }
+        if row.pk_values.len() != pk_fields.len() {
+            return Err(CompileError::MalformedIr {
+                reason: "bulk_update row pk_values count must match pk_fields".into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_bulk_delete(
+    metadata: &ModelMetadata,
+    pk_fields: &[crate::ir::FieldRef],
+    ids: &[Vec<BindValue>],
+) -> Result<(), CompileError> {
+    if ids.is_empty() {
+        return Err(CompileError::MalformedIr {
+            reason: "bulk_delete requires at least one id".into(),
+        });
+    }
+    if pk_fields.is_empty() {
+        return Err(CompileError::MalformedIr {
+            reason: "bulk_delete requires at least one pk_field".into(),
+        });
+    }
+    for pk_field_ref in pk_fields {
+        metadata
+            .fields
+            .get(pk_field_ref.index)
+            .ok_or_else(|| CompileError::UnknownField {
+                model: metadata.model_name.clone(),
+                field: pk_field_ref.name.clone(),
+            })?;
+    }
+    Ok(())
 }
 
 fn validate_vector_order_by(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<(), CompileError> {
@@ -271,15 +318,21 @@ fn validate_vector_order_by(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result
             operator: "nearest_to".into(),
         });
     }
-    if !matches!(vector_order.value, BindValue::FloatArray(_)) {
+    // Accept both float_array (canonical vector type) and int_array (integer
+    // dims encoded by _encode_bind_value when the caller passes a list[int]).
+    if !matches!(
+        vector_order.value,
+        BindValue::FloatArray(_) | BindValue::IntArray(_)
+    ) {
         return Err(CompileError::MalformedIr {
-            reason: "vector_order_by.value must be float_array".into(),
+            reason: "vector_order_by.value must be float_array or int_array".into(),
         });
     }
     Ok(())
 }
 
 /// True when the IR carries at least one WHERE constraint (flat filters or a predicate tree).
+#[must_use]
 pub fn ir_has_where_clause(ir: &QuerySetIR) -> bool {
     !ir.filters.is_empty() || ir.predicate.is_some()
 }
@@ -351,6 +404,7 @@ mod tests {
                 },
             ],
             pk_index: 0,
+            pk_fields: vec![0],
         }
     }
 

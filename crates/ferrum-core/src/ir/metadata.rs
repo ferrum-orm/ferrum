@@ -21,8 +21,14 @@ pub struct ModelMetadata {
     /// Ordered list of field descriptors. `FieldRef::index` addresses this list.
     pub fields: Vec<FieldMeta>,
 
-    /// Primary key field index (into `fields`).
+    /// Primary key field index (into `fields`). Legacy single-PK alias.
+    /// For composite PKs use `pk_fields`; `pk_index` is `pk_fields[0]`.
     pub pk_index: usize,
+
+    /// All primary-key field indices (into `fields`) in definition order.
+    /// Empty vec is treated as `[pk_index]` for backward compatibility.
+    #[serde(default)]
+    pub pk_fields: Vec<usize>,
 }
 
 /// Metadata for a single model field.
@@ -68,6 +74,16 @@ pub enum FieldType {
     Vector,
     #[serde(alias = "tsvector")]
     TsVector,
+    /// `PostgreSQL` TEXT[] column.
+    ArrayText,
+    /// `PostgreSQL` INTEGER[] column.
+    ArrayInt,
+    /// `PostgreSQL` UUID[] column (elements serialized as text strings).
+    ArrayUuid,
+    /// `PostgreSQL` FLOAT8[] column.
+    ArrayFloat,
+    /// Enum stored as TEXT with a CHECK constraint.
+    Enum,
 }
 
 impl ModelMetadata {
@@ -78,5 +94,18 @@ impl ModelMetadata {
     #[must_use]
     pub fn query_fingerprint(&self, operation: &str) -> String {
         format!("{}:{}", operation, self.model_name)
+    }
+
+    /// Returns the effective PK field indices.
+    ///
+    /// Uses `pk_fields` if non-empty; falls back to `[pk_index]` for backward
+    /// compatibility with metadata serialized without `pk_fields`.
+    #[must_use]
+    pub fn effective_pk_fields(&self) -> Vec<usize> {
+        if self.pk_fields.is_empty() {
+            vec![self.pk_index]
+        } else {
+            self.pk_fields.clone()
+        }
     }
 }

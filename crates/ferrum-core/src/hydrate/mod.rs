@@ -108,6 +108,7 @@ mod tests {
                 },
             ],
             pk_index: 0,
+            pk_fields: vec![0],
         }
     }
 

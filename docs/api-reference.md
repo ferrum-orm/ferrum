@@ -158,16 +158,34 @@ the connection.
 
 #### Operators by field type
 
-| Field type                           | Allowed operators                                                                      |
-| ------------------------------------ | -------------------------------------------------------------------------------------- |
-| `int`, `big_int`, `float`, `decimal` | `eq ne gt gte lt lte in is_null range`                                                 |
-| `text`                               | `eq ne iexact contains icontains startswith endswith istartswith iendswith in is_null` |
-| `datetime`, `date`, `time`           | `eq ne gt gte lt lte is_null range`                                                    |
-| `bool`                               | `eq ne is_null`                                                                        |
-| `uuid`, `bytes`                      | `eq ne in is_null`                                                                     |
-| `json`                               | `eq is_null`                                                                           |
-| `vector`                             | `is_null` (KNN via `nearest_to`)                                                       |
-| `tsvector`                           | `match is_null`                                                                        |
+| Field type                                              | Allowed operators                                                                      |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `int`, `big_int`, `float`, `decimal`                    | `eq ne gt gte lt lte in is_null range`                                                 |
+| `text`                                                  | `eq ne iexact contains icontains startswith endswith istartswith iendswith in is_null` |
+| `datetime`, `date`, `time`                              | `eq ne gt gte lt lte is_null range`                                                    |
+| `bool`                                                  | `eq ne is_null`                                                                        |
+| `uuid`, `bytes`                                         | `eq ne in is_null`                                                                     |
+| `json`                                                  | `eq is_null contains has_key has_any_keys`                                             |
+| `array_text`, `array_int`, `array_uuid`, `array_float`  | `eq is_null contains contained_by overlap`                                             |
+| `enum`                                                  | `eq ne in is_null`                                                                     |
+| `vector`                                                | `is_null` (KNN via `nearest_to`)                                                       |
+| `tsvector`                                              | `match is_null`                                                                        |
+
+**Array operator SQL mapping** (`field__op=value`):
+
+| Operator       | PostgreSQL SQL emitted          | Notes                                           |
+| -------------- | ------------------------------- | ----------------------------------------------- |
+| `contains`     | `col @> $1`                     | Array contains all elements in `$1`             |
+| `contained_by` | `col <@ $1`                     | Array is a subset of `$1`                       |
+| `overlap`      | `col && $1`                     | Array shares at least one element with `$1`     |
+
+**JSONB operator SQL mapping** (`field__op=value`):
+
+| Operator       | PostgreSQL SQL emitted          | Notes                                           |
+| -------------- | ------------------------------- | ----------------------------------------------- |
+| `contains`     | `col @> $1`                     | JSONB column contains the JSON sub-document     |
+| `has_key`      | `col ? $1`                      | JSONB column has top-level key `$1`             |
+| `has_any_keys` | `col ?| $1`                     | JSONB column has any of the keys in array `$1`  |
 
 An unsupported operator for a field raises `FerrumCompileError` before SQL emission.
 
