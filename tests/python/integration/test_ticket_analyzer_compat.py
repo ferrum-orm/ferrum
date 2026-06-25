@@ -125,6 +125,7 @@ $$;"""
             f"idx_{ticket_table}_emb_hnsw",
             ["summary_embedding"],
             using="hnsw",
+            opclasses=["vector_cosine_ops"],
         ),
         ops.CreateTable(
             issue_table,

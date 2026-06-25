@@ -41,6 +41,7 @@ class Migration(Migration):
             "idx_ta_compat_tickets_summary_embedding_hnsw",
             ["summary_embedding"],
             using="hnsw",
+            opclasses=["vector_cosine_ops"],
         ),
         ops.CreateTable(
             "ta_compat_issues",
