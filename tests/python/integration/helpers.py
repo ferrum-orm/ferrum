@@ -30,7 +30,7 @@ async def transient_table(
 
 def raw_pool(pg_conn: Connection):
     """Return the underlying asyncpg pool, asserting it is open."""
-    pool = getattr(pg_conn._require_driver(), "_pool", None)
+    pool = getattr(pg_conn._driver, "_pool", None)
     assert pool is not None
     return pool
 

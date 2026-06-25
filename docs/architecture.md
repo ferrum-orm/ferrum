@@ -179,6 +179,21 @@ and defaults are validated against fixed allowlists before interpolation.
 | `ferrum-sql` | `crates/ferrum-sql/` | SQL emitter (PostgreSQL dialect). |
 | `ferrum-migrate` | `crates/ferrum-migrate/` | Migration planning support. |
 
-The IR crossing the boundary is **typed, versioned, and serializable** (governed by ADR-002),
+The IR crossing the boundary is **typed, versioned, and serializable** (ADR-002 resolved),
 with identifiers carried out-of-band from values so parameterization and allowlisting are
 structural, not conventional.
+
+---
+
+## Architecture decisions (ADRs)
+
+All original ADRs are resolved. The table below records the decisions for reference.
+
+| ADR | Topic | Resolution |
+|-----|-------|-----------|
+| ADR-001 | PostgreSQL driver placement | Python-side `asyncpg` (`ferrum.drivers.postgres`; `ferrum-orm[pg]`). |
+| ADR-002 | QuerySet → Rust IR contract | IR v2 JSON contract (`crates/ferrum-core/src/ir/`); versioned via `QuerySet._IR_VERSION`. |
+| ADR-003 | Hydration semantics | `model_construct` (construct-without-revalidate) fast path; trusted DB-origin rows. Custom-validator caveat documented. |
+| ADR-004 | Migration transactionality | Transactional by default; `non_transactional` classification in `operations.py` for `CREATE INDEX CONCURRENTLY` and certain `ALTER TYPE`/enum ops. |
+| ADR-005 | Packaging / CI wheel matrix | maturin + cibuildwheel abi3 wheels; `release.yml` publishes to PyPI via OIDC on `v*` tag push. |
+| ADR-006 | Centralized error/hook redaction | `errors.py` (`map_db_error`/`map_native_error`); Tier A/B/C hook payloads in `hooks.py`. |

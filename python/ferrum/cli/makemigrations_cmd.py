@@ -162,6 +162,19 @@ def _op_to_source(op: dict[str, Any]) -> str:
             f"on_delete={op.get('on_delete', 'CASCADE')!r}),"
         )
 
+    if kind == "alter_column":
+        flags: list[str] = []
+        if op.get("sql_type") is not None:
+            flags.append(f"sql_type={op['sql_type']!r}")
+        if op.get("not_null") is not None:
+            flags.append(f"not_null={op['not_null']!r}")
+        if op.get("default") is not None:
+            flags.append(f"default={op['default']!r}")
+        if op.get("drop_default"):
+            flags.append("drop_default=True")
+        extra = (", " + ", ".join(flags)) if flags else ""
+        return f"        ops.AlterColumn({op['table']!r}, {op['column']!r}{extra}),"
+
     raise ValueError(f"Cannot render op kind {kind!r} to Python source")
 
 

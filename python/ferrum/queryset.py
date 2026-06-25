@@ -20,6 +20,7 @@ import importlib
 import json
 import time
 import types
+from collections.abc import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 from uuid import UUID
@@ -35,6 +36,7 @@ from ferrum.errors import (
     map_db_error,
     map_native_error,
 )
+from ferrum.expressions import Q, args_to_q
 
 if TYPE_CHECKING:
     from ferrum.connection import Connection, Transaction
@@ -53,7 +55,7 @@ with contextlib.suppress(ImportError):
     _native_ext = importlib.import_module("ferrum._native")
 
 # IR version — must stay in sync with ferrum-core IR_VERSION (crates/ferrum-core/src/ir/mod.rs).
-_IR_VERSION: int = 1
+_IR_VERSION: int = 2
 
 _EXT_NOT_BUILT_MSG = (
     "ferrum._native extension not built. "
@@ -91,9 +93,24 @@ def _encode_bind_value(value: object) -> dict[str, object]:
         return {"type": "datetime", "value": value.isoformat()}
     if isinstance(value, UUID):
         return {"type": "text", "value": str(value)}
-    if isinstance(value, list) and value and all(isinstance(v, (int, float)) for v in value):
-        floats: list[float] = [float(v) for v in value if isinstance(v, (int, float))]
-        return {"type": "float_array", "value": floats}
+    if isinstance(value, list):
+        if not value:
+            # Empty list: default to text_array; asyncpg infers type from column.
+            return {"type": "text_array", "value": []}
+        # Check element type to select array variant.
+        first = next((v for v in value if v is not None), None)
+        if first is not None and isinstance(first, (int, float)) and not isinstance(first, bool):
+            # pgvector float array (used by nearest_to) or int/float array column
+            if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value):
+                # Distinguish int_array vs float_array by element type
+                if all(isinstance(v, int) and not isinstance(v, bool) for v in value):
+                    return {"type": "int_array", "value": [int(v) for v in value]}
+                floats: list[float] = [float(v) for v in value]
+                return {"type": "float_array", "value": floats}
+        if first is not None and isinstance(first, UUID):
+            return {"type": "text_array", "value": [str(v) for v in value]}
+        # Default: text array (covers list[str] and mixed/unknown types)
+        return {"type": "text_array", "value": [str(v) if not isinstance(v, str) else v for v in value]}
     return {"type": "text", "value": str(value)}
 
 
@@ -125,6 +142,10 @@ def _decode_bound_param(param_json: str) -> object:
             return str(val)
     if typ == "float_array":
         return [float(v) for v in val]
+    if typ == "text_array":
+        return [str(v) for v in val]
+    if typ == "int_array":
+        return [int(v) for v in val]
     return val
 
 
@@ -158,11 +179,115 @@ class _RowEncoder(json.JSONEncoder):
         return super().default(o)
 
 
+def _parse_lookup(lookup: str) -> tuple[str, str]:
+    if "__" in lookup:
+        field_name, operator = lookup.rsplit("__", 1)
+        return field_name, operator
+    return lookup, "eq"
+
+
+def _validate_lookup(
+    field_name: str,
+    operator: str,
+    metadata: ModelMetadata,
+    *,
+    field_index: dict[str, int],
+) -> None:
+    if field_name not in field_index:
+        raise FerrumCompileError(
+            f"Unknown field {field_name!r} on model {metadata.model_name!r}.",
+            model=metadata.model_name,
+            field=field_name,
+        )
+    allowed_ops = metadata.fields[field_index[field_name]].allowed_operators
+    if operator not in allowed_ops:
+        raise FerrumCompileError(
+            f"Operator {operator!r} is not supported for field {field_name!r} "
+            f"on model {metadata.model_name!r}.",
+            model=metadata.model_name,
+            field=field_name,
+            operator=operator,
+        )
+
+
+def _filter_dict_to_ir(
+    flt: dict[str, Any],
+    metadata: ModelMetadata,
+    field_index: dict[str, int],
+) -> dict[str, Any]:
+    field_name: str = flt["field"]
+    operator: str = flt["operator"]
+    _validate_lookup(field_name, operator, metadata, field_index=field_index)
+    return {
+        "field": {"index": field_index[field_name], "name": field_name},
+        "operator": operator,
+        "value": _encode_bind_value(flt["value"]),
+    }
+
+
+def _kwargs_to_ir_filters(
+    kwargs: dict[str, Any],
+    metadata: ModelMetadata,
+    field_index: dict[str, int],
+) -> list[dict[str, Any]]:
+    leaves: list[dict[str, Any]] = []
+    for lookup, value in kwargs.items():
+        field_name, operator = _parse_lookup(lookup)
+        _validate_lookup(field_name, operator, metadata, field_index=field_index)
+        leaves.append(
+            {
+                "kind": "filter",
+                "filter": {
+                    "field": {"index": field_index[field_name], "name": field_name},
+                    "operator": operator,
+                    "value": _encode_bind_value(value),
+                },
+            }
+        )
+    return leaves
+
+
+def _q_to_predicate(
+    q: Q,
+    metadata: ModelMetadata,
+    field_index: dict[str, int],
+) -> dict[str, Any]:
+    def walk(node: Q) -> dict[str, Any]:
+        children_ir: list[dict[str, Any]] = []
+        for child in node.children:
+            if isinstance(child, Q):
+                children_ir.append(walk(child))
+            elif isinstance(child, dict):
+                leaves = _kwargs_to_ir_filters(child, metadata, field_index)
+                if len(leaves) == 1:
+                    children_ir.append(leaves[0])
+                else:
+                    children_ir.append({"kind": "and", "children": leaves})
+            else:
+                msg = f"Unsupported Q child type: {type(child)!r}."
+                raise TypeError(msg)
+        if not children_ir:
+            raise FerrumCompileError(
+                f"Empty Q object on model {metadata.model_name!r}.",
+                model=metadata.model_name,
+            )
+        if len(children_ir) == 1:
+            inner = children_ir[0]
+        else:
+            inner = {"kind": node.connector, "children": children_ir}
+        if node.negated:
+            return {"kind": "not", "child": inner}
+        return inner
+
+    return walk(q)
+
+
 def _hydrate_rows(
     model: type[_M],
     rows: list[Any],
     *,
     fingerprint: str = "",
+    deferred: frozenset[str] | None = None,
 ) -> list[_M]:
     """Convert DB rows to model instances (ADR-003 trusted path).
 
@@ -201,7 +326,11 @@ def _hydrate_rows(
                 )
                 raise mapped from exc
 
-    return [model.model_construct(**row) for row in row_dicts]
+    instances = [model.model_construct(**row) for row in row_dicts]
+    if deferred:
+        for inst in instances:
+            object.__setattr__(inst, "__ferrum_deferred__", deferred)
+    return instances
 
 
 class QuerySet(Generic[_M]):
@@ -223,37 +352,126 @@ class QuerySet(Generic[_M]):
         self._offset: int | None = None
         self._is_filtered: bool = False
         self._vector_order_by: dict[str, Any] | None = None
+        self._predicate_q: Q | None = None
+        self._distinct: bool = False
+        self._only_fields: tuple[str, ...] | None = None
+        self._defer_fields: frozenset[str] = frozenset()
+        self._result_type: Literal["models", "values", "values_list"] = "models"
+        self._values_flat: bool = False
+        self._select_related: tuple[str, ...] = ()
+        self._prefetch_related: tuple[str, ...] = ()
 
     # ------------------------------------------------------------------
     # Chaining methods (return new QuerySet — no I/O, no SQL)
     # ------------------------------------------------------------------
 
-    def filter(self, **kwargs: Any) -> QuerySet[_M]:  # noqa: ANN401
-        """Add equality/lookup filter(s). Returns a new QuerySet.
+    def filter(self, *args: Q | dict[str, Any], **kwargs: Any) -> QuerySet[_M]:  # noqa: ANN401
+        """Add filter(s), including ``Q`` boolean trees. Returns a new QuerySet.
 
         Uses Django-style ``field__operator=value`` syntax; bare ``field=value``
         is the ``eq`` lookup. Field names are validated against the model
         metadata allowlist at call time (Stage 0 first gate, QUERY_ENGINE.md §6).
         """
+        q = args_to_q(*args, **kwargs)
+        if q is None:
+            return self._clone()
         qs = self._clone()
         metadata = self._get_metadata()
-        allowed_fields = {f.name for f in metadata.fields} if metadata is not None else set()
-        for lookup, value in kwargs.items():
-            if "__" in lookup:
-                field_name, operator = lookup.rsplit("__", 1)
-            else:
-                field_name = lookup
-                operator = "eq"
-            if metadata is not None and field_name not in allowed_fields:
-                raise FerrumCompileError(
-                    f"Unknown field {field_name!r} on model {metadata.model_name!r}.",
-                    model=metadata.model_name,
-                    field=field_name,
-                )
-            qs._filters.append({"field": field_name, "operator": operator, "value": value})
-        if kwargs:
-            qs._is_filtered = True
+        if metadata is not None:
+            field_index = {f.name: i for i, f in enumerate(metadata.fields)}
+            _q_to_predicate(q, metadata, field_index)
+        qs._predicate_q = q if qs._predicate_q is None else qs._predicate_q & q
+        qs._is_filtered = True
         return qs
+
+    def exclude(self, *args: Q | dict[str, Any], **kwargs: Any) -> QuerySet[_M]:  # noqa: ANN401
+        """Exclude rows matching the given lookups (``~Q(...)``)."""
+        q = args_to_q(*args, **kwargs)
+        if q is None:
+            return self._clone()
+        return self.filter(~q)
+
+    def distinct(self) -> QuerySet[_M]:
+        """Return a QuerySet that emits ``SELECT DISTINCT``."""
+        qs = self._clone()
+        qs._distinct = True
+        return qs
+
+    def only(self, *fields: str) -> QuerySet[_M]:
+        """Limit SELECT columns; deferred fields raise on access."""
+        qs = self._clone()
+        qs._only_fields = fields
+        qs._defer_fields = frozenset()
+        return qs
+
+    def defer(self, *fields: str) -> QuerySet[_M]:
+        """Defer loading of the given fields."""
+        qs = self._clone()
+        qs._defer_fields = frozenset(fields)
+        qs._only_fields = None
+        return qs
+
+    def values(self, *fields: str) -> QuerySet[_M]:
+        """Return rows as dicts instead of model instances."""
+        qs = self._clone()
+        qs._result_type = "values"
+        if fields:
+            qs._only_fields = fields
+        return qs
+
+    def values_list(self, *fields: str, flat: bool = False) -> QuerySet[_M]:
+        """Return rows as tuples (or a flat list when ``flat=True`` and one field)."""
+        qs = self._clone()
+        qs._result_type = "values_list"
+        qs._values_flat = flat
+        if fields:
+            qs._only_fields = fields
+        return qs
+
+    def select_related(self, *relations: str) -> QuerySet[_M]:
+        """Eager-load to-one relations via JOIN (ForeignKey / OneToOne)."""
+        qs = self._clone()
+        metadata = self._get_metadata()
+        if metadata is not None:
+            for name in relations:
+                from ferrum.relations import resolve_relation
+
+                rel = resolve_relation(metadata, name)
+                if rel.kind not in ("fk", "one_to_one"):
+                    raise FerrumCompileError(
+                        f"select_related() only supports ForeignKey and OneToOne; "
+                        f"{name!r} is {rel.kind!r}. Use prefetch_related() instead.",
+                        model=metadata.model_name,
+                        field=name,
+                    )
+        qs._select_related = qs._select_related + relations
+        return qs
+
+    def prefetch_related(self, *relations: str) -> QuerySet[_M]:
+        """Eager-load to-many / M2M / reverse FK via batched queries."""
+        qs = self._clone()
+        metadata = self._get_metadata()
+        if metadata is not None:
+            from ferrum.relations import resolve_prefetch_name
+
+            for name in relations:
+                resolve_prefetch_name(metadata, name)
+        qs._prefetch_related = qs._prefetch_related + relations
+        return qs
+
+    def __getitem__(self, key: slice | int) -> QuerySet[_M]:
+        if isinstance(key, slice):
+            qs = self
+            start = key.start if key.start is not None else 0
+            stop = key.stop
+            if key.start is not None:
+                qs = qs.offset(start)
+            if stop is not None:
+                limit = stop - start if key.start is not None else stop
+                qs = qs.limit(limit)
+            return qs
+        msg = "QuerySet indices must be slices."
+        raise TypeError(msg)
 
     def order_by(self, *fields: str) -> QuerySet[_M]:
         """Set ORDER BY. Prefix field with '-' for DESC. Returns a new QuerySet."""
@@ -350,37 +568,21 @@ class QuerySet(Generic[_M]):
 
         field_index: dict[str, int] = {f.name: i for i, f in enumerate(metadata.fields)}
 
-        # SELECT operation: project all fields (projection subset is a Wave 2 concern).
-        select_fields = [{"index": i, "name": f.name} for i, f in enumerate(metadata.fields)]
+        select_names = self._resolve_select_field_names(metadata)
+        for name in select_names:
+            if name not in field_index:
+                raise FerrumCompileError(
+                    f"Unknown field {name!r} on model {metadata.model_name!r}.",
+                    model=metadata.model_name,
+                    field=name,
+                )
+        select_fields = [{"index": field_index[name], "name": name} for name in select_names]
         operation: dict[str, Any] = {"kind": "select", "fields": select_fields}
 
         # Filters — validate field names and operators against allowlists.
         ir_filters: list[dict[str, Any]] = []
         for flt in self._filters:
-            field_name: str = flt["field"]
-            operator: str = flt["operator"]
-            if field_name not in field_index:
-                raise FerrumCompileError(
-                    f"Unknown field {field_name!r} on model {metadata.model_name!r}.",
-                    model=metadata.model_name,
-                    field=field_name,
-                )
-            allowed_ops = metadata.fields[field_index[field_name]].allowed_operators
-            if operator not in allowed_ops:
-                raise FerrumCompileError(
-                    f"Operator {operator!r} is not supported for field {field_name!r} "
-                    f"on model {metadata.model_name!r}.",
-                    model=metadata.model_name,
-                    field=field_name,
-                    operator=operator,
-                )
-            ir_filters.append(
-                {
-                    "field": {"index": field_index[field_name], "name": field_name},
-                    "operator": operator,
-                    "value": _encode_bind_value(flt["value"]),
-                }
-            )
+            ir_filters.append(_filter_dict_to_ir(flt, metadata, field_index))
 
         # Order by — validate field names and sort directions against allowlists.
         ir_order_by: list[dict[str, Any]] = []
@@ -414,10 +616,44 @@ class QuerySet(Generic[_M]):
             "order_by": ir_order_by,
             "limit": self._limit,
             "offset": self._offset,
+            "distinct": self._distinct,
+            "exists": False,
         }
+        if self._predicate_q is not None:
+            ir["predicate"] = _q_to_predicate(self._predicate_q, metadata, field_index)
+        if self._select_related:
+            from ferrum.relations import build_join_ir
+
+            ir["joins"] = [
+                build_join_ir(metadata, name, field_index) for name in self._select_related
+            ]
+        else:
+            ir["joins"] = []
         if self._vector_order_by is not None:
             ir["vector_order_by"] = self._vector_order_by
         return ir
+
+    def _build_exists_ir(self) -> dict[str, Any]:
+        """Build IR for ``exists()`` — ``SELECT EXISTS(subquery)``."""
+        ir = self._build_ir()
+        ir["exists"] = True
+        return ir
+
+    def _resolve_select_field_names(self, metadata: ModelMetadata) -> list[str]:
+        all_names = [f.name for f in metadata.fields]
+        if self._only_fields is not None:
+            return list(self._only_fields)
+        if self._defer_fields:
+            return [name for name in all_names if name not in self._defer_fields]
+        return all_names
+
+    def _deferred_field_names(self, metadata: ModelMetadata) -> frozenset[str] | None:
+        if self._only_fields is not None:
+            loaded = frozenset(self._only_fields)
+            return frozenset(f.name for f in metadata.fields if f.name not in loaded)
+        if self._defer_fields:
+            return frozenset(self._defer_fields)
+        return None
 
     def _compile(self, *, dialect: str = "postgres") -> dict[str, Any]:
         """Compile the validated IR through the native Rust extension.
@@ -625,6 +861,760 @@ class QuerySet(Generic[_M]):
             row_count=1,
         )
         return self._model.model_construct(**_row_to_dict(row))
+
+    def _pk_field_name(self, metadata: ModelMetadata) -> str:
+        """Return the name of the *first* PK field (backward-compat single-PK helper)."""
+        for f in metadata.fields:
+            if f.pk:
+                return f.name
+        return metadata.fields[0].name if metadata.fields else "id"
+
+    def _pk_field_names(self, metadata: ModelMetadata) -> list[str]:
+        """Return names of *all* PK fields in definition order."""
+        pk_names = [f.name for f in metadata.fields if f.pk]
+        return pk_names if pk_names else [metadata.fields[0].name] if metadata.fields else ["id"]
+
+    def _object_to_row_dict(self, obj: _M | dict[str, Any]) -> dict[str, Any]:
+        if isinstance(obj, dict):
+            return dict(obj)
+        if hasattr(obj, "model_dump"):
+            return obj.model_dump()
+        msg = f"bulk_create() expected model instances or dicts, got {type(obj)!r}."
+        raise TypeError(msg)
+
+    def _build_bulk_insert_ir(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        returning: bool,
+    ) -> dict[str, Any]:
+        metadata: ModelMetadata | None = self._get_metadata()
+        if metadata is None:
+            raise FerrumCompileError(
+                f"Model {self._model.__name__!r} has no metadata.",
+                model=self._model.__name__,
+            )
+        if not rows:
+            raise FerrumCompileError(
+                f"bulk_create() requires at least one row on model {metadata.model_name!r}.",
+                model=metadata.model_name,
+            )
+        field_index: dict[str, int] = {f.name: i for i, f in enumerate(metadata.fields)}
+        pk_name = self._pk_field_name(metadata)
+        ir_rows: list[list[Any]] = []
+        column_order: list[str] | None = None
+        for row in rows:
+            values = dict(row)
+            # Drop auto-generated PK columns with sentinel zero/null values.
+            if pk_name in values and values[pk_name] in (0, None, ""):
+                values.pop(pk_name, None)
+            if column_order is None:
+                column_order = sorted(values.keys())
+            elif sorted(values.keys()) != column_order:
+                raise FerrumCompileError(
+                    "bulk_create() rows must share the same field set.",
+                    model=metadata.model_name,
+                )
+            ir_row: list[Any] = []
+            for name in column_order:
+                if name not in field_index:
+                    raise FerrumCompileError(
+                        f"Unknown field {name!r} on model {metadata.model_name!r}.",
+                        model=metadata.model_name,
+                        field=name,
+                    )
+                ir_row.append(
+                    [{"index": field_index[name], "name": name}, _encode_bind_value(values[name])]
+                )
+            ir_rows.append(ir_row)
+        return {
+            "version": _IR_VERSION,
+            "model_name": metadata.model_name,
+            "operation": {"kind": "bulk_insert", "rows": ir_rows, "returning": returning},
+            "filters": [],
+            "order_by": [],
+            "limit": None,
+            "offset": None,
+        }
+
+    def _build_bulk_update_ir(
+        self,
+        rows: list[tuple[Any, dict[str, Any]]],
+        fields: Sequence[str],
+    ) -> dict[str, Any]:
+        """Build a BulkUpdate IR.
+
+        ``rows`` is a list of ``(pk_values, assignments)`` where ``pk_values`` is
+        either a scalar (single-PK) or a list/tuple of values (composite PK).
+        """
+        metadata: ModelMetadata | None = self._get_metadata()
+        if metadata is None:
+            raise FerrumCompileError(
+                f"Model {self._model.__name__!r} has no metadata.",
+                model=self._model.__name__,
+            )
+        if not rows:
+            raise FerrumCompileError(
+                f"bulk_update() requires at least one row on model {metadata.model_name!r}.",
+                model=metadata.model_name,
+            )
+        field_index: dict[str, int] = {f.name: i for i, f in enumerate(metadata.fields)}
+        pk_names = self._pk_field_names(metadata)
+        for pk_name in pk_names:
+            if pk_name not in field_index:
+                raise FerrumCompileError(
+                    f"Model {metadata.model_name!r} has no primary key field {pk_name!r}.",
+                    model=metadata.model_name,
+                )
+        field_list = list(fields)
+        if not field_list:
+            raise FerrumCompileError(
+                "bulk_update() requires at least one field.",
+                model=metadata.model_name,
+            )
+        for name in field_list:
+            if name not in field_index:
+                raise FerrumCompileError(
+                    f"Unknown field {name!r} on model {metadata.model_name!r}.",
+                    model=metadata.model_name,
+                    field=name,
+                )
+        ir_pk_fields = [{"index": field_index[pk_name], "name": pk_name} for pk_name in pk_names]
+        ir_fields = [{"index": field_index[name], "name": name} for name in field_list]
+        ir_rows: list[dict[str, Any]] = []
+        for pk_val, assignments in rows:
+            # Normalize pk_val: scalar for single-PK, sequence for composite PK.
+            if len(pk_names) == 1:
+                pk_values_encoded = [_encode_bind_value(pk_val)]
+            else:
+                if isinstance(pk_val, (list, tuple)) and len(pk_val) == len(pk_names):
+                    pk_values_encoded = [_encode_bind_value(v) for v in pk_val]
+                else:
+                    raise FerrumCompileError(
+                        f"bulk_update() composite PK requires {len(pk_names)} values, "
+                        f"got {pk_val!r}.",
+                        model=metadata.model_name,
+                    )
+            ir_rows.append(
+                {
+                    "pk_values": pk_values_encoded,
+                    "values": [_encode_bind_value(assignments[name]) for name in field_list],
+                }
+            )
+        return {
+            "version": _IR_VERSION,
+            "model_name": metadata.model_name,
+            "operation": {
+                "kind": "bulk_update",
+                "pk_fields": ir_pk_fields,
+                "fields": ir_fields,
+                "rows": ir_rows,
+            },
+            "filters": [],
+            "order_by": [],
+            "limit": None,
+            "offset": None,
+        }
+
+    def _build_bulk_delete_ir(self, ids: Sequence[Any]) -> dict[str, Any]:
+        """Build a BulkDelete IR.
+
+        For composite PKs, each element of ``ids`` must be a sequence of values
+        matching the model's ``pk_fields`` order.  For single-PK models a plain
+        scalar is accepted (backward compat).
+        """
+        metadata: ModelMetadata | None = self._get_metadata()
+        if metadata is None:
+            raise FerrumCompileError(
+                f"Model {self._model.__name__!r} has no metadata.",
+                model=self._model.__name__,
+            )
+        if not ids:
+            raise FerrumCompileError(
+                f"bulk_delete() requires at least one id on model {metadata.model_name!r}.",
+                model=metadata.model_name,
+            )
+        field_index: dict[str, int] = {f.name: i for i, f in enumerate(metadata.fields)}
+        pk_names = self._pk_field_names(metadata)
+        ir_pk_fields = [{"index": field_index[pk_name], "name": pk_name} for pk_name in pk_names]
+
+        # Encode each id as a list of BindValues (length == len(pk_names)).
+        encoded_ids: list[list[Any]] = []
+        for pk_val in ids:
+            if len(pk_names) == 1:
+                encoded_ids.append([_encode_bind_value(pk_val)])
+            else:
+                if isinstance(pk_val, (list, tuple)) and len(pk_val) == len(pk_names):
+                    encoded_ids.append([_encode_bind_value(v) for v in pk_val])
+                else:
+                    raise FerrumCompileError(
+                        f"bulk_delete() composite PK requires {len(pk_names)} values per id, "
+                        f"got {pk_val!r}.",
+                        model=metadata.model_name,
+                    )
+
+        return {
+            "version": _IR_VERSION,
+            "model_name": metadata.model_name,
+            "operation": {
+                "kind": "bulk_delete",
+                "pk_fields": ir_pk_fields,
+                "ids": encoded_ids,
+            },
+            "filters": [],
+            "order_by": [],
+            "limit": None,
+            "offset": None,
+        }
+
+    async def bulk_create(
+        self,
+        conn: ConnectionLike,
+        objects: Sequence[_M | dict[str, Any]],
+        *,
+        batch_size: int = 1000,
+        returning: bool = True,
+    ) -> list[_M] | int:
+        """Insert many rows in batched multi-value INSERT statements.
+
+        Args:
+            conn: Open ``Connection`` or active ``Transaction``.
+            objects: Model instances or field dicts to insert.
+            batch_size: Maximum rows per compiled INSERT statement.
+            returning: When ``True`` (default), return hydrated instances via
+                ``INSERT … RETURNING``. When ``False``, return the total inserted
+                row count.
+
+        Raises:
+            FerrumConfigError: if the native extension is not built.
+            FerrumCompileError: for unknown fields or inconsistent row shapes.
+        """
+        if _native_ext is None:
+            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
+        if conn is None:
+            raise FerrumConfigError(
+                "bulk_create() requires an active Connection. "
+                "Obtain one from ferrum.connect(). [FERR-C001]"
+            )
+        if batch_size < 1:
+            raise FerrumConfigError("batch_size must be at least 1. [FERR-C001]")
+        metadata = self._get_metadata()
+        row_dicts = [self._object_to_row_dict(obj) for obj in objects]
+        if not row_dicts:
+            return [] if returning else 0
+
+        driver = conn._require_driver()
+        model_name = self._model.__name__
+        table = metadata.table_name if metadata is not None else model_name
+        created: list[_M] = []
+        total = 0
+
+        for start in range(0, len(row_dicts), batch_size):
+            batch = row_dicts[start : start + batch_size]
+            compiled = self._compile_ir(
+                self._build_bulk_insert_ir(batch, returning=returning),
+                dialect=conn.dialect,
+            )
+            sql_text: str = compiled["sql_text"]
+            bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
+            fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
+            _hooks.query_start(
+                fingerprint=fingerprint,
+                model=model_name,
+                operation="bulk_insert",
+                table=table,
+            )
+            t0 = time.monotonic()
+            try:
+                if returning:
+                    rows = await driver.fetch(sql_text, *bound_params)
+                else:
+                    result: str = await driver.execute(sql_text, *bound_params)
+                    parts = result.split() if result else []
+                    try:
+                        total += int(parts[2]) if len(parts) > 2 else len(batch)
+                    except ValueError:
+                        total += len(batch)
+                    rows = []
+            except Exception as exc:
+                duration_ms = (time.monotonic() - t0) * 1000
+                mapped = map_db_error(exc, context={"model": model_name, "operation": "bulk_insert"})
+                _hooks.query_failure(
+                    fingerprint=fingerprint,
+                    duration_ms=duration_ms,
+                    failure_category=type(mapped).__name__,
+                )
+                raise mapped from None
+            duration_ms = (time.monotonic() - t0) * 1000
+            if returning:
+                batch_instances = [
+                    self._model.model_construct(**_row_to_dict(row)) for row in rows
+                ]
+                created.extend(batch_instances)
+                _hooks.query_success(
+                    fingerprint=fingerprint,
+                    duration_ms=duration_ms,
+                    row_count=len(batch_instances),
+                )
+            else:
+                _hooks.query_success(
+                    fingerprint=fingerprint,
+                    duration_ms=duration_ms,
+                    row_count=len(batch),
+                )
+
+        return created if returning else total
+
+    async def bulk_update(
+        self,
+        conn: ConnectionLike,
+        objects: Sequence[_M],
+        fields: Sequence[str],
+        *,
+        batch_size: int = 1000,
+    ) -> int:
+        """Update many rows by primary key in batched statements.
+
+        Each object must carry a populated primary-key value. Only ``fields`` are
+        written; other columns are left unchanged.
+
+        Returns the total affected row count (sum of per-batch driver counts).
+        """
+        if _native_ext is None:
+            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
+        if conn is None:
+            raise FerrumConfigError(
+                "bulk_update() requires an active Connection. "
+                "Obtain one from ferrum.connect(). [FERR-C001]"
+            )
+        if batch_size < 1:
+            raise FerrumConfigError("batch_size must be at least 1. [FERR-C001]")
+        metadata = self._get_metadata()
+        if metadata is None:
+            raise FerrumCompileError(
+                f"Model {self._model.__name__!r} has no metadata.",
+                model=self._model.__name__,
+            )
+        pk_names = self._pk_field_names(metadata)
+        field_list = list(fields)
+        rows: list[tuple[Any, dict[str, Any]]] = []
+        for obj in objects:
+            data = obj.model_dump()
+            for pk_name in pk_names:
+                if pk_name not in data:
+                    raise FerrumCompileError(
+                        f"bulk_update() object missing primary key field {pk_name!r}.",
+                        model=metadata.model_name,
+                        field=pk_name,
+                    )
+            # For single-PK: pass scalar; for composite PK: pass tuple.
+            if len(pk_names) == 1:
+                pk_val: Any = data[pk_names[0]]
+            else:
+                pk_val = tuple(data[pk_name] for pk_name in pk_names)
+            assignments = {name: data[name] for name in field_list}
+            rows.append((pk_val, assignments))
+        if not rows:
+            return 0
+
+        driver = conn._require_driver()
+        model_name = self._model.__name__
+        table = metadata.table_name
+        total_updated = 0
+
+        for start in range(0, len(rows), batch_size):
+            batch = rows[start : start + batch_size]
+            compiled = self._compile_ir(
+                self._build_bulk_update_ir(batch, field_list),
+                dialect=conn.dialect,
+            )
+            sql_text: str = compiled["sql_text"]
+            bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
+            fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
+            _hooks.query_start(
+                fingerprint=fingerprint,
+                model=model_name,
+                operation="bulk_update",
+                table=table,
+            )
+            t0 = time.monotonic()
+            try:
+                result: str = await driver.execute(sql_text, *bound_params)
+            except Exception as exc:
+                duration_ms = (time.monotonic() - t0) * 1000
+                mapped = map_db_error(exc, context={"model": model_name, "operation": "bulk_update"})
+                _hooks.query_failure(
+                    fingerprint=fingerprint,
+                    duration_ms=duration_ms,
+                    failure_category=type(mapped).__name__,
+                )
+                raise mapped from None
+            duration_ms = (time.monotonic() - t0) * 1000
+            parts = result.split() if result else []
+            try:
+                total_updated += int(parts[1]) if len(parts) > 1 else len(batch)
+            except ValueError:
+                total_updated += len(batch)
+            _hooks.query_success(
+                fingerprint=fingerprint,
+                duration_ms=duration_ms,
+                row_count=len(batch),
+            )
+        return total_updated
+
+    async def bulk_delete(
+        self,
+        conn: ConnectionLike,
+        ids: Sequence[Any],
+        *,
+        batch_size: int = 1000,
+    ) -> int:
+        """Delete rows by primary-key values in batched ``DELETE … IN (…)`` statements.
+
+        Returns the total deleted row count.
+        """
+        if _native_ext is None:
+            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
+        if conn is None:
+            raise FerrumConfigError(
+                "bulk_delete() requires an active Connection. "
+                "Obtain one from ferrum.connect(). [FERR-C001]"
+            )
+        if batch_size < 1:
+            raise FerrumConfigError("batch_size must be at least 1. [FERR-C001]")
+        if not ids:
+            return 0
+
+        metadata = self._get_metadata()
+        driver = conn._require_driver()
+        model_name = self._model.__name__
+        table = metadata.table_name if metadata is not None else model_name
+        id_list = list(ids)
+        total_deleted = 0
+
+        for start in range(0, len(id_list), batch_size):
+            batch = id_list[start : start + batch_size]
+            compiled = self._compile_ir(
+                self._build_bulk_delete_ir(batch),
+                dialect=conn.dialect,
+            )
+            sql_text: str = compiled["sql_text"]
+            bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
+            fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
+            _hooks.query_start(
+                fingerprint=fingerprint,
+                model=model_name,
+                operation="bulk_delete",
+                table=table,
+            )
+            t0 = time.monotonic()
+            try:
+                result: str = await driver.execute(sql_text, *bound_params)
+            except Exception as exc:
+                duration_ms = (time.monotonic() - t0) * 1000
+                mapped = map_db_error(exc, context={"model": model_name, "operation": "bulk_delete"})
+                _hooks.query_failure(
+                    fingerprint=fingerprint,
+                    duration_ms=duration_ms,
+                    failure_category=type(mapped).__name__,
+                )
+                raise mapped from None
+            duration_ms = (time.monotonic() - t0) * 1000
+            parts = result.split() if result else []
+            try:
+                total_deleted += int(parts[1]) if len(parts) > 1 else len(batch)
+            except ValueError:
+                total_deleted += len(batch)
+            _hooks.query_success(
+                fingerprint=fingerprint,
+                duration_ms=duration_ms,
+                row_count=len(batch),
+            )
+        return total_deleted
+
+    # ------------------------------------------------------------------
+    # Upsert API (PostgreSQL ON CONFLICT … DO UPDATE / DO NOTHING)
+    # ------------------------------------------------------------------
+
+    def _build_upsert_sql(
+        self,
+        metadata: "ModelMetadata",
+        values: dict[str, Any],
+        *,
+        conflict_fields: list[str],
+        update_fields: list[str] | None,
+        returning: bool,
+    ) -> tuple[str, list[Any]]:
+        """Build an upsert SQL string and bound-parameter list for a single row.
+
+        Security invariants:
+        - All SQL identifiers (table, column names) are double-quoted and sourced
+          exclusively from ``ModelMetadata`` — never from raw user input.
+        - All values travel as ``$N`` positional parameters — never interpolated.
+        - ``conflict_fields`` and ``update_fields`` are validated against the
+          metadata allowlist before this method is called.
+        """
+        field_by_name = {f.name: f for f in metadata.fields}
+        table = f'"{metadata.table_name}"'
+
+        col_names: list[str] = []
+        placeholders: list[str] = []
+        bound: list[Any] = []
+        for i, (fname, fval) in enumerate(values.items(), start=1):
+            col = f'"{field_by_name[fname].column_name}"'
+            col_names.append(col)
+            placeholders.append(f"${i}")
+            bound.append(fval)
+
+        conflict_cols = ", ".join(
+            f'"{field_by_name[cf].column_name}"' for cf in conflict_fields
+        )
+
+        insert_part = (
+            f"INSERT INTO {table} ({', '.join(col_names)}) "
+            f"VALUES ({', '.join(placeholders)})"
+        )
+
+        if update_fields is None:
+            # Default: all non-PK, non-conflict fields.
+            conflict_set = set(conflict_fields)
+            update_fields = [
+                f.name
+                for f in metadata.fields
+                if not f.pk and f.name not in conflict_set and f.name in values
+            ]
+
+        if not update_fields:
+            conflict_clause = f"ON CONFLICT ({conflict_cols}) DO NOTHING"
+        else:
+            set_parts = [
+                f'"{field_by_name[uf].column_name}" = EXCLUDED."{field_by_name[uf].column_name}"'
+                for uf in update_fields
+            ]
+            conflict_clause = (
+                f"ON CONFLICT ({conflict_cols}) DO UPDATE SET {', '.join(set_parts)}"
+            )
+
+        sql = f"{insert_part} {conflict_clause}"
+        if returning:
+            ret_cols = ", ".join(f'"{f.column_name}"' for f in metadata.fields)
+            sql += f" RETURNING {ret_cols}"
+        return sql, bound
+
+    async def upsert(
+        self,
+        conn: "ConnectionLike",
+        *,
+        conflict_fields: list[str],
+        update_fields: list[str] | None = None,
+        returning: bool = True,
+        **values: Any,  # noqa: ANN401
+    ) -> "_M | None":
+        """Insert a row or update it on conflict (``INSERT … ON CONFLICT … DO UPDATE``).
+
+        Args:
+            conn: An open ``Connection`` or active ``Transaction``.
+            conflict_fields: Field names that form the conflict target. Must be in
+                the model's metadata allowlist (validated before SQL emission).
+            update_fields: Fields to update on conflict. Defaults to all non-PK,
+                non-conflict fields present in ``values``. Pass ``[]`` for
+                ``DO NOTHING`` semantics.
+            returning: When ``True`` (default), return the upserted model instance.
+                When ``False``, return ``None``.
+            **values: Field names and values to insert. All names are validated
+                against the model's metadata allowlist.
+
+        Returns:
+            The upserted model instance when ``returning=True``, else ``None``.
+
+        Raises:
+            FerrumCompileError: for unknown field names or invalid conflict targets.
+            FerrumConfigError: if not connected.
+        """
+        if conn is None:
+            raise FerrumConfigError(
+                "upsert() requires an active Connection. "
+                "Obtain one from ferrum.connect(). [FERR-C001]"
+            )
+        metadata = self._get_metadata()
+        if metadata is None:
+            raise FerrumCompileError(
+                f"Model {self._model.__name__!r} has no metadata.",
+                model=self._model.__name__,
+            )
+        field_names = {f.name for f in metadata.fields}
+        # Validate all field names in values against the allowlist.
+        for fname in values:
+            if fname not in field_names:
+                raise FerrumCompileError(
+                    f"Unknown field {fname!r} on model {metadata.model_name!r}.",
+                    model=metadata.model_name,
+                    field=fname,
+                )
+        # Validate conflict_fields against the allowlist.
+        for cf in conflict_fields:
+            if cf not in field_names:
+                raise FerrumCompileError(
+                    f"Unknown conflict field {cf!r} on model {metadata.model_name!r}.",
+                    model=metadata.model_name,
+                    field=cf,
+                )
+        # Validate update_fields if explicitly provided.
+        if update_fields is not None:
+            for uf in update_fields:
+                if uf not in field_names:
+                    raise FerrumCompileError(
+                        f"Unknown update field {uf!r} on model {metadata.model_name!r}.",
+                        model=metadata.model_name,
+                        field=uf,
+                    )
+
+        sql, bound = self._build_upsert_sql(
+            metadata,
+            values,
+            conflict_fields=conflict_fields,
+            update_fields=update_fields,
+            returning=returning,
+        )
+
+        driver = conn._require_driver()
+        model_name = self._model.__name__
+        _hooks.query_start(
+            fingerprint="",
+            model=model_name,
+            operation="upsert",
+            table=metadata.table_name,
+        )
+        t0 = time.monotonic()
+        try:
+            if returning:
+                row = await driver.fetchrow(sql, *bound)
+            else:
+                await driver.execute(sql, *bound)
+                row = None
+        except Exception as exc:
+            duration_ms = (time.monotonic() - t0) * 1000
+            mapped = map_db_error(exc, context={"model": model_name, "operation": "upsert"})
+            _hooks.query_failure(
+                fingerprint="",
+                duration_ms=duration_ms,
+                failure_category=type(mapped).__name__,
+            )
+            raise mapped from None
+        duration_ms = (time.monotonic() - t0) * 1000
+        _hooks.query_success(fingerprint="", duration_ms=duration_ms, row_count=1 if row else 0)
+        if not returning or row is None:
+            return None
+        return self._model.model_construct(**_row_to_dict(row))
+
+    async def bulk_upsert(
+        self,
+        conn: "ConnectionLike",
+        objects: "Sequence[_M | dict[str, Any]]",
+        *,
+        conflict_fields: list[str],
+        update_fields: list[str] | None = None,
+        batch_size: int = 1000,
+        returning: bool = False,
+    ) -> "list[_M] | int":
+        """Upsert many rows in batched ``INSERT … ON CONFLICT`` statements.
+
+        Args:
+            conn: An open ``Connection`` or active ``Transaction``.
+            objects: Model instances or field dicts to upsert.
+            conflict_fields: Field names forming the conflict target (allowlist-validated).
+            update_fields: Fields to update on conflict. Defaults to all non-PK,
+                non-conflict fields.  Pass ``[]`` for ``DO NOTHING``.
+            batch_size: Maximum rows per statement (default 1000).
+            returning: When ``True``, return hydrated instances. When ``False``
+                (default), return total upserted row count.
+
+        Returns:
+            List of model instances when ``returning=True``, else int row count.
+
+        Raises:
+            FerrumCompileError: for unknown field or conflict target names.
+            FerrumConfigError: if not connected.
+        """
+        if conn is None:
+            raise FerrumConfigError(
+                "bulk_upsert() requires an active Connection. "
+                "Obtain one from ferrum.connect(). [FERR-C001]"
+            )
+        if batch_size < 1:
+            raise FerrumConfigError("batch_size must be at least 1. [FERR-C001]")
+        if not objects:
+            return [] if returning else 0
+
+        metadata = self._get_metadata()
+        if metadata is None:
+            raise FerrumCompileError(
+                f"Model {self._model.__name__!r} has no metadata.",
+                model=self._model.__name__,
+            )
+        field_names = {f.name for f in metadata.fields}
+        for cf in conflict_fields:
+            if cf not in field_names:
+                raise FerrumCompileError(
+                    f"Unknown conflict field {cf!r} on model {metadata.model_name!r}.",
+                    model=metadata.model_name,
+                    field=cf,
+                )
+        if update_fields is not None:
+            for uf in update_fields:
+                if uf not in field_names:
+                    raise FerrumCompileError(
+                        f"Unknown update field {uf!r} on model {metadata.model_name!r}.",
+                        model=metadata.model_name,
+                        field=uf,
+                    )
+
+        row_dicts = [self._object_to_row_dict(obj) for obj in objects]
+        driver = conn._require_driver()
+        model_name = self._model.__name__
+        upserted: list[_M] = []
+        total = 0
+
+        for start in range(0, len(row_dicts), batch_size):
+            batch = row_dicts[start : start + batch_size]
+            for values in batch:
+                sql, bound = self._build_upsert_sql(
+                    metadata,
+                    values,
+                    conflict_fields=conflict_fields,
+                    update_fields=update_fields,
+                    returning=returning,
+                )
+                _hooks.query_start(
+                    fingerprint="",
+                    model=model_name,
+                    operation="upsert",
+                    table=metadata.table_name,
+                )
+                t0 = time.monotonic()
+                try:
+                    if returning:
+                        row = await driver.fetchrow(sql, *bound)
+                        if row is not None:
+                            upserted.append(self._model.model_construct(**_row_to_dict(row)))
+                    else:
+                        await driver.execute(sql, *bound)
+                        total += 1
+                except Exception as exc:
+                    duration_ms = (time.monotonic() - t0) * 1000
+                    mapped = map_db_error(
+                        exc, context={"model": model_name, "operation": "bulk_upsert"}
+                    )
+                    _hooks.query_failure(
+                        fingerprint="",
+                        duration_ms=duration_ms,
+                        failure_category=type(mapped).__name__,
+                    )
+                    raise mapped from None
+                duration_ms = (time.monotonic() - t0) * 1000
+                _hooks.query_success(fingerprint="", duration_ms=duration_ms, row_count=1)
+
+        return upserted if returning else total
 
     async def delete(self, conn: ConnectionLike | None = None) -> int:
         """Delete filtered rows. Returns the row count.
@@ -938,7 +1928,46 @@ class QuerySet(Generic[_M]):
             duration_ms=duration_ms,
             row_count=len(rows),
         )
-        return _hydrate_rows(self._model, rows)
+        if self._result_type == "values":
+            return [_row_to_dict(row) for row in rows]
+        if self._result_type == "values_list":
+            names = self._resolve_select_field_names(metadata) if metadata is not None else []
+            values_out: list[Any] = []
+            for row in rows:
+                row_dict = _row_to_dict(row)
+                if self._values_flat and len(names) == 1:
+                    values_out.append(row_dict[names[0]])
+                else:
+                    values_out.append(tuple(row_dict.get(name) for name in names))
+            return values_out
+        deferred = self._deferred_field_names(metadata) if metadata is not None else None
+        instances = _hydrate_rows(
+            self._model,
+            rows,
+            fingerprint=fingerprint,
+            deferred=deferred,
+        )
+        if self._select_related and metadata is not None:
+            from ferrum.relations import build_join_ir, set_relation, split_joined_row
+
+            joins = [build_join_ir(metadata, n, {f.name: i for i, f in enumerate(metadata.fields)}) for n in self._select_related]
+            for inst, row in zip(instances, rows, strict=True):
+                row_dict = _row_to_dict(row)
+                related = split_joined_row(row_dict, joins)
+                for rel_name, rel_row in related.items():
+                    if not rel_row or all(v is None for v in rel_row.values()):
+                        set_relation(inst, rel_name, None)
+                        continue
+                    rel_meta = next(r for r in metadata.relations if r.field_name == rel_name)
+                    from ferrum.registry import get_model
+
+                    rel_model = get_model(rel_meta.to_model)
+                    set_relation(inst, rel_name, rel_model.model_construct(**rel_row))
+        if self._prefetch_related:
+            from ferrum.relations import prefetch_related_objects
+
+            await prefetch_related_objects(instances, self._model, self._prefetch_related, conn)
+        return instances
 
     async def first(self, conn: ConnectionLike) -> _M | None:
         """Fetch the first matching row, or ``None`` if no rows match.
@@ -1057,6 +2086,44 @@ class QuerySet(Generic[_M]):
         )
         return count_val
 
+    async def exists(self, conn: ConnectionLike) -> bool:
+        """Return whether any row matches (``SELECT EXISTS(...)``)."""
+        if _native_ext is None:
+            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
+        metadata = self._get_metadata()
+        compiled = self._compile_ir(self._build_exists_ir(), dialect=conn.dialect)
+        sql_text: str = compiled["sql_text"]
+        bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
+        fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
+        driver = conn._require_driver()
+        model_name = self._model.__name__
+        table = metadata.table_name if metadata is not None else model_name
+        _hooks.query_start(
+            fingerprint=fingerprint,
+            model=model_name,
+            operation="exists",
+            table=table,
+        )
+        t0 = time.monotonic()
+        try:
+            result = await driver.fetchval(sql_text, *bound_params)
+        except Exception as exc:
+            duration_ms = (time.monotonic() - t0) * 1000
+            mapped = map_db_error(exc, context={"model": model_name, "operation": "exists"})
+            _hooks.query_failure(
+                fingerprint=fingerprint,
+                duration_ms=duration_ms,
+                failure_category=type(mapped).__name__,
+            )
+            raise mapped from None
+        duration_ms = (time.monotonic() - t0) * 1000
+        _hooks.query_success(
+            fingerprint=fingerprint,
+            duration_ms=duration_ms,
+            row_count=1 if result else 0,
+        )
+        return bool(result)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -1071,6 +2138,14 @@ class QuerySet(Generic[_M]):
         qs._vector_order_by = (
             dict(self._vector_order_by) if self._vector_order_by is not None else None
         )
+        qs._predicate_q = self._predicate_q
+        qs._distinct = self._distinct
+        qs._only_fields = self._only_fields
+        qs._defer_fields = self._defer_fields
+        qs._result_type = self._result_type
+        qs._values_flat = self._values_flat
+        qs._select_related = self._select_related
+        qs._prefetch_related = self._prefetch_related
         return qs
 
     def _get_metadata(self) -> ModelMetadata | None:

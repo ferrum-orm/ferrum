@@ -11,7 +11,7 @@ import pytest
 import ferrum.cli.makemigrations_cmd as makemigrations_cmd
 import ferrum.cli.revert_cmd as revert_cmd
 from ferrum.migrations.base import Migration
-from ferrum.migrations.ledger import delete_applied
+from ferrum.migrations.ledger import compute_digest, delete_applied
 from ferrum.migrations.loader import MigrationModule
 from ferrum.migrations.operations import (
     AddColumn,
@@ -59,6 +59,9 @@ class _FakeDriver:
 
     def __init__(self, pool: _FakePool) -> None:
         self._pool = pool
+
+    async def fetchrow(self, *_args: object, **_kwargs: object) -> None:
+        return None
 
 
 class _FakeConn:
@@ -251,4 +254,39 @@ async def test_successful_revert_executes_reverse_ops_and_deletes_ledger_row(
     assert 'ALTER TABLE "notes" DROP COLUMN IF EXISTS "body"' in executed_sql
     assert 'DROP INDEX IF EXISTS "idx_notes_body"' in executed_sql
     assert 'ALTER TABLE "notes" DROP CONSTRAINT IF EXISTS "fk_notes_user_id"' in executed_sql
+    delete_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_revert_with_target_reverts_migrations_after_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RevMigration(Migration):
+        operations: ClassVar[list[Operation]] = [AddColumn("notes", Column("body", "TEXT"))]
+        reverse_operations: ClassVar[list[Operation]] = [DropColumn("notes", "body")]
+
+    mod1 = _module(tmp_path, "0001_base", RevMigration, content="v1")
+    mod2 = _module(tmp_path, "0002_extra", RevMigration, content="v2")
+    db_conn = _FakeDbConn()
+    fake_conn = _FakeConn(_FakePool(db_conn))
+    delete_mock = AsyncMock(return_value=None)
+
+    async def is_applied_side_effect(_conn: object, digest: str) -> bool:
+        return digest in {
+            compute_digest("0001_base", "v1"),
+            compute_digest("0002_extra", "v2"),
+        }
+
+    monkeypatch.setattr(revert_cmd, "connect", lambda: _FakeConnect(fake_conn))
+    monkeypatch.setattr(revert_cmd._ledger, "ensure_ledger", AsyncMock(return_value=None))
+    monkeypatch.setattr(revert_cmd._loader, "scan", lambda migrations_dir: [mod1, mod2])
+    monkeypatch.setattr(revert_cmd._ledger, "is_applied", AsyncMock(side_effect=is_applied_side_effect))
+    monkeypatch.setattr(revert_cmd._ledger, "verify_checksum", AsyncMock(return_value=None))
+    monkeypatch.setattr(revert_cmd._ledger, "delete_applied", delete_mock)
+
+    result = await revert_cmd.run_revert(tmp_path, target="0001_base", confirm=True)
+
+    assert result == 0
+    assert db_conn.execute.await_count == 1
     delete_mock.assert_awaited_once()

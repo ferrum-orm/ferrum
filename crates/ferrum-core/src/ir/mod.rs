@@ -15,7 +15,7 @@ pub mod metadata;
 pub use metadata::ModelMetadata;
 
 /// Version of the IR contract this crate implements.
-pub const IR_VERSION: u32 = 1;
+pub const IR_VERSION: u32 = 2;
 
 /// The root IR node produced by `QuerySet._build_ir()` on the Python side.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +44,41 @@ pub struct QuerySetIR {
     /// Optional pgvector KNN ordering (``QuerySet.nearest_to``).
     #[serde(default)]
     pub vector_order_by: Option<VectorOrderBy>,
+
+    /// Optional boolean predicate tree (``Q`` objects). When present, combined with
+    /// ``filters`` (AND). When absent, ``filters`` are AND-ed as in IR v1.
+    #[serde(default)]
+    pub predicate: Option<Predicate>,
+
+    /// Emit ``SELECT DISTINCT`` (PostgreSQL).
+    #[serde(default)]
+    pub distinct: bool,
+
+    /// Compile to ``SELECT EXISTS(subquery)`` — used by ``QuerySet.exists()``.
+    #[serde(default)]
+    pub exists: bool,
+
+    /// To-one JOINs for ``select_related()`` (validated on the Python side).
+    #[serde(default)]
+    pub joins: Vec<JoinSpec>,
+}
+
+/// JOIN metadata for ``select_related`` (PostgreSQL LEFT JOIN).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JoinSpec {
+    pub relation: String,
+    pub alias: String,
+    pub local_field: FieldRef,
+    pub remote_table: String,
+    pub remote_pk_column: String,
+    pub remote_fields: Vec<JoinFieldRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JoinFieldRef {
+    pub index: usize,
+    pub name: String,
+    pub column: String,
 }
 
 /// The SQL operation this IR node represents.
@@ -69,6 +104,36 @@ pub enum Operation {
         #[serde(default)]
         danger: bool,
     },
+    /// Multi-row INSERT (``QuerySet.bulk_create``).
+    BulkInsert {
+        /// Each inner vec is one row: ``(FieldRef, BindValue)`` pairs in column order.
+        rows: Vec<Vec<(FieldRef, BindValue)>>,
+        /// When ``true``, emit ``RETURNING *`` (PostgreSQL).
+        #[serde(default = "default_true")]
+        returning: bool,
+    },
+    /// PK-keyed multi-row UPDATE (``QuerySet.bulk_update``).
+    BulkUpdate {
+        pk_field: FieldRef,
+        fields: Vec<FieldRef>,
+        rows: Vec<BulkUpdateRow>,
+    },
+    /// PK-keyed multi-row DELETE (``QuerySet.bulk_delete``).
+    BulkDelete {
+        pk_field: FieldRef,
+        ids: Vec<BindValue>,
+    },
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// One row payload for :variant:`Operation::BulkUpdate`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkUpdateRow {
+    pub pk: BindValue,
+    pub values: Vec<BindValue>,
 }
 
 /// A reference to a field, validated against the model metadata allowlist.
@@ -86,6 +151,16 @@ pub struct Filter {
     pub field: FieldRef,
     pub operator: String,
     pub value: BindValue,
+}
+
+/// Composable boolean predicate tree (``Q`` objects on the Python side).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Predicate {
+    And { children: Vec<Predicate> },
+    Or { children: Vec<Predicate> },
+    Not { child: Box<Predicate> },
+    Filter { filter: Filter },
 }
 
 /// An ORDER BY clause element.

@@ -69,8 +69,8 @@ async def _apply(
 ) -> None:
     """Load a plan JSON file and apply (or dry-run) it.
 
-    Reads ``FERRUM_DATABASE_URL`` from the environment for the connection DSN.
-    Exits with code 1 on configuration or migration errors.
+    Reads the database URL from the environment (see ``[ferrum].database_url_env``
+    in ``ferrum.toml``). Exits with code 1 on configuration or migration errors.
     """
     if plan_file is None:
         print(
@@ -79,11 +79,21 @@ async def _apply(
         )
         raise typer.Exit(code=1)
 
-    dsn = os.environ.get("FERRUM_DATABASE_URL")
+    from ferrum.config import (
+        database_url_env_hint,
+        find_project_root,
+        load_config,
+        resolve_database_url,
+    )
+
+    root = find_project_root(Path.cwd())
+    cfg = load_config(root)
+    dsn = resolve_database_url(database_url_env=cfg.database_url_env)
     if dsn is None and not do_dry_run:
         # DSN is only required for a live apply; dry-run works without a connection.
+        hint = database_url_env_hint(database_url_env=cfg.database_url_env)
         print(
-            "Error: FERRUM_DATABASE_URL environment variable is not set. "
+            f"Error: {hint} environment variable is not set. "
             "Set it before running 'ferrum migrations apply'. [FERR-C001]",
         )
         raise typer.Exit(code=1)

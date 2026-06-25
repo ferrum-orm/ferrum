@@ -17,7 +17,7 @@ import asyncio
 import pytest
 
 import ferrum
-from ferrum.errors import FerrumError
+from ferrum.errors import FerrumTimeoutError
 
 from .helpers import raw_pool, transient_table
 
@@ -149,8 +149,6 @@ async def test_serializable_isolation_accepted(
 async def test_deadline_rolls_back(
     pg_conn: ferrum.connection.Connection, require_native: None, unique_suffix: str
 ) -> None:
-    from ferrum.errors import FerrumTimeoutError
-
     table = f"ferrum_int_tx_deadline_{unique_suffix}"
     model = _model(table)
     async with transient_table(
@@ -161,7 +159,3 @@ async def test_deadline_rolls_back(
                 await model.objects.create(tx, name="slow", balance=1)
                 await asyncio.sleep(5)
         assert await _row_count(pg_conn, table) == 0
-
-
-# Keep FerrumError import meaningful for static checkers / future assertions.
-_ = FerrumError

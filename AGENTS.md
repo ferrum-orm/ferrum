@@ -95,20 +95,19 @@ SecurityEngineer review.** Do not self-clear security-sensitive changes.
   Pydantic v2 **construct-without-revalidate** fast path (DB already enforced types). Document
   the trusted-source assumption and the custom-validator caveat (see ADR-003).
 
-## 5. Open architecture decisions (ADRs) — do not pre-empt them
+## 5. Architecture decisions (ADRs) — resolved
 
-The architecture feasibility review enumerates six ADRs that must be resolved in the
-architecture docs before the relevant implementation begins. Until an ADR is decided, **do not
-hard-code a choice that forecloses it.** If your task depends on an undecided ADR, surface it.
+The original six ADRs are now closed. The implementation choices are recorded below for
+reference. New ADRs should be opened here if future decisions warrant them.
 
-- **ADR-001** PostgreSQL driver placement (Python-side `asyncpg` is the default leaning).
-- **ADR-002** QuerySet→Rust IR contract shape and version stability.
-- **ADR-003** Hydration semantics (construct-without-revalidate vs. full validation).
-- **ADR-004** Migration transactionality + the non-transactional exception list (`CREATE INDEX CONCURRENTLY`, certain `ALTER TYPE`/enum ops).
-- **ADR-005** Packaging targets & CI wheel matrix (maturin + cibuildwheel, abi3).
-- **ADR-006** Centralized, non-bypassable error-mapping + hook-payload/redaction layer.
+- **ADR-001** ✅ Resolved — Python-side `asyncpg` driver (`ferrum.drivers.postgres`; install with `ferrum-orm[pg]`).
+- **ADR-002** ✅ Resolved — IR v2 JSON contract (`crates/ferrum-core/src/ir/`); version field in `QuerySet._IR_VERSION`.
+- **ADR-003** ✅ Resolved — construct-without-revalidate fast path (`queryset._hydrate_rows`, `model_construct`); custom-validator caveat documented.
+- **ADR-004** ✅ Resolved — transactional by default; non-transactional classification in `operations.py` for `CREATE INDEX CONCURRENTLY` and certain `ALTER TYPE`/enum ops.
+- **ADR-005** ✅ Resolved — maturin + cibuildwheel abi3 wheels; `release.yml` builds and publishes to PyPI on `v*` tag push via OIDC trusted publishing.
+- **ADR-006** ✅ Resolved — centralized redaction layer in `errors.py` (`map_db_error`/`map_native_error`); Tier A/B/C hooks in `hooks.py`.
 
-## 6. Repository layout (current and planned)
+## 6. Repository layout
 
 - `.claude/docs/` — authoritative project documentation: PRD, architecture, data model, migrations,
   query engine, project structure, security, product design. Single source of truth.
@@ -117,14 +116,15 @@ hard-code a choice that forecloses it.** If your task depends on an undecided AD
 - `.cursor/` — Cursor agent config mirroring `.claude/` for `agents/`, `rules/`, `skills/`,
   `commands/`, `plans/` (plans use the `*.plan.md` suffix). Documentation is not mirrored here —
   `.claude/docs/` is the single source.
-- Production source (Python package + Rust crate) is **not yet implemented** and must not be
-  added by workspace-setup or documentation tasks.
-
-When source lands, expect roughly:
-
-- `python/ferrum/` (or `src/ferrum/`) — the public Python package.
-- `rust/` (a maturin-managed crate) — the Rust compiler/codec core.
-- `tests/` — Python tests; Rust unit tests live with the crate.
+- `python/ferrum/` — the public Python package (models, QuerySet, connection, errors, hooks,
+  migrations, CLI, contrib extensions).
+- `crates/ferrum-core/` — pure Rust engine: IR validator, SQL compiler, row codec, migration planner.
+- `crates/ferrum-sql/` — SQL emitter (PostgreSQL dialect).
+- `crates/ferrum-pyo3/` — PyO3 bridge: exposes `compile_query`, `hydrate_rows`, `plan_migration`;
+  maps `Result`/panics to catchable Python exceptions.
+- `crates/ferrum-migrate/` — migration planning support.
+- `tests/` — Python tests (`tests/python/unit/`, `tests/python/integration/`,
+  `tests/python/security/`); Rust unit tests are co-located in each crate.
 - `pyproject.toml` + `Cargo.toml` — Python and Rust build manifests.
 
 ## 7. How to work in this repo
@@ -172,6 +172,28 @@ Do not implement a feature that bypasses architecture review. If you find implem
 proceeding without an approved architecture for the affected area, stop and flag it to the
 ChiefArchitect.
 
+## 10. Newly implemented capabilities (ticket-analyzer compatibility)
+
+The following features were added to support migration of `ticket-analyzer-agent` patterns
+to Ferrum. They are part of the supported public surface:
+
+- **Composite primary keys** — `Meta.pk_fields` tuple on models; `PRIMARY KEY (col1, col2)` DDL;
+  update/delete keyed by all PK columns.
+- **Array / JSONB field types** — `list[T]` (`uuid[]`, `text[]`, scalar arrays) and richer JSONB
+  operators (`__contains`, `__has_key`).
+- **Upsert API** — `QuerySet.upsert(...)` and `bulk_upsert(...)` with explicit conflict targets,
+  `DO NOTHING`, `DO UPDATE`, and `RETURNING` support.
+- **RLS / tenant session helpers** — transaction-scoped `set_config` / `current_setting` helpers
+  and `tenant_session` pattern on `Connection`/`Transaction`; no GUC leakage across pooled
+  connections.
+- **`call_function`** — structured stored-procedure calls with allowlisted function identifiers
+  and bound arguments.
+- **Migration ops for extensions, RLS, and function DDL** — `CreateExtension`, `EnableRLS`,
+  `CreatePolicy`, `CreateFunction` migration operations with dry-run and destructive gates.
+- **`vector_search` helper** — `ferrum.ext.pgvector.vector_search()` returns rows plus a
+  per-row similarity score column; metric operators: `cosine` (`<=>`), `l2` (`<->`),
+  `inner_product` (`<#>`).
+
 ## Learned User Preferences
 
 - Prefer `mise.toml` tasks over `Makefile`; the project task runner is mise.
@@ -186,11 +208,11 @@ ChiefArchitect.
 - Python deps managed with `uv`; `uv sync --extra dev` installs dev extras including maturin; `maturin` must be under `[project.optional-dependencies] dev`, not only `[build-system] requires`.
 - Python package at `python/ferrum/` (not `src/`); Rust crates at `crates/ferrum-{core,sql,pyo3,migrate}/`; PyO3 extension at `crates/ferrum-pyo3/Cargo.toml` with maturin `manifest-path` in `pyproject.toml`.
 - Full local CI parity: `mise run ci-local`; scoped verification: Rust-only → `test-rust lint-rust`; Python-only → `test-python-unit`; extension/boundary → `dev` plus integration or security tests.
-- Canonical connection env var is `FERRUM_DATABASE_URL` (not `DATABASE_URL`); library `ferrum.connect()` reads env only — no dotenv in core code. CLI bootstrap (`ferrum.cli.bootstrap`) runs before subcommands: optional `ferrum.toml`, dotenv load (`override=False`), and settings/model import; discovery order is `FERRUM_SETTINGS` → `[ferrum].settings` in `ferrum.toml` → `ferrum_conf.py`.
+- Canonical connection env vars: `FERRUM_DATABASE_URL` (primary), `DATABASE_URL` (fallback when the former is unset). Override the env var name via `[ferrum].database_url_env` in `ferrum.toml` or `pyproject.toml`. Library `ferrum.connect()` resolves from env + project config — no dotenv in core code. `ferrum.contrib.fastapi.ferrum_lifespan` manages pool lifecycle only and yields `None`; use `ferrum.connect()` directly in lifespan when a `Connection` handle is needed. CLI bootstrap (`ferrum.cli.bootstrap`) runs before subcommands: project config, dotenv load (`override=False`), and settings/model import; discovery order is `FERRUM_SETTINGS` → `[ferrum].settings` in `ferrum.toml` / `pyproject.toml` → `ferrum_conf.py`.
 - Ferrum CLI is Typer-based and requires the `ferrum[cli]` extra (typer + rich); subcommands include `makemigrations`, `migrate`, `showmigrations`, `revert`, `resetdb` (--confirm required), and `inspectdb`; `makemigrations` scans `Model.__subclasses__()` so models must be imported via bootstrap settings module. `ferrum revert` runs reverse ops and removes the ledger entry but leaves migration files on disk (Django-style). `inspectdb` introspects `information_schema` BASE TABLE rows only, excludes `pg_*` and `ferrum_migrations`, emits singular class names, and includes `model_config` with the explicit table name.
 - Migration apply/revert failures raise `FerrumMigrationError` with the failing operation context and a sanitized PostgreSQL message — not just the driver exception class name.
 - `Field(default=...)` string values are Python-side defaults only; SQL DEFAULT requires `db_default` (empty string SQL literal is `db_default="''"`, not `Field(default="")`). `uuid_generate="v7"` maps to `db_default="uuidv7()"`; v4/default UUID uses `gen_random_uuid()`.
-- pgvector runtime I/O: after `ferrum.connect()`, call `ferrum.ext.pgvector.register_vector_codecs(conn)` — runs `CREATE EXTENSION IF NOT EXISTS vector` and registers asyncpg codecs.
+- Implemented APIs: Transaction — `Connection.transaction(isolation, readonly, deferrable, deadline)` async context manager; `Transaction.savepoint()` for nested savepoints; `Connection` and `Transaction` both satisfy `ConnectionLike` accepted by all QuerySet terminals. Query — `Q()` with `&`/`|`/`~` for predicate composition; `exclude()`, `exists()`, `values()`/`values_list()`, `only()`/`defer()` (deferred-field access raises `FerrumDeferredFieldError`), `distinct()`, `qs[a:b]` slicing as offset/limit shorthand; `select_related()` for JOIN-based eager loading, `prefetch_related()` for N+1-safe multi-query loading. PG extras — composite PKs supported; `on_conflict()` for upsert; `tenant_transaction()` sets RLS GUC session variables; `call_function()` for safe stored-procedure invocation; pgvector: call `ferrum.ext.pgvector.register_vector_codecs(conn)` after `ferrum.connect()`.
 - `ferrum-local-tests` sibling project at `../ferrum-local-tests/` for local CRUD/migration testing; editable install via `[tool.uv.sources] ferrum = { path = "../ferrum", editable = true }`.
 - GitHub Actions CI jobs require a virtualenv before `maturin develop`: `python -m venv .venv && . .venv/bin/activate` before pip/maturin/pytest steps; `release.yml` builds abi3 wheels on `v*` tag push and publishes to PyPI via OIDC trusted publishing.
 - Model relationships use ClassVar descriptors (`ForeignKey`, `OneToOne`, `ManyToMany`) on the model class; FK/OTO use `{field}_id` columns and M2M uses join tables via migration ops.

@@ -31,6 +31,9 @@ _FERRUM_TOML_TEMPLATE = """\
 
 # Path to dotenv file loaded by the CLI (default: .env)
 # env_file = ".env"
+
+# Environment variable for the database URL (default: FERRUM_DATABASE_URL, then DATABASE_URL)
+# database_url_env = "DATABASE_URL"
 """
 
 _GITIGNORE_TEMPLATE = """\

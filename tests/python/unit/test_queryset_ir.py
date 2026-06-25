@@ -109,7 +109,7 @@ class TestBuildIrStructure:
     def test_ir_version(self) -> None:
         qs: QuerySet[Article] = QuerySet(Article)
         ir = qs._build_ir()
-        assert ir["version"] == 1
+        assert ir["version"] == 2
 
     def test_model_name(self) -> None:
         qs: QuerySet[Article] = QuerySet(Article)
@@ -168,8 +168,9 @@ class TestBuildIrFilters:
     def test_single_eq_filter(self) -> None:
         qs = QuerySet(Article).filter(title="hello")
         ir = qs._build_ir()
-        assert len(ir["filters"]) == 1
-        flt = ir["filters"][0]
+        pred = ir["predicate"]
+        assert pred["kind"] == "filter"
+        flt = pred["filter"]
         assert flt["field"]["name"] == "title"
         assert isinstance(flt["field"]["index"], int)
         assert flt["operator"] == "eq"
@@ -178,39 +179,40 @@ class TestBuildIrFilters:
     def test_int_filter_value_encoding(self) -> None:
         qs = QuerySet(Article).filter(id=42)
         ir = qs._build_ir()
-        flt = ir["filters"][0]
+        flt = ir["predicate"]["filter"]
         assert flt["value"] == {"type": "int", "value": 42}
 
     def test_bool_filter_value_encoding(self) -> None:
         qs = QuerySet(Article).filter(published=True)
         ir = qs._build_ir()
-        flt = ir["filters"][0]
+        flt = ir["predicate"]["filter"]
         assert flt["value"] == {"type": "bool", "value": True}
 
     def test_lookup_operator_parsing(self) -> None:
         qs = QuerySet(Article).filter(title__contains="rust")
         ir = qs._build_ir()
-        flt = ir["filters"][0]
+        flt = ir["predicate"]["filter"]
         assert flt["field"]["name"] == "title"
         assert flt["operator"] == "contains"
 
     def test_multiple_filters(self) -> None:
         qs = QuerySet(Article).filter(published=True).filter(title__contains="rust")
         ir = qs._build_ir()
-        assert len(ir["filters"]) == 2
+        assert ir["predicate"]["kind"] == "and"
+        assert len(ir["predicate"]["children"]) == 2
 
     def test_filter_field_ref_index_matches_metadata(self) -> None:
         meta = Article.get_metadata()
         field_names = [f.name for f in meta.fields]
         qs = QuerySet(Article).filter(title="x")
         ir = qs._build_ir()
-        flt = ir["filters"][0]
+        flt = ir["predicate"]["filter"]
         assert flt["field"]["index"] == field_names.index("title")
 
     def test_gt_operator_on_int_field(self) -> None:
         qs = QuerySet(Article).filter(id__gt=10)
         ir = qs._build_ir()
-        flt = ir["filters"][0]
+        flt = ir["predicate"]["filter"]
         assert flt["operator"] == "gt"
         assert flt["value"] == {"type": "int", "value": 10}
 

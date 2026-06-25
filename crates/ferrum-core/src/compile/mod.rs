@@ -18,8 +18,8 @@
 use crate::{
     error::CompileError,
     ir::{
-        metadata::FieldType, BindValue, ModelMetadata, Operation, QuerySetIR, SortDirection,
-        IR_VERSION,
+        metadata::FieldType, BindValue, ModelMetadata, Operation, Predicate, QuerySetIR,
+        SortDirection, IR_VERSION,
     },
 };
 
@@ -91,7 +91,7 @@ pub fn compile(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<CompiledQuer
             // Unscoped UPDATE is a security gate. `danger=true` is only set by
             // `QuerySet.danger_update_all()` — the Python layer has already
             // enforced the explicit caller opt-in before reaching Rust.
-            if ir.filters.is_empty() && !danger {
+            if !ir_has_where_clause(ir) && !danger {
                 return Err(CompileError::MissingFilter {
                     model: metadata.model_name.clone(),
                     operation: "update".into(),
@@ -111,31 +111,112 @@ pub fn compile(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<CompiledQuer
             // Unscoped DELETE is a security gate. `danger=true` is only set by
             // `QuerySet.danger_delete_all()` — the Python layer has already
             // enforced the explicit caller opt-in before reaching Rust.
-            if ir.filters.is_empty() && !danger {
+            if !ir_has_where_clause(ir) && !danger {
                 return Err(CompileError::MissingFilter {
                     model: metadata.model_name.clone(),
                     operation: "delete".into(),
                 });
             }
         }
+        Operation::BulkInsert { rows, .. } => {
+            if rows.is_empty() {
+                return Err(CompileError::MalformedIr {
+                    reason: "bulk_insert requires at least one row".into(),
+                });
+            }
+            let first_len = rows[0].len();
+            for row in rows {
+                if row.len() != first_len {
+                    return Err(CompileError::MalformedIr {
+                        reason: "bulk_insert rows must share the same columns".into(),
+                    });
+                }
+                for (field_ref, _value) in row {
+                    metadata
+                        .fields
+                        .get(field_ref.index)
+                        .ok_or_else(|| CompileError::UnknownField {
+                            model: metadata.model_name.clone(),
+                            field: field_ref.name.clone(),
+                        })?;
+                }
+            }
+        }
+        Operation::BulkUpdate {
+            pk_field,
+            fields,
+            rows,
+        } => {
+            if rows.is_empty() {
+                return Err(CompileError::MalformedIr {
+                    reason: "bulk_update requires at least one row".into(),
+                });
+            }
+            if fields.is_empty() {
+                return Err(CompileError::MalformedIr {
+                    reason: "bulk_update requires at least one field".into(),
+                });
+            }
+            metadata
+                .fields
+                .get(pk_field.index)
+                .ok_or_else(|| CompileError::UnknownField {
+                    model: metadata.model_name.clone(),
+                    field: pk_field.name.clone(),
+                })?;
+            for field_ref in fields {
+                metadata
+                    .fields
+                    .get(field_ref.index)
+                    .ok_or_else(|| CompileError::UnknownField {
+                        model: metadata.model_name.clone(),
+                        field: field_ref.name.clone(),
+                    })?;
+            }
+            for row in rows {
+                if row.values.len() != fields.len() {
+                    return Err(CompileError::MalformedIr {
+                        reason: "bulk_update row value count must match fields".into(),
+                    });
+                }
+            }
+        }
+        Operation::BulkDelete { pk_field, ids } => {
+            if ids.is_empty() {
+                return Err(CompileError::MalformedIr {
+                    reason: "bulk_delete requires at least one id".into(),
+                });
+            }
+            metadata
+                .fields
+                .get(pk_field.index)
+                .ok_or_else(|| CompileError::UnknownField {
+                    model: metadata.model_name.clone(),
+                    field: pk_field.name.clone(),
+                })?;
+        }
     }
 
     // Validate all field references in filters before touching SQL.
     for filter in &ir.filters {
-        let field_meta =
-            metadata
-                .fields
-                .get(filter.field.index)
-                .ok_or_else(|| CompileError::UnknownField {
-                    model: metadata.model_name.clone(),
-                    field: filter.field.name.clone(),
-                })?;
+        validate_filter(metadata, filter)?;
+    }
 
-        if !field_meta.allowed_operators.contains(&filter.operator) {
-            return Err(CompileError::UnsupportedOperator {
+    if let Some(predicate) = &ir.predicate {
+        validate_predicate(metadata, predicate)?;
+    }
+
+    for join in &ir.joins {
+        metadata
+            .fields
+            .get(join.local_field.index)
+            .ok_or_else(|| CompileError::UnknownField {
                 model: metadata.model_name.clone(),
-                field: filter.field.name.clone(),
-                operator: filter.operator.clone(),
+                field: join.local_field.name.clone(),
+            })?;
+        if join.remote_table.is_empty() || join.alias.is_empty() {
+            return Err(CompileError::MalformedIr {
+                reason: "join spec missing remote_table or alias".into(),
             });
         }
     }
@@ -199,6 +280,43 @@ fn validate_vector_order_by(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result
     Ok(())
 }
 
+/// True when the IR carries at least one WHERE constraint (flat filters or a predicate tree).
+pub fn ir_has_where_clause(ir: &QuerySetIR) -> bool {
+    !ir.filters.is_empty() || ir.predicate.is_some()
+}
+
+fn validate_filter(metadata: &ModelMetadata, filter: &crate::ir::Filter) -> Result<(), CompileError> {
+    let field_meta = metadata
+        .fields
+        .get(filter.field.index)
+        .ok_or_else(|| CompileError::UnknownField {
+            model: metadata.model_name.clone(),
+            field: filter.field.name.clone(),
+        })?;
+
+    if !field_meta.allowed_operators.contains(&filter.operator) {
+        return Err(CompileError::UnsupportedOperator {
+            model: metadata.model_name.clone(),
+            field: filter.field.name.clone(),
+            operator: filter.operator.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_predicate(metadata: &ModelMetadata, predicate: &Predicate) -> Result<(), CompileError> {
+    match predicate {
+        Predicate::And { children } | Predicate::Or { children } => {
+            for child in children {
+                validate_predicate(metadata, child)?;
+            }
+        }
+        Predicate::Not { child } => validate_predicate(metadata, child)?,
+        Predicate::Filter { filter } => validate_filter(metadata, filter)?,
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +372,10 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            predicate: None,
+            distinct: false,
+            exists: false,
+            joins: vec![],
         }
     }
 
@@ -391,6 +513,10 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            predicate: None,
+            distinct: false,
+            exists: false,
+            joins: vec![],
         };
         assert!(compile(&meta, &ir).is_ok());
     }
@@ -415,6 +541,10 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            predicate: None,
+            distinct: false,
+            exists: false,
+            joins: vec![],
         };
         assert!(matches!(
             compile(&meta, &ir).unwrap_err(),
@@ -434,6 +564,10 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            predicate: None,
+            distinct: false,
+            exists: false,
+            joins: vec![],
         };
         assert!(matches!(
             compile(&meta, &ir).unwrap_err(),
@@ -462,6 +596,10 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            predicate: None,
+            distinct: false,
+            exists: false,
+            joins: vec![],
         };
         assert!(matches!(
             compile(&meta, &ir).unwrap_err(),

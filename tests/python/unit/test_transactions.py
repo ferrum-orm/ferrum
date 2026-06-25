@@ -117,7 +117,8 @@ async def test_commit_on_clean_exit() -> None:
     async with conn.transaction() as tx:
         assert isinstance(tx, Transaction)
         assert tx.dialect == "postgres"
-        assert tx._require_driver() is driver.bound
+        await tx._require_driver().fetchval("SELECT 1")
+        assert ("fetchval", "SELECT 1") in driver.bound.calls
     assert driver.committed is True
     assert driver.rolled_back is False
 

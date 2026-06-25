@@ -74,7 +74,7 @@ def _import_settings(cfg: FerrumConfig, project_root: Path) -> None:
     Discovery order
     ---------------
     1. ``FERRUM_SETTINGS`` environment variable.
-    2. ``[ferrum].settings`` in ``ferrum.toml``.
+    2. ``[ferrum].settings`` in ``ferrum.toml`` or ``pyproject.toml``.
     3. ``ferrum_conf.py`` in ``project_root`` (file-based autodiscovery via
        ``importlib``).
 
@@ -117,7 +117,8 @@ def _import_by_name(module_name: str, *, explicit: bool) -> None:
         if explicit:
             raise FerrumConfigError(
                 f"Cannot import settings module {module_name!r}: {exc}. "
-                "Check FERRUM_SETTINGS or [ferrum].settings in ferrum.toml. [FERR-C001]"
+                "Check FERRUM_SETTINGS or [ferrum].settings in ferrum.toml / pyproject.toml. "
+                "[FERR-C001]"
             ) from exc
         return
     _call_configure(mod)

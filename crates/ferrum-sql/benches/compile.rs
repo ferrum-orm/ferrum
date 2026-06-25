@@ -110,6 +110,10 @@ fn bench_select_ir() -> QuerySetIR {
         limit: Some(50),
         offset: Some(10),
         vector_order_by: None,
+        predicate: None,
+        distinct: false,
+        exists: false,
+        joins: vec![],
     }
 }
 

@@ -42,6 +42,7 @@ _SUPPORTED_TYPES: dict[type, str] = {
     UUID: "uuid",
     bytes: "bytes",
     dict: "json",
+    list: "array_text",  # bare list defaults to text[]; parameterized list[T] handled in _build_metadata
 }
 
 
@@ -106,9 +107,17 @@ _ALLOWED_OPERATORS: dict[str, tuple[str, ...]] = {
     "time": ("eq", "gt", "gte", "lt", "lte", "is_null", "ne", "range"),
     "uuid": ("eq", "in", "is_null", "ne"),
     "bytes": ("eq", "in", "is_null", "ne"),
-    "json": ("eq", "is_null"),
+    # JSONB: containment + key existence operators (PostgreSQL @>, ?, ?|)
+    "json": ("eq", "is_null", "contains", "has_key", "has_any_keys"),
     "vector": ("is_null",),
     "tsvector": ("match", "is_null"),
+    # PostgreSQL array types — array containment and overlap operators
+    "array_text": ("eq", "is_null", "contains", "contained_by", "overlap"),
+    "array_int": ("eq", "is_null", "contains", "contained_by", "overlap"),
+    "array_uuid": ("eq", "is_null", "contains", "contained_by", "overlap"),
+    "array_float": ("eq", "is_null", "contains", "contained_by", "overlap"),
+    # Enum (TEXT + CHECK constraint) — equality and membership operators
+    "enum": ("eq", "is_null", "ne", "in"),
 }
 
 # Allowlist for ON DELETE actions in FK constraints (SQL injection guard).
@@ -162,6 +171,8 @@ class FieldMeta:
     db_default: str | None = None
     python_default: Any | None = None
     vector_dimensions: int | None = None
+    # For enum fields: the allowed string values (drives CHECK constraint in DDL).
+    enum_values: tuple[str, ...] | None = None
 
     @property
     def sql_type(self) -> str:
@@ -205,6 +216,7 @@ class RelationMeta:
     db_column: str | None = None  # backing FK column for fk/one_to_one
     through_table: str | None = None  # join table for m2m
     on_delete: str | None = None  # validated ON DELETE action
+    related_name: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -214,6 +226,11 @@ class ModelMetadata:
     Serves as the allowlist source for the Rust compiler and the migration
     planner. Never carries connection info, bound values, or row data (DM-7).
     Shared read-only across async tasks — no locks required (ARCHITECTURE §6.3).
+
+    ``pk_fields`` is the canonical tuple of field indices for the primary key.
+    ``pk_index`` is kept as a backward-compat property returning ``pk_fields[0]``.
+    For single-PK models the two are equivalent; for composite-PK models
+    ``pk_fields`` contains all participating indices.
     """
 
     table_name: str
@@ -221,8 +238,15 @@ class ModelMetadata:
     fields: tuple[FieldMeta, ...]
     indexes: tuple[IndexMeta, ...] = ()
     allowed_sort_directions: tuple[str, ...] = ("asc", "desc")
-    pk_index: int = 0
+    # pk_fields: all PK field indices in definition order.
+    # Defaults to (0,) so the first field is implicitly the PK when not specified.
+    pk_fields: tuple[int, ...] = (0,)
     relations: tuple[RelationMeta, ...] = ()
+
+    @property
+    def pk_index(self) -> int:
+        """Backward-compat alias: index of the *first* PK field."""
+        return self.pk_fields[0] if self.pk_fields else 0
 
     def to_metadata_json(self) -> str:
         """Serialize to the JSON string expected by ``ferrum._native.compile_query``.
@@ -230,6 +254,9 @@ class ModelMetadata:
         Produces the ``ModelMetadata`` shape that Rust's serde deserializer
         expects (ADR-002 §ModelMetadata.fields). Field ``pk`` is Python-internal
         and is not sent across the boundary.
+
+        Emits both ``pk_index`` (legacy, first PK) and ``pk_fields`` (all PK
+        indices) so the Rust side can use either depending on the operation.
         """
         field_payloads: list[dict[str, Any]] = []
         for f in self.fields:
@@ -248,6 +275,7 @@ class ModelMetadata:
                 "model_name": self.model_name,
                 "table_name": self.table_name,
                 "pk_index": self.pk_index,
+                "pk_fields": list(self.pk_fields),
                 "fields": field_payloads,
             }
         )
@@ -299,6 +327,19 @@ def _field_type_to_sql(field: FieldMeta) -> str:
         return f"VECTOR({field.vector_dimensions})"
     if ft == "tsvector":
         return "TSVECTOR"
+    # PostgreSQL array types
+    if ft == "array_text":
+        return "TEXT[]"
+    if ft == "array_int":
+        return "INTEGER[]"
+    if ft == "array_uuid":
+        return "UUID[]"
+    if ft == "array_float":
+        return "FLOAT8[]"
+    # Enum: stored as TEXT; CHECK constraint is emitted by the migration orchestrator
+    # when ``field.enum_values`` is populated.
+    if ft == "enum":
+        return "TEXT"
     return "TEXT"
 
 
@@ -537,6 +578,29 @@ def Field(  # noqa: N802
 # ---------------------------------------------------------------------------
 
 
+def _resolve_list_field_type(base_type: Any) -> str:  # noqa: ANN401
+    """Return the Ferrum field type for a parameterized ``list[T]`` annotation."""
+    args = get_args(base_type)
+    if not args:
+        return "array_text"
+    elem = args[0]
+    # Unwrap Optional[T] inside the element type (e.g. list[str | None] is unusual but valid).
+    if get_origin(elem) is Union or (
+        hasattr(_types, "UnionType") and isinstance(elem, _types.UnionType)
+    ):
+        non_none = [a for a in get_args(elem) if a is not type(None)]
+        elem = non_none[0] if non_none else str
+    if elem is str:
+        return "array_text"
+    if elem is int:
+        return "array_int"
+    if elem is UUID:
+        return "array_uuid"
+    if elem is float:
+        return "array_float"
+    return "array_text"  # safe fallback
+
+
 def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
     """Derive ``ModelMetadata`` from a Pydantic v2 model's ``model_fields``.
 
@@ -560,8 +624,7 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
 
     # --- field list derivation ---
     fields: list[FieldMeta] = []
-    pk_index = 0
-    found_pk = False
+    pk_indices: list[int] = []
 
     for idx, (name, field_info) in enumerate(cls.model_fields.items()):
         annotation = field_info.annotation
@@ -583,14 +646,26 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
         is_pk = bool(ferrum_extras.get("primary_key", False))
 
         # Implicit PK: first int field named "id" when no explicit PK is declared.
-        if not is_pk and not found_pk and name == "id" and base_type is int:
+        if not is_pk and not pk_indices and name == "id" and base_type is int:
             is_pk = True
 
-        if is_pk and not found_pk:
-            found_pk = True
-            pk_index = idx
+        if is_pk:
+            pk_indices.append(idx)
 
-        db_type = _SUPPORTED_TYPES.get(base_type, "text")
+        # --- field type resolution ---
+        enum_values: tuple[str, ...] | None = None
+        origin = get_origin(base_type)
+
+        if origin is Literal:
+            # Literal["a", "b"] → enum field type with TEXT + CHECK constraint
+            db_type = "enum"
+            enum_values = tuple(str(v) for v in get_args(base_type))
+        elif origin is list:
+            db_type = _resolve_list_field_type(base_type)
+        elif base_type is list:
+            db_type = "array_text"
+        else:
+            db_type = _SUPPORTED_TYPES.get(base_type, "text")  # type: ignore[arg-type]
 
         # Integer PK columns use big_int semantics (DATA_MODELING.md §3.4).
         if is_pk and db_type == "int":
@@ -613,11 +688,19 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                 "Field(vector_dimensions=n)."
             )
 
+        python_type_name: str
+        if origin is Literal:
+            python_type_name = "Literal"
+        elif origin is list:
+            python_type_name = "list"
+        else:
+            python_type_name = getattr(base_type, "__name__", str(base_type))
+
         fields.append(
             FieldMeta(
                 name=name,
                 column_name=column_name,
-                python_type_name=getattr(base_type, "__name__", str(base_type)),
+                python_type_name=python_type_name,
                 field_type=db_type,
                 allowed_operators=_ALLOWED_OPERATORS.get(db_type, ("eq", "is_null", "ne")),
                 nullable=nullable,
@@ -630,6 +713,7 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                 db_default=db_default,
                 python_default=python_default,
                 vector_dimensions=vector_dimensions,
+                enum_values=enum_values,
             )
         )
 
@@ -704,7 +788,21 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                     to_model=attr_value.to,
                     db_column=backing_col,
                     on_delete=on_delete,
+                    related_name=attr_value.related_name,
                 )
+            )
+            from ferrum.relations import ReverseRelationMeta, register_reverse
+
+            accessor = attr_value.related_name or f"{_to_snake_case(cls.__name__)}_set"
+            register_reverse(
+                target_model=attr_value.to,
+                meta=ReverseRelationMeta(
+                    accessor=accessor,
+                    related_model_name=cls.__name__,
+                    fk_column=backing_col,
+                    fk_field_name=attr_name,
+                    kind=kind,
+                ),
             )
         elif isinstance(attr_value, ManyToMany):
             target_table = _to_snake_case(attr_value.to)
@@ -718,12 +816,17 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                 )
             )
 
+    # Default to field 0 as the single PK when nothing was marked as primary_key=True
+    # and no implicit "id" int field was found.
+    if not pk_indices and fields:
+        pk_indices = [0]
+
     return ModelMetadata(
         table_name=table_name,
         model_name=cls.__name__,
         fields=tuple(fields),
         indexes=tuple(indexes),
-        pk_index=pk_index,
+        pk_fields=tuple(pk_indices),
         relations=tuple(relations),
     )
 
@@ -802,6 +905,11 @@ class Model(_PydanticBaseModel):
             metadata = _build_metadata(cls)
             cls.__ferrum_table__ = metadata.table_name
             cls.__ferrum_metadata__ = metadata
+            from ferrum.registry import register_model
+            from ferrum.relations import install_relation_descriptors
+
+            register_model(cls)
+            install_relation_descriptors(cls)
 
     @classmethod
     def get_metadata(cls) -> ModelMetadata:
@@ -815,3 +923,28 @@ class Model(_PydanticBaseModel):
                 f"Model {cls.__name__!r} has no metadata. Ensure it defines at least one field."
             )
         return cls.__ferrum_metadata__
+
+    def __getattribute__(self, name: str) -> Any:  # noqa: ANN401
+        if name.startswith("_") or name in {
+            "model_fields",
+            "model_config",
+            "model_computed_fields",
+            "objects",
+            "get_metadata",
+            "model_construct",
+            "model_dump",
+            "model_copy",
+        }:
+            return super().__getattribute__(name)
+        try:
+            deferred = object.__getattribute__(self, "__ferrum_deferred__")
+        except AttributeError:
+            deferred = None
+        if deferred and name in deferred:
+            from ferrum.errors import FerrumDeferredFieldError
+
+            raise FerrumDeferredFieldError(
+                f"Field {name!r} was deferred and is not loaded. "
+                "Use only()/defer() carefully or fetch the field explicitly. [FERR-Q406]"
+            )
+        return super().__getattribute__(name)

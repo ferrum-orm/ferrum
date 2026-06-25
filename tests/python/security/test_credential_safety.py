@@ -163,6 +163,7 @@ class TestConnectCredentialSafety:
         from ferrum.errors import FerrumConfigError
 
         monkeypatch.delenv("FERRUM_DATABASE_URL", raising=False)
+        monkeypatch.delenv("DATABASE_URL", raising=False)
 
         with pytest.raises(FerrumConfigError) as exc_info:
             async with ferrum.connect():

@@ -86,10 +86,22 @@ class AsyncpgDriver:
 
     dialect = "postgres"
 
-    def __init__(self, dsn: str, *, min_size: int = 1, max_size: int = 10) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        min_size: int = 1,
+        max_size: int = 10,
+        acquire_timeout: float | None = None,
+        statement_timeout_ms: int | None = None,
+        max_lifetime: float | None = None,
+    ) -> None:
         self._dsn = dsn
         self._min_size = min_size
         self._max_size = max_size
+        self._acquire_timeout = acquire_timeout
+        self._statement_timeout_ms = statement_timeout_ms
+        self._max_lifetime = max_lifetime
         self._pool: Any = None
 
     async def open(self) -> None:
@@ -101,12 +113,21 @@ class AsyncpgDriver:
             ) from exc
 
         diag = _redacted_diag(self._dsn)
+        pool_kwargs: dict[str, Any] = {
+            "min_size": self._min_size,
+            "max_size": self._max_size,
+        }
+        if self._max_lifetime is not None:
+            pool_kwargs["max_inactive_connection_lifetime"] = self._max_lifetime
+        if self._statement_timeout_ms is not None:
+            timeout_ms = self._statement_timeout_ms
+
+            async def _init_conn(conn: Any) -> None:
+                await conn.execute(f"SET statement_timeout = {timeout_ms}")
+
+            pool_kwargs["init"] = _init_conn
         try:
-            self._pool = await asyncpg.create_pool(
-                self._dsn,
-                min_size=self._min_size,
-                max_size=self._max_size,
-            )
+            self._pool = await asyncpg.create_pool(self._dsn, **pool_kwargs)
         except Exception as exc:
             raise FerrumConnectionError(
                 f"Failed to connect to PostgreSQL at {diag['host']}:{diag['port']} "
@@ -160,8 +181,12 @@ class AsyncpgDriver:
     async def acquire(self) -> AsyncGenerator[Any, None]:
         pool = self._require_driver()
         try:
-            async with pool.acquire() as raw_conn:
-                yield raw_conn
+            if self._acquire_timeout is not None:
+                async with pool.acquire(timeout=self._acquire_timeout) as raw_conn:
+                    yield raw_conn
+            else:
+                async with pool.acquire() as raw_conn:
+                    yield raw_conn
         except Exception as exc:
             raise map_db_error(exc) from None
 

@@ -37,9 +37,12 @@ async def run_showmigrations(migrations_dir: Path) -> int:
         async with connect() as conn:
             await ledger.ensure_ledger(conn)
             for module in modules:
-                digest = ledger.compute_digest(module.name, module.path.read_text(encoding="utf-8"))
-                applied = await ledger.is_applied(conn, digest)
-                if applied:
+                content = module.path.read_text(encoding="utf-8")
+                digest = ledger.compute_digest(module.name, content)
+                stored = await ledger.find_applied_digest_by_name(conn, module.name)
+                if stored is not None and stored != digest:
+                    table.add_row("[red][!][/red]", f"{module.name}  (checksum mismatch)")
+                elif await ledger.is_applied(conn, digest):
                     table.add_row("[green][X][/green]", module.name)
                 else:
                     table.add_row("[yellow][ ][/yellow]", module.name)

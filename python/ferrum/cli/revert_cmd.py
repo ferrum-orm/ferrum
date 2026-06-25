@@ -54,6 +54,11 @@ async def run_revert(
 
             modules = _loader.scan(migrations_dir)
 
+            for module in modules:
+                content = module.path.read_text(encoding="utf-8")
+                digest = _ledger.compute_digest(module.name, content)
+                await _ledger.verify_checksum(conn, module.name, digest)
+
             # Pair each module with its content-keyed digest; filter to applied.
             applied: list[tuple[_loader.MigrationModule, str]] = []
             for module in modules:

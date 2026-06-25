@@ -140,34 +140,41 @@ This allows Ferrum to maintain a Pythonic API without sacrificing performance.
 
 ## Roadmap
 
-### v0.1
+### v0.1 (complete)
 
-- [ ] PostgreSQL support
-- [ ] Basic CRUD operations
-- [ ] Async query execution
-- [ ] Pydantic models
-- [ ] Query builder
-- [ ] Type-safe filters
+- [x] PostgreSQL support
+- [x] Basic CRUD operations
+- [x] Async query execution
+- [x] Pydantic models
+- [x] Query builder
+- [x] Type-safe filters
+- [x] Transactions and savepoints
+- [x] Bulk operations (`bulk_create`, `bulk_update`, `bulk_delete`)
+- [x] Migrations (schema diff, apply, revert, CLI)
+- [x] Relationships (ForeignKey, OneToOne, ManyToMany)
+- [x] pgvector KNN search and HNSW/IVFFLAT index DDL
+- [x] Full-text search (TSVector / `plainto_tsquery`)
+- [x] Observability hooks (Tier A/B/C)
+- [x] CLI (`makemigrations`, `migrate`, `revert`, `showmigrations`, `inspectdb`, `resetdb`)
 
-### v0.2
+### v0.2 (in progress)
 
-- [ ] Relationships
-- [x] Transactions
-- [ ] Query optimization
-- [ ] Bulk operations
-
-### v0.3
-
-- [ ] Migrations
-- [ ] Schema diff engine
-- [ ] CLI tools
+- [x] Upsert API (`upsert`, `bulk_upsert` with conflict targets and `RETURNING`)
+- [x] Composite primary keys
+- [x] Array field types (`uuid[]`, `text[]`, scalar arrays)
+- [x] JSONB operators (`__contains`, `__has_key`)
+- [x] RLS / tenant session helpers (`set_config`, `tenant_session`)
+- [x] `call_function` for allowlisted stored-procedure calls
+- [x] Migration ops for extensions, RLS policies, and function DDL
+- [x] pgvector similarity score projection (`vector_search` helper)
+- [ ] Query optimization (deferred fields, prefetch tuning)
+- [ ] Advanced relationship loading
 
 ### v1.0
 
 - [ ] Production-ready stability
-- [ ] Advanced relationships
-- [ ] Performance benchmarking
-- [ ] Full documentation
+- [ ] Performance benchmarking suite
+- [ ] Full documentation site
 
 ## Project Status
 

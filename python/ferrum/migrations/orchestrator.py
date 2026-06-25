@@ -83,6 +83,28 @@ class MigrationResult:
     dry_run: bool
 
 
+# Destructive migration op kinds — require explicit ``confirm=True`` (MIG-2).
+# Non-transactional op kinds — must run outside an explicit transaction block
+# on some PostgreSQL configurations (ADR-004 gate, future enforcement).
+_DESTRUCTIVE_KINDS: frozenset[str] = frozenset(
+    {
+        "drop_table",
+        "drop_column",
+        "drop_fk",
+        "raw_sql",
+        "drop_extension",
+        "disable_rls",
+        "drop_policy",
+        "drop_function",
+    }
+)
+_NON_TRANSACTIONAL_KINDS: frozenset[str] = frozenset(
+    {
+        "create_extension",
+        "create_function",
+    }
+)
+
 # SQL type allowlist — only these tokens may appear in DDL type position.
 # Prevents DDL injection if upstream metadata validation is bypassed.
 _SQL_TYPE_ALLOWLIST: frozenset[str] = frozenset(
@@ -295,6 +317,47 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
             f"DROP COLUMN IF EXISTS {_quote_ident(column, dialect)}"
         )
 
+    if kind == "alter_column":
+        table = op["table"]
+        column = op["column"]
+        parts: list[str] = []
+        sql_type = op.get("sql_type")
+        if sql_type is not None:
+            mapped = _map_sql_type(str(sql_type), dialect)
+            if mapped.upper().split("(")[0].strip() not in _SQL_TYPE_ALLOWLIST:
+                raise FerrumMigrationError(
+                    f"SQL type {sql_type!r} is not in the migration allowlist. [FERR-M001]"
+                )
+            parts.append(
+                f"ALTER COLUMN {_quote_ident(column, dialect)} TYPE {mapped}"
+            )
+        if op.get("not_null") is True:
+            parts.append(f"ALTER COLUMN {_quote_ident(column, dialect)} SET NOT NULL")
+        elif op.get("not_null") is False:
+            parts.append(f"ALTER COLUMN {_quote_ident(column, dialect)} DROP NOT NULL")
+        default = op.get("default")
+        if default is not None:
+            default_token = _normalize_column_default(default)
+            if default_token.upper() not in _DEFAULT_VALUE_ALLOWLIST:
+                raise FerrumMigrationError(
+                    f"Default value {default!r} is not in the migration allowlist. [FERR-M001]"
+                )
+            parts.append(
+                f"ALTER COLUMN {_quote_ident(column, dialect)} SET DEFAULT {default_token}"
+            )
+        if op.get("drop_default"):
+            parts.append(f"ALTER COLUMN {_quote_ident(column, dialect)} DROP DEFAULT")
+        if not parts:
+            raise FerrumMigrationError(
+                "alter_column requires at least one of sql_type, not_null, default, drop_default."
+            )
+        if dialect != "postgres":
+            raise FerrumMigrationError(
+                "alter_column is only supported on PostgreSQL in Ferrum v0.1. [FERR-M001]"
+            )
+        inner = ", ".join(parts)
+        return f"ALTER TABLE {_quote_ident(table, dialect)} {inner}"
+
     if kind == "rename_column":
         table = op["table"]
         from_col = op["from"]
@@ -365,6 +428,86 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
         # raw_sql ops with safe=False must have been blocked at the
         # requires_confirmation gate before reaching this point.
         return op["sql"]
+
+    # ------------------------------------------------------------------
+    # Extension operations
+    # ------------------------------------------------------------------
+
+    if kind == "create_extension":
+        name = op["name"]
+        schema_part = f" SCHEMA {_quote_ident(op['schema'], dialect)}" if op.get("schema") else ""
+        return f"CREATE EXTENSION IF NOT EXISTS {_quote_ident(name, dialect)}{schema_part}"
+
+    if kind == "drop_extension":
+        name = op["name"]
+        cascade_part = " CASCADE" if op.get("cascade") else ""
+        return f"DROP EXTENSION IF EXISTS {_quote_ident(name, dialect)}{cascade_part}"
+
+    # ------------------------------------------------------------------
+    # Row Level Security operations
+    # ------------------------------------------------------------------
+
+    if kind == "enable_rls":
+        table = op["table"]
+        if op.get("force"):
+            return f"ALTER TABLE {_quote_ident(table, dialect)} FORCE ROW LEVEL SECURITY"
+        return f"ALTER TABLE {_quote_ident(table, dialect)} ENABLE ROW LEVEL SECURITY"
+
+    if kind == "disable_rls":
+        table = op["table"]
+        return f"ALTER TABLE {_quote_ident(table, dialect)} DISABLE ROW LEVEL SECURITY"
+
+    if kind == "create_policy":
+        # Security note: using and check_expr are developer-supplied SQL expressions
+        # from migration files — not from user input. They are emitted verbatim.
+        name = op["name"]
+        table = op["table"]
+        using_expr = op["using"]
+        command = str(op.get("command", "ALL")).upper()
+        _valid_commands: frozenset[str] = frozenset(
+            {"ALL", "SELECT", "INSERT", "UPDATE", "DELETE"}
+        )
+        if command not in _valid_commands:
+            raise FerrumMigrationError(
+                f"Unsupported policy command {command!r}. "
+                f"Expected one of: {', '.join(sorted(_valid_commands))}. [FERR-M001]"
+            )
+        sql = (
+            f"CREATE POLICY {_quote_ident(name, dialect)} "
+            f"ON {_quote_ident(table, dialect)}"
+        )
+        if command != "ALL":
+            sql += f" FOR {command}"
+        role = op.get("role")
+        if role:
+            sql += f" TO {_quote_ident(role, dialect)}"
+        sql += f" USING ({using_expr})"
+        check_expr = op.get("check_expr")
+        if check_expr:
+            sql += f" WITH CHECK ({check_expr})"
+        return sql
+
+    if kind == "drop_policy":
+        name = op["name"]
+        table = op["table"]
+        return (
+            f"DROP POLICY IF EXISTS {_quote_ident(name, dialect)} "
+            f"ON {_quote_ident(table, dialect)}"
+        )
+
+    # ------------------------------------------------------------------
+    # Stored function operations
+    # ------------------------------------------------------------------
+
+    if kind == "create_function":
+        # Security note: body is a developer-supplied full DDL statement from a
+        # migration file — never from user input. Emitted verbatim.
+        return op["body"]
+
+    if kind == "drop_function":
+        name = op["name"]
+        args = op.get("args", "")
+        return f"DROP FUNCTION IF EXISTS {_quote_ident(name, dialect)}({args})"
 
     raise FerrumMigrationError(f"Unknown migration op kind: {kind!r}. [FERR-M001]")
 
@@ -711,8 +854,7 @@ async def apply(
 
     # MIG-2: destructive gate — independently scan ops, never trust the
     # `requires_confirmation` flag from plan JSON (a crafted JSON could lie).
-    destructive_kinds = frozenset({"drop_table", "drop_column", "drop_fk", "raw_sql"})
-    is_destructive = any(op.get("kind") in destructive_kinds for op in ops)
+    is_destructive = any(op.get("kind") in _DESTRUCTIVE_KINDS for op in ops)
     if (is_destructive or plan.get("requires_confirmation")) and not confirm:
         raise FerrumMigrationError(
             "Migration requires explicit confirmation. "

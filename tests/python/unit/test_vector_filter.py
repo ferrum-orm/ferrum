@@ -51,7 +51,7 @@ class TestTsvectorFilterIr:
     def test_match_operator_in_ir(self) -> None:
         qs: QuerySet[Doc] = Doc.objects.filter(search_vector__match="python orm")
         ir = json.loads(qs.to_ir_json())
-        flt = ir["filters"][0]
+        flt = ir["predicate"]["filter"]
         assert flt["operator"] == "match"
         assert flt["value"]["type"] == "text"
         assert flt["value"]["value"] == "python orm"

@@ -40,6 +40,7 @@ cli = [
 dotenv = ["python-dotenv>=1.0"]
 uuid7 = ["uuid6>=2024.1"]
 fastapi = []  # uses the host's FastAPI; no extra deps needed
+otel = ["opentelemetry-api>=1.20"]
 all = [
     "ferrum-orm[pg]",
     "ferrum-orm[mysql]",
@@ -121,6 +122,7 @@ ignore = [
 "python/ferrum/drivers/**" = ["ANN401", "SIM117", "S608"]  # driver boundary; table names from compiler allowlists
 "python/ferrum/migrations/ledger.py" = ["S608"]  # LEDGER_TABLE is a fixed constant identifier
 "python/ferrum/cli/resetdb_cmd.py" = ["S608"]  # LEDGER_TABLE is a fixed constant
+"python/ferrum/ext/pgvector.py" = ["S608"]  # identifiers from metadata allowlists; values are bound params
 
 # ---------------------------------------------------------------------------
 # ty

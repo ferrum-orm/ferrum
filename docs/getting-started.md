@@ -16,7 +16,7 @@ PostgreSQL. Every example here mirrors the runnable demo in
 - The compiled native extension (`ferrum._native`), built via maturin
 - For CLI commands (`ferrum init`, `migrate`, `makemigrations`, …): install the optional
   CLI extra — `pip install 'ferrum[cli]'` or `pip install 'ferrum[cli,dotenv]'` for automatic
-  `.env` loading via `ferrum.toml`
+  `.env` loading via `ferrum.toml` or `pyproject.toml`
 - The CLI optional extra for command-line tools: `pip install 'ferrum[cli]'`
   (or `ferrum[cli,dotenv]` when you also want automatic `.env` loading)
 
@@ -59,16 +59,19 @@ the full DSN.
 
 ---
 
-## 2a. Project config (ferrum.toml and ferrum_conf.py)
+## 2a. Project config (`ferrum.toml`, `pyproject.toml`, and `ferrum_conf.py`)
 
-### ferrum.toml
+### `ferrum.toml` or `pyproject.toml`
 
-`ferrum.toml` is the optional project configuration file. It is scaffolded automatically
-by `ferrum init` with all keys commented out (so the defaults are always self-documenting).
+Ferrum reads a `[ferrum]` table from `ferrum.toml` when that file exists; otherwise
+it reads the same table from `pyproject.toml`. This lets you colocate Ferrum settings
+with your Python packaging metadata when you do not want a separate config file.
+
+`ferrum init` scaffolds a dedicated `ferrum.toml` with all keys commented out.
 **Secrets never go here** — database URLs and passwords belong in `.env`.
 
 ```toml
-# ferrum.toml — Ferrum project configuration
+# ferrum.toml — or the [ferrum] table in pyproject.toml
 [ferrum]
 # Python module that imports your app's models (enables makemigrations auto-discovery)
 # settings = "ferrum_conf"
@@ -81,16 +84,34 @@ by `ferrum init` with all keys commented out (so the defaults are always self-do
 
 # Path to dotenv file loaded by the CLI (default: .env)
 # env_file = ".env"
+
+# Environment variable for the database URL (default: FERRUM_DATABASE_URL, then DATABASE_URL)
+# database_url_env = "DATABASE_URL"
+```
+
+Example in `pyproject.toml`:
+
+```toml
+[project]
+name = "myapp"
+version = "0.1.0"
+
+[ferrum]
+settings = "ferrum_conf"
+migrations_dir = "migrations"
+default_env = "development"
+env_file = ".env"
 ```
 
 Available keys:
 
-| Key              | Default         | Description                                                  |
-| ---------------- | --------------- | ------------------------------------------------------------ |
-| `settings`       | `None`          | Python module the CLI imports before running any subcommand. |
-| `migrations_dir` | `"migrations"`  | Directory (relative to project root) for migration files.    |
-| `default_env`    | `"development"` | Environment name used by `ferrum migrate`.                   |
-| `env_file`       | `".env"`        | Dotenv file loaded by the CLI (relative to project root).    |
+| Key                | Default         | Description                                                                                                     |
+| ------------------ | --------------- | --------------------------------------------------------------------------------------------------------------- |
+| `settings`         | `None`          | Python module the CLI imports before running any subcommand.                                                    |
+| `migrations_dir`   | `"migrations"`  | Directory (relative to project root) for migration files.                                                       |
+| `default_env`      | `"development"` | Environment name used by `ferrum migrate`.                                                                      |
+| `env_file`         | `".env"`        | Dotenv file loaded by the CLI (relative to project root).                                                       |
+| `database_url_env` | _(see below)_   | Env var holding the database URL. When unset or empty, Ferrum tries `FERRUM_DATABASE_URL`, then `DATABASE_URL`. |
 
 ### ferrum_conf.py
 
@@ -140,8 +161,8 @@ shell session. Useful in CI or when switching between configurations:
 FERRUM_SETTINGS=myapp.test_settings ferrum makemigrations
 ```
 
-Discovery order: `FERRUM_SETTINGS` env var → `[ferrum].settings` in `ferrum.toml` →
-`ferrum_conf.py` autodiscovery → skip (silently).
+Discovery order: `FERRUM_SETTINGS` env var → `[ferrum].settings` in `ferrum.toml` or
+`pyproject.toml` → `ferrum_conf.py` autodiscovery → skip (silently).
 
 ---
 

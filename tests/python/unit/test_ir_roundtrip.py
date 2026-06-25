@@ -32,7 +32,7 @@ class TestIrJsonRoundtrip:
         qs: QuerySet[User] = QuerySet(User)
         ir = self._roundtrip(qs)
 
-        assert ir["version"] == 1
+        assert ir["version"] == 2
         assert ir["model_name"] == "User"
         assert ir["operation"]["kind"] == "select"
         assert isinstance(ir["filters"], list)
@@ -44,8 +44,7 @@ class TestIrJsonRoundtrip:
         qs = QuerySet(User).filter(email="test@example.com")
         ir = self._roundtrip(qs)
 
-        assert len(ir["filters"]) == 1
-        flt = ir["filters"][0]
+        flt = ir["predicate"]["filter"]
         assert flt["field"]["name"] == "email"
         assert isinstance(flt["field"]["index"], int)
         assert flt["operator"] == "eq"
@@ -66,14 +65,14 @@ class TestIrJsonRoundtrip:
         qs = QuerySet(User).filter(id__gt=10)
         ir = self._roundtrip(qs)
 
-        flt = ir["filters"][0]
+        flt = ir["predicate"]["filter"]
         assert flt["value"] == {"type": "int", "value": 10}
 
     def test_bool_bind_value_roundtrip(self) -> None:
         qs = QuerySet(User).filter(active=True)
         ir = self._roundtrip(qs)
 
-        flt = ir["filters"][0]
+        flt = ir["predicate"]["filter"]
         assert flt["value"] == {"type": "bool", "value": True}
 
     def test_order_by_roundtrip(self) -> None:
@@ -104,19 +103,22 @@ class TestIrJsonRoundtrip:
         )
         ir = self._roundtrip(qs)
 
-        assert ir["version"] == 1
+        assert ir["version"] == 2
         assert ir["model_name"] == "User"
-        assert len(ir["filters"]) == 2
+        assert ir["predicate"]["kind"] == "and"
+        assert len(ir["predicate"]["children"]) == 2
         assert len(ir["order_by"]) == 1
         assert ir["limit"] == 10
         assert ir["offset"] == 0
 
         # Every filter value must be an adjacent-tagged dict
-        for flt in ir["filters"]:
+        for child in ir["predicate"]["children"]:
+            flt = child["filter"]
             assert "type" in flt["value"]
 
         # Field refs must carry both name and index
-        for flt in ir["filters"]:
+        for child in ir["predicate"]["children"]:
+            flt = child["filter"]
             assert "name" in flt["field"]
             assert "index" in flt["field"]
 

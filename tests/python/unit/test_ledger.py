@@ -24,8 +24,10 @@ from ferrum.migrations.ledger import (
     _create_ledger_sql,
     compute_digest,
     ensure_ledger,
+    find_applied_digest_by_name,
     is_applied,
     record_applied,
+    verify_checksum,
 )
 
 # ---------------------------------------------------------------------------
@@ -246,3 +248,24 @@ class TestIsApplied:
             "SELECT 1 FROM ferrum_migrations WHERE digest = $1",
             "target_digest",
         )
+
+
+class TestChecksumHelpers:
+    @pytest.mark.asyncio
+    async def test_find_applied_digest_by_name_returns_value(self) -> None:
+        pool = AsyncMock()
+        pool.fetchrow = AsyncMock(return_value={"digest": "abc"})
+        conn = _make_conn(pool=pool)
+
+        result = await find_applied_digest_by_name(conn, "0001_init")
+
+        assert result == "abc"
+
+    @pytest.mark.asyncio
+    async def test_verify_checksum_raises_on_mismatch(self) -> None:
+        pool = AsyncMock()
+        pool.fetchrow = AsyncMock(return_value={"digest": "old"})
+        conn = _make_conn(pool=pool)
+
+        with pytest.raises(FerrumMigrationError, match="checksum mismatch"):
+            await verify_checksum(conn, "0001_init", "new")

@@ -158,6 +158,59 @@ class DropColumn(Operation):
         return f"DropColumn({self.table_name!r}, {self.column_name!r})"
 
 
+class AlterColumn(Operation):
+    """Alter an existing column (type, nullability, or default).
+
+    Each attribute is optional; at least one must be set. Type narrowing and
+    ``SET NOT NULL`` on a populated column are classified destructive.
+    """
+
+    def __init__(
+        self,
+        table_name: str,
+        column_name: str,
+        *,
+        sql_type: str | None = None,
+        not_null: bool | None = None,
+        default: str | None = None,
+        drop_default: bool = False,
+    ) -> None:
+        self.table_name = table_name
+        self.column_name = column_name
+        self.sql_type = sql_type
+        self.not_null = not_null
+        self.default = default
+        self.drop_default = drop_default
+
+    def to_op_dict(self) -> dict[str, Any]:
+        op: dict[str, Any] = {
+            "kind": "alter_column",
+            "table": self.table_name,
+            "column": self.column_name,
+        }
+        if self.sql_type is not None:
+            op["sql_type"] = self.sql_type
+        if self.not_null is not None:
+            op["not_null"] = self.not_null
+        if self.default is not None:
+            op["default"] = self.default
+        if self.drop_default:
+            op["drop_default"] = True
+        return op
+
+    @property
+    def classification(self) -> str:
+        if self.not_null is True:
+            return "destructive"
+        return "safe"
+
+    def __repr__(self) -> str:
+        return (
+            f"AlterColumn({self.table_name!r}, {self.column_name!r}, "
+            f"sql_type={self.sql_type!r}, not_null={self.not_null!r})"
+        )
+
+
 class RenameColumn(Operation):
     """Rename a column in an existing table."""
 
@@ -332,3 +385,264 @@ class RawSQL(Operation):
     def __repr__(self) -> str:
         safe_str = ", safe=True" if self.safe else ""
         return f"RawSQL({self.sql!r}{safe_str})"
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQL extension operations
+# ---------------------------------------------------------------------------
+
+
+class CreateExtension(Operation):
+    """CREATE EXTENSION IF NOT EXISTS name.
+
+    Classification: ``non_transactional`` — PostgreSQL requires this outside
+    an explicit transaction block when using certain extensions.
+
+    Security note: ``name`` and ``schema`` are double-quoted identifiers
+    sourced from developer-supplied migration files, not from user input.
+    """
+
+    def __init__(self, name: str, *, schema: str | None = None) -> None:
+        self.name = name
+        self.schema = schema
+
+    def to_op_dict(self) -> dict[str, Any]:
+        op: dict[str, Any] = {"kind": "create_extension", "name": self.name}
+        if self.schema is not None:
+            op["schema"] = self.schema
+        return op
+
+    @property
+    def classification(self) -> str:
+        return "non_transactional"
+
+    def __repr__(self) -> str:
+        schema_str = f", schema={self.schema!r}" if self.schema is not None else ""
+        return f"CreateExtension({self.name!r}{schema_str})"
+
+
+class DropExtension(Operation):
+    """DROP EXTENSION IF EXISTS name.
+
+    Classification: ``destructive`` — removing an extension drops all its
+    objects and can break dependent schema objects.
+    """
+
+    def __init__(self, name: str, *, cascade: bool = False) -> None:
+        self.name = name
+        self.cascade = cascade
+
+    def to_op_dict(self) -> dict[str, Any]:
+        return {"kind": "drop_extension", "name": self.name, "cascade": self.cascade}
+
+    @property
+    def classification(self) -> str:
+        return "destructive"
+
+    def __repr__(self) -> str:
+        cascade_str = ", cascade=True" if self.cascade else ""
+        return f"DropExtension({self.name!r}{cascade_str})"
+
+
+# ---------------------------------------------------------------------------
+# Row Level Security operations
+# ---------------------------------------------------------------------------
+
+
+class EnableRLS(Operation):
+    """ALTER TABLE t ENABLE ROW LEVEL SECURITY.
+
+    Classification: ``safe``.
+
+    Args:
+        table_name: Target table.
+        force: When ``True``, emits ``FORCE ROW LEVEL SECURITY`` so that table
+            owners are also subject to the policies.
+    """
+
+    def __init__(self, table_name: str, *, force: bool = False) -> None:
+        self.table_name = table_name
+        self.force = force
+
+    def to_op_dict(self) -> dict[str, Any]:
+        return {"kind": "enable_rls", "table": self.table_name, "force": self.force}
+
+    @property
+    def classification(self) -> str:
+        return "safe"
+
+    def __repr__(self) -> str:
+        force_str = ", force=True" if self.force else ""
+        return f"EnableRLS({self.table_name!r}{force_str})"
+
+
+class DisableRLS(Operation):
+    """ALTER TABLE t DISABLE ROW LEVEL SECURITY.
+
+    Classification: ``destructive`` — disabling RLS removes tenant isolation
+    from the table and could expose data cross-tenant.
+    """
+
+    def __init__(self, table_name: str) -> None:
+        self.table_name = table_name
+
+    def to_op_dict(self) -> dict[str, Any]:
+        return {"kind": "disable_rls", "table": self.table_name}
+
+    @property
+    def classification(self) -> str:
+        return "destructive"
+
+    def __repr__(self) -> str:
+        return f"DisableRLS({self.table_name!r})"
+
+
+class CreatePolicy(Operation):
+    """CREATE POLICY name ON table USING (expr) [WITH CHECK (expr)].
+
+    Classification: ``safe``.
+
+    Security note: ``using`` and ``check_expr`` are raw SQL expressions
+    supplied by the developer in migration files — not from user input.
+    They are emitted verbatim into the DDL statement. Never pass untrusted
+    strings as policy expressions.
+    """
+
+    def __init__(
+        self,
+        policy_name: str,
+        table_name: str,
+        using: str,
+        *,
+        check_expr: str | None = None,
+        command: str = "ALL",
+        role: str | None = None,
+    ) -> None:
+        self.policy_name = policy_name
+        self.table_name = table_name
+        self.using = using
+        self.check_expr = check_expr
+        self.command = command
+        self.role = role
+
+    def to_op_dict(self) -> dict[str, Any]:
+        op: dict[str, Any] = {
+            "kind": "create_policy",
+            "name": self.policy_name,
+            "table": self.table_name,
+            "using": self.using,
+            "command": self.command,
+        }
+        if self.check_expr is not None:
+            op["check_expr"] = self.check_expr
+        if self.role is not None:
+            op["role"] = self.role
+        return op
+
+    @property
+    def classification(self) -> str:
+        return "safe"
+
+    def __repr__(self) -> str:
+        extras: list[str] = []
+        if self.check_expr is not None:
+            extras.append(f"check_expr={self.check_expr!r}")
+        if self.command != "ALL":
+            extras.append(f"command={self.command!r}")
+        if self.role is not None:
+            extras.append(f"role={self.role!r}")
+        extra_str = (", " + ", ".join(extras)) if extras else ""
+        return (
+            f"CreatePolicy({self.policy_name!r}, {self.table_name!r}, "
+            f"{self.using!r}{extra_str})"
+        )
+
+
+class DropPolicy(Operation):
+    """DROP POLICY IF EXISTS name ON table.
+
+    Classification: ``destructive`` — removing a policy removes tenant isolation
+    for the affected rows.
+    """
+
+    def __init__(self, policy_name: str, table_name: str) -> None:
+        self.policy_name = policy_name
+        self.table_name = table_name
+
+    def to_op_dict(self) -> dict[str, Any]:
+        return {
+            "kind": "drop_policy",
+            "name": self.policy_name,
+            "table": self.table_name,
+        }
+
+    @property
+    def classification(self) -> str:
+        return "destructive"
+
+    def __repr__(self) -> str:
+        return f"DropPolicy({self.policy_name!r}, {self.table_name!r})"
+
+
+# ---------------------------------------------------------------------------
+# Stored function operations
+# ---------------------------------------------------------------------------
+
+
+class CreateFunction(Operation):
+    """CREATE OR REPLACE FUNCTION.
+
+    Classification: ``non_transactional`` — function DDL in PostgreSQL is
+    transactional for PL/pgSQL but ``CREATE OR REPLACE`` on functions with
+    dependencies can fail inside a transaction in some configurations.
+
+    Security note: ``body`` is the full ``CREATE OR REPLACE FUNCTION ... $$ ...
+    $$ LANGUAGE plpgsql;`` statement supplied by the developer in migration
+    files — never from user input. It is emitted verbatim. Never pass
+    untrusted strings as the function body.
+    """
+
+    def __init__(self, function_name: str, body: str) -> None:
+        self.function_name = function_name
+        self.body = body
+
+    def to_op_dict(self) -> dict[str, Any]:
+        return {
+            "kind": "create_function",
+            "name": self.function_name,
+            "body": self.body,
+        }
+
+    @property
+    def classification(self) -> str:
+        return "non_transactional"
+
+    def __repr__(self) -> str:
+        preview = self.body[:40].replace("\n", " ")
+        return f"CreateFunction({self.function_name!r}, {preview!r}...)"
+
+
+class DropFunction(Operation):
+    """DROP FUNCTION IF EXISTS name(args).
+
+    Classification: ``destructive``.
+    """
+
+    def __init__(self, function_name: str, *, args: str = "") -> None:
+        self.function_name = function_name
+        self.args = args
+
+    def to_op_dict(self) -> dict[str, Any]:
+        return {
+            "kind": "drop_function",
+            "name": self.function_name,
+            "args": self.args,
+        }
+
+    @property
+    def classification(self) -> str:
+        return "destructive"
+
+    def __repr__(self) -> str:
+        args_str = f", args={self.args!r}" if self.args else ""
+        return f"DropFunction({self.function_name!r}{args_str})"

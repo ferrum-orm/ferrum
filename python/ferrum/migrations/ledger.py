@@ -87,6 +87,12 @@ def _delete_digest_sql(dialect: str) -> str:
     return f"DELETE FROM {LEDGER_TABLE} WHERE digest = $1"
 
 
+def _select_digest_by_description_sql(dialect: str) -> str:
+    if dialect in ("mysql", "sqlite"):
+        return f"SELECT digest FROM {LEDGER_TABLE} WHERE description = ?"
+    return f"SELECT digest FROM {LEDGER_TABLE} WHERE description = $1"
+
+
 def compute_digest(name: str, content: str) -> str:
     """Return a stable sha256 digest for a migration file."""
     return hashlib.sha256(f"{name}:{content}".encode()).hexdigest()
@@ -140,6 +146,31 @@ async def record_applied(
                 f"Migration {description!r} has already been applied. [FERR-M003]"
             ) from None
         raise
+
+
+async def find_applied_digest_by_name(conn: Connection, migration_name: str) -> str | None:
+    """Return the ledger digest recorded for *migration_name*, if any."""
+    driver = conn._require_driver()
+    row = await driver.fetchrow(
+        _select_digest_by_description_sql(conn.dialect),
+        migration_name,
+    )
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return str(row.get("digest", "")) or None
+    return str(row[0]) if row[0] else None
+
+
+async def verify_checksum(conn: Connection, migration_name: str, digest: str) -> None:
+    """Raise ``FerrumMigrationError`` when an applied migration file was edited."""
+    stored = await find_applied_digest_by_name(conn, migration_name)
+    if stored is not None and stored != digest:
+        raise FerrumMigrationError(
+            f"Migration {migration_name!r} checksum mismatch: the on-disk file "
+            "does not match the version that was applied. "
+            "Revert or restore the original file before migrating. [FERR-M005]"
+        )
 
 
 async def is_applied(conn: Connection, digest: str) -> bool:

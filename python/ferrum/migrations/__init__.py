@@ -23,9 +23,27 @@ Public API (stable):
 import ferrum.migrations.loader as loader
 import ferrum.migrations.operations as operations
 from ferrum.migrations.base import Migration
+from ferrum.migrations.operations import (
+    CreateExtension,
+    CreateFunction,
+    CreatePolicy,
+    DisableRLS,
+    DropExtension,
+    DropFunction,
+    DropPolicy,
+    EnableRLS,
+)
 from ferrum.migrations.orchestrator import MigrationResult, _op_to_sql, apply, compute_plan
 
 __all__ = [
+    "CreateExtension",
+    "CreateFunction",
+    "CreatePolicy",
+    "DisableRLS",
+    "DropExtension",
+    "DropFunction",
+    "DropPolicy",
+    "EnableRLS",
     "Migration",
     "MigrationResult",
     "_op_to_sql",

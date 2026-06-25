@@ -68,6 +68,9 @@ fn compile_query(
             ferrum_core::ir::Operation::Insert { .. } => "insert",
             ferrum_core::ir::Operation::Update { .. } => "update",
             ferrum_core::ir::Operation::Delete { .. } => "delete",
+            ferrum_core::ir::Operation::BulkInsert { .. } => "bulk_insert",
+            ferrum_core::ir::Operation::BulkUpdate { .. } => "bulk_update",
+            ferrum_core::ir::Operation::BulkDelete { .. } => "bulk_delete",
         };
 
         // Dispatch to the correct emitter. Each emitter calls
@@ -85,6 +88,15 @@ fn compile_query(
             }
             ferrum_core::ir::Operation::Delete { .. } => {
                 ferrum_sql::emit::emit_delete(sql_dialect, &metadata, &ir)
+            }
+            ferrum_core::ir::Operation::BulkInsert { .. } => {
+                ferrum_sql::emit::emit_bulk_insert(sql_dialect, &metadata, &ir)
+            }
+            ferrum_core::ir::Operation::BulkUpdate { .. } => {
+                ferrum_sql::emit::emit_bulk_update(sql_dialect, &metadata, &ir)
+            }
+            ferrum_core::ir::Operation::BulkDelete { .. } => {
+                ferrum_sql::emit::emit_bulk_delete(sql_dialect, &metadata, &ir)
             }
         }?;
 

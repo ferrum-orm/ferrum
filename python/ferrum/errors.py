@@ -89,6 +89,18 @@ class FerrumCompileError(FerrumError):
         self.category = category
 
 
+class FerrumDeferredFieldError(FerrumError):
+    """Accessing a field that was excluded via ``only()`` / ``defer()``."""
+
+    code = "FERR-Q406"
+
+
+class FerrumRelationNotLoadedError(FerrumError):
+    """Accessing a relationship that was not loaded via select/prefetch."""
+
+    code = "FERR-Q407"
+
+
 class FerrumNotFoundError(FerrumError):
     """A ``get()`` or ``get_or_raise()`` call found no matching row."""
 

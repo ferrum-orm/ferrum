@@ -14,7 +14,7 @@ use crate::dialect::Dialect;
 use ferrum_core::{
     compile::CompiledQuery,
     error::CompileError,
-    ir::{BindValue, ModelMetadata, QuerySetIR, SortDirection, VectorMetric},
+    ir::{BindValue, ModelMetadata, Predicate, QuerySetIR, SortDirection, VectorMetric},
 };
 use std::fmt::Write as _;
 
@@ -35,15 +35,20 @@ pub fn emit_select(
 
     // Build SELECT clause from validated field refs.
     let table = dialect.quote_ident(&metadata.table_name);
-    let fields = match &ir.operation {
+    let qualify_columns = !ir.joins.is_empty();
+    let mut select_parts: Vec<String> = match &ir.operation {
         ferrum_core::ir::Operation::Select { fields } => fields
             .iter()
             .map(|f| {
                 let col = &metadata.fields[f.index].column_name;
-                dialect.quote_ident(col)
+                let quoted = dialect.quote_ident(col);
+                if ir.joins.is_empty() {
+                    quoted
+                } else {
+                    format!("{table}.{quoted}")
+                }
             })
-            .collect::<Vec<_>>()
-            .join(", "),
+            .collect(),
         _ => {
             return Err(CompileError::MalformedIr {
                 reason: "emit_select called with non-Select operation".into(),
@@ -51,76 +56,80 @@ pub fn emit_select(
         }
     };
 
+    for join in &ir.joins {
+        let alias = dialect.quote_ident(&join.alias);
+        for rf in &join.remote_fields {
+            let col = dialect.quote_ident(&rf.column);
+            select_parts.push(format!("{alias}.{col} AS \"{}__{}\"", join.alias, rf.column));
+        }
+    }
+    let fields = select_parts.join(", ");
+
     let mut bound_params: Vec<BindValue> = Vec::new();
     let mut param_type_summary: Vec<String> = Vec::new();
-    let mut where_clauses: Vec<String> = Vec::new();
 
-    for filter in &ir.filters {
-        let col = dialect.quote_ident(&metadata.fields[filter.field.index].column_name);
-        let (clause, param) = filter_clause(
+    let where_sql = build_where_sql(
+        dialect,
+        metadata,
+        ir,
+        &table,
+        qualify_columns,
+        &mut bound_params,
+        &mut param_type_summary,
+    )?;
+
+    if ir.exists {
+        let mut inner = format!("SELECT 1 FROM {table}");
+        if let Some(where_clause) = where_sql {
+            write!(inner, " WHERE {where_clause}").expect("write to String is infallible");
+        }
+        append_order_limit_offset(
             dialect,
-            &col,
-            &filter.operator,
-            bound_params.len() + 1,
-            filter.value.clone(),
-        );
-        where_clauses.push(clause);
-        if let Some(value) = param {
-            param_type_summary.push(format!("{}:{}", filter.field.name, filter.operator));
-            bound_params.push(value);
-        }
+            metadata,
+            ir,
+            &table,
+            qualify_columns,
+            &mut inner,
+            &mut bound_params,
+            &mut param_type_summary,
+        )?;
+        let sql = format!("SELECT EXISTS({inner})");
+        let fingerprint = sql_fingerprint(&sql);
+        return Ok(CompiledQuery {
+            sql_text: sql,
+            bound_params,
+            param_type_summary,
+            fingerprint,
+        });
     }
 
-    let mut sql = format!("SELECT {fields} FROM {table}");
-    if !where_clauses.is_empty() {
-        sql.push_str(" WHERE ");
-        sql.push_str(&where_clauses.join(" AND "));
+    let distinct_kw = if ir.distinct { "DISTINCT " } else { "" };
+    let mut sql = format!("SELECT {distinct_kw}{fields} FROM {table}");
+    for join in &ir.joins {
+        let alias = dialect.quote_ident(&join.alias);
+        let remote_table = dialect.quote_ident(&join.remote_table);
+        let local_col = dialect.quote_ident(&metadata.fields[join.local_field.index].column_name);
+        let remote_pk = dialect.quote_ident(&join.remote_pk_column);
+        write!(
+            sql,
+            " LEFT JOIN {remote_table} AS {alias} ON {table}.{local_col} = {alias}.{remote_pk}"
+        )
+        .expect("write to String is infallible");
+    }
+    if let Some(where_clause) = where_sql {
+        write!(sql, " WHERE {where_clause}").expect("write to String is infallible");
     }
 
-    if !ir.order_by.is_empty() {
-        let mut order_parts: Vec<String> = Vec::new();
-        for o in &ir.order_by {
-            let col = dialect.quote_ident(&metadata.fields[o.field.index].column_name);
-            // `Unknown` is already rejected by ferrum_core::compile above;
-            // this arm is here for exhaustiveness (Defense in Depth).
-            let dir = match o.direction {
-                SortDirection::Asc => "ASC",
-                SortDirection::Desc => "DESC",
-                SortDirection::Unknown => {
-                    return Err(CompileError::InvalidSortDirection {
-                        model: metadata.model_name.clone(),
-                        field: o.field.name.clone(),
-                        direction: "unknown".into(),
-                    })
-                }
-            };
-            order_parts.push(format!("{col} {dir}"));
-        }
-        sql.push_str(" ORDER BY ");
-        sql.push_str(&order_parts.join(", "));
-    } else if let Some(vector_order) = &ir.vector_order_by {
-        let col = dialect.quote_ident(&metadata.fields[vector_order.field.index].column_name);
-        let op = vector_metric_to_sql(vector_order.metric);
-        let placeholder = dialect.placeholder(bound_params.len() + 1);
-        write!(sql, " ORDER BY {col} {op} {placeholder}").expect("write to String is infallible");
-        param_type_summary.push(format!("{}:nearest_to", vector_order.field.name));
-        bound_params.push(vector_order.value.clone());
-    }
-
-    // LIMIT and OFFSET are bound parameters — values are never interpolated
-    // into SQL text, even for integer-only inputs (SQL-2, Tier A discipline).
-    if let Some(limit) = ir.limit {
-        let placeholder = dialect.placeholder(bound_params.len() + 1);
-        write!(sql, " LIMIT {placeholder}").expect("write to String is infallible");
-        param_type_summary.push("limit:int".into());
-        bound_params.push(BindValue::Int(i64::try_from(limit).unwrap_or(i64::MAX)));
-    }
-    if let Some(offset) = ir.offset {
-        let placeholder = dialect.placeholder(bound_params.len() + 1);
-        write!(sql, " OFFSET {placeholder}").expect("write to String is infallible");
-        param_type_summary.push("offset:int".into());
-        bound_params.push(BindValue::Int(i64::try_from(offset).unwrap_or(i64::MAX)));
-    }
+    append_order_limit_offset(
+        dialect,
+        metadata,
+        ir,
+        &table,
+        qualify_columns,
+        &mut sql,
+        &mut bound_params,
+        &mut param_type_summary,
+    )?;
 
     let fingerprint = sql_fingerprint(&sql);
 
@@ -228,26 +237,24 @@ pub fn emit_update(
     }
 
     let mut where_clauses: Vec<String> = Vec::new();
-    for filter in &ir.filters {
-        let col = dialect.quote_ident(&metadata.fields[filter.field.index].column_name);
-        let (clause, param) = filter_clause(
-            dialect,
-            &col,
-            &filter.operator,
-            bound_params.len() + 1,
-            filter.value.clone(),
-        );
-        where_clauses.push(clause);
-        if let Some(value) = param {
-            param_type_summary.push(format!("{}:{}", filter.field.name, filter.operator));
-            bound_params.push(value);
-        }
+    if let Some(where_sql) = build_where_sql(
+        dialect,
+        metadata,
+        ir,
+        &table,
+        false,
+        &mut bound_params,
+        &mut param_type_summary,
+    )? {
+        where_clauses.push(where_sql);
     }
 
     let returning = returning_all_fields(dialect, metadata);
 
     let mut sql = format!("UPDATE {table} SET {}", set_clauses.join(", "));
-    write!(sql, " WHERE {}", where_clauses.join(" AND ")).expect("write to String is infallible");
+    if !where_clauses.is_empty() {
+        write!(sql, " WHERE {}", where_clauses.join(" AND ")).expect("write to String is infallible");
+    }
     if dialect.supports_returning() {
         write!(sql, " RETURNING {returning}").expect("write to String is infallible");
     }
@@ -280,25 +287,205 @@ pub fn emit_delete(
     let table = dialect.quote_ident(&metadata.table_name);
     let mut bound_params: Vec<BindValue> = Vec::new();
     let mut param_type_summary: Vec<String> = Vec::new();
-    let mut where_clauses: Vec<String> = Vec::new();
+    let where_sql = build_where_sql(
+        dialect,
+        metadata,
+        ir,
+        &table,
+        false,
+        &mut bound_params,
+        &mut param_type_summary,
+    )?;
 
-    for filter in &ir.filters {
-        let col = dialect.quote_ident(&metadata.fields[filter.field.index].column_name);
-        let (clause, param) = filter_clause(
-            dialect,
-            &col,
-            &filter.operator,
-            bound_params.len() + 1,
-            filter.value.clone(),
-        );
-        where_clauses.push(clause);
-        if let Some(value) = param {
-            param_type_summary.push(format!("{}:{}", filter.field.name, filter.operator));
-            bound_params.push(value);
-        }
+    let mut sql = format!("DELETE FROM {table}");
+    if let Some(where_clause) = where_sql {
+        write!(sql, " WHERE {where_clause}").expect("write to String is infallible");
+    }
+    let fingerprint = sql_fingerprint(&sql);
+
+    Ok(CompiledQuery {
+        sql_text: sql,
+        bound_params,
+        param_type_summary,
+        fingerprint,
+    })
+}
+
+/// Emit a multi-row parameterized INSERT from a `QuerySetIR`.
+pub fn emit_bulk_insert(
+    dialect: Dialect,
+    metadata: &ModelMetadata,
+    ir: &QuerySetIR,
+) -> Result<CompiledQuery, CompileError> {
+    ferrum_core::compile::compile(metadata, ir)?;
+
+    let ferrum_core::ir::Operation::BulkInsert { rows, returning } = &ir.operation else {
+        return Err(CompileError::MalformedIr {
+            reason: "emit_bulk_insert called with non-BulkInsert operation".into(),
+        });
+    };
+
+    let table = dialect.quote_ident(&metadata.table_name);
+    let first_row = &rows[0];
+    let mut col_names: Vec<String> = Vec::new();
+    for (field_ref, _) in first_row {
+        col_names.push(dialect.quote_ident(&metadata.fields[field_ref.index].column_name));
     }
 
-    let sql = format!("DELETE FROM {table} WHERE {}", where_clauses.join(" AND "));
+    let mut bound_params: Vec<BindValue> = Vec::new();
+    let mut param_type_summary: Vec<String> = Vec::new();
+    let mut value_groups: Vec<String> = Vec::new();
+
+    for row in rows {
+        let mut placeholders: Vec<String> = Vec::new();
+        for (field_ref, value) in row {
+            let ph = dialect.placeholder(bound_params.len() + 1);
+            placeholders.push(ph);
+            param_type_summary.push(format!("{}:bulk_insert", field_ref.name));
+            bound_params.push(value.clone());
+        }
+        value_groups.push(format!("({})", placeholders.join(", ")));
+    }
+
+    let returning_clause = returning_all_fields(dialect, metadata);
+    let sql = if *returning && dialect.supports_returning() {
+        format!(
+            "INSERT INTO {table} ({cols}) VALUES {groups} RETURNING {returning_clause}",
+            cols = col_names.join(", "),
+            groups = value_groups.join(", "),
+        )
+    } else {
+        format!(
+            "INSERT INTO {table} ({cols}) VALUES {groups}",
+            cols = col_names.join(", "),
+            groups = value_groups.join(", "),
+        )
+    };
+    let fingerprint = sql_fingerprint(&sql);
+
+    Ok(CompiledQuery {
+        sql_text: sql,
+        bound_params,
+        param_type_summary,
+        fingerprint,
+    })
+}
+
+/// Emit a PK-keyed multi-row UPDATE (PostgreSQL ``UPDATE … FROM (VALUES …)``).
+pub fn emit_bulk_update(
+    dialect: Dialect,
+    metadata: &ModelMetadata,
+    ir: &QuerySetIR,
+) -> Result<CompiledQuery, CompileError> {
+    ferrum_core::compile::compile(metadata, ir)?;
+
+    let ferrum_core::ir::Operation::BulkUpdate {
+        pk_field,
+        fields,
+        rows,
+    } = &ir.operation
+    else {
+        return Err(CompileError::MalformedIr {
+            reason: "emit_bulk_update called with non-BulkUpdate operation".into(),
+        });
+    };
+
+    if dialect != Dialect::Postgres {
+        return Err(CompileError::MalformedIr {
+            reason: "bulk_update is only supported on PostgreSQL".into(),
+        });
+    }
+
+    let table = dialect.quote_ident(&metadata.table_name);
+    let pk_col = dialect.quote_ident(&metadata.fields[pk_field.index].column_name);
+    let pk_name = &metadata.fields[pk_field.index].column_name;
+
+    let mut bound_params: Vec<BindValue> = Vec::new();
+    let mut param_type_summary: Vec<String> = Vec::new();
+
+    let col_names: Vec<&str> = std::iter::once(pk_name.as_str())
+        .chain(fields.iter().map(|f| metadata.fields[f.index].column_name.as_str()))
+        .collect();
+
+    let mut value_rows: Vec<String> = Vec::new();
+    for row in rows {
+        let mut placeholders: Vec<String> = Vec::new();
+        let ph_pk = dialect.placeholder(bound_params.len() + 1);
+        placeholders.push(postgres_value_cast(
+            metadata.fields[pk_field.index].field_type,
+            &ph_pk,
+        ));
+        param_type_summary.push(format!("{}:bulk_update_pk", pk_field.name));
+        bound_params.push(row.pk.clone());
+        for (field_ref, value) in fields.iter().zip(row.values.iter()) {
+            let ph = dialect.placeholder(bound_params.len() + 1);
+            placeholders.push(postgres_value_cast(
+                metadata.fields[field_ref.index].field_type,
+                &ph,
+            ));
+            param_type_summary.push(format!("{}:bulk_update", field_ref.name));
+            bound_params.push(value.clone());
+        }
+        value_rows.push(format!("({})", placeholders.join(", ")));
+    }
+
+    let set_clauses: Vec<String> = fields
+        .iter()
+        .map(|f| {
+            let col = dialect.quote_ident(&metadata.fields[f.index].column_name);
+            let name = &metadata.fields[f.index].column_name;
+            format!("{col} = v.{name}")
+        })
+        .collect();
+
+    let sql = format!(
+        "UPDATE {table} AS t SET {sets} FROM (VALUES {rows}) AS v({cols}) WHERE t.{pk_col} = v.{pk_name}",
+        sets = set_clauses.join(", "),
+        rows = value_rows.join(", "),
+        cols = col_names.join(", "),
+        pk_name = pk_name,
+    );
+    let fingerprint = sql_fingerprint(&sql);
+
+    Ok(CompiledQuery {
+        sql_text: sql,
+        bound_params,
+        param_type_summary,
+        fingerprint,
+    })
+}
+
+/// Emit a PK-keyed multi-row DELETE (``WHERE pk IN ($1, $2, …)``).
+pub fn emit_bulk_delete(
+    dialect: Dialect,
+    metadata: &ModelMetadata,
+    ir: &QuerySetIR,
+) -> Result<CompiledQuery, CompileError> {
+    ferrum_core::compile::compile(metadata, ir)?;
+
+    let ferrum_core::ir::Operation::BulkDelete { pk_field, ids } = &ir.operation else {
+        return Err(CompileError::MalformedIr {
+            reason: "emit_bulk_delete called with non-BulkDelete operation".into(),
+        });
+    };
+
+    let table = dialect.quote_ident(&metadata.table_name);
+    let pk_col = dialect.quote_ident(&metadata.fields[pk_field.index].column_name);
+    let mut bound_params: Vec<BindValue> = Vec::new();
+    let mut param_type_summary: Vec<String> = Vec::new();
+    let mut placeholders: Vec<String> = Vec::new();
+
+    for id in ids {
+        let ph = dialect.placeholder(bound_params.len() + 1);
+        placeholders.push(ph);
+        param_type_summary.push(format!("{}:bulk_delete", pk_field.name));
+        bound_params.push(id.clone());
+    }
+
+    let sql = format!(
+        "DELETE FROM {table} WHERE {pk_col} IN ({placeholders})",
+        placeholders = placeholders.join(", "),
+    );
     let fingerprint = sql_fingerprint(&sql);
 
     Ok(CompiledQuery {
@@ -319,6 +506,214 @@ fn returning_all_fields(dialect: Dialect, metadata: &ModelMetadata) -> String {
         .map(|f| dialect.quote_ident(&f.column_name))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn qualify_base_column(
+    dialect: Dialect,
+    table: &str,
+    column_name: &str,
+    qualify: bool,
+) -> String {
+    let col = dialect.quote_ident(column_name);
+    if qualify {
+        format!("{table}.{col}")
+    } else {
+        col
+    }
+}
+
+fn append_order_limit_offset(
+    dialect: Dialect,
+    metadata: &ModelMetadata,
+    ir: &QuerySetIR,
+    table: &str,
+    qualify_columns: bool,
+    sql: &mut String,
+    bound_params: &mut Vec<BindValue>,
+    param_type_summary: &mut Vec<String>,
+) -> Result<(), CompileError> {
+    if !ir.order_by.is_empty() {
+        let mut order_parts: Vec<String> = Vec::new();
+        for o in &ir.order_by {
+            let col = qualify_base_column(
+                dialect,
+                table,
+                &metadata.fields[o.field.index].column_name,
+                qualify_columns,
+            );
+            let dir = match o.direction {
+                SortDirection::Asc => "ASC",
+                SortDirection::Desc => "DESC",
+                SortDirection::Unknown => {
+                    return Err(CompileError::InvalidSortDirection {
+                        model: metadata.model_name.clone(),
+                        field: o.field.name.clone(),
+                        direction: "unknown".into(),
+                    })
+                }
+            };
+            order_parts.push(format!("{col} {dir}"));
+        }
+        write!(sql, " ORDER BY {}", order_parts.join(", ")).expect("write to String is infallible");
+    } else if let Some(vector_order) = &ir.vector_order_by {
+        let col = qualify_base_column(
+            dialect,
+            table,
+            &metadata.fields[vector_order.field.index].column_name,
+            qualify_columns,
+        );
+        let op = vector_metric_to_sql(vector_order.metric);
+        let placeholder = dialect.placeholder(bound_params.len() + 1);
+        write!(sql, " ORDER BY {col} {op} {placeholder}").expect("write to String is infallible");
+        param_type_summary.push(format!("{}:nearest_to", vector_order.field.name));
+        bound_params.push(vector_order.value.clone());
+    }
+
+    if let Some(limit) = ir.limit {
+        let placeholder = dialect.placeholder(bound_params.len() + 1);
+        write!(sql, " LIMIT {placeholder}").expect("write to String is infallible");
+        param_type_summary.push("limit:int".into());
+        bound_params.push(BindValue::Int(i64::try_from(limit).unwrap_or(i64::MAX)));
+    }
+    if let Some(offset) = ir.offset {
+        let placeholder = dialect.placeholder(bound_params.len() + 1);
+        write!(sql, " OFFSET {placeholder}").expect("write to String is infallible");
+        param_type_summary.push("offset:int".into());
+        bound_params.push(BindValue::Int(i64::try_from(offset).unwrap_or(i64::MAX)));
+    }
+    Ok(())
+}
+
+fn build_where_sql(
+    dialect: Dialect,
+    metadata: &ModelMetadata,
+    ir: &QuerySetIR,
+    table: &str,
+    qualify_columns: bool,
+    bound_params: &mut Vec<BindValue>,
+    param_type_summary: &mut Vec<String>,
+) -> Result<Option<String>, CompileError> {
+    let mut parts: Vec<String> = Vec::new();
+
+    for filter in &ir.filters {
+        let col = qualify_base_column(
+            dialect,
+            table,
+            &metadata.fields[filter.field.index].column_name,
+            qualify_columns,
+        );
+        let (clause, param) = filter_clause(
+            dialect,
+            &col,
+            &filter.operator,
+            bound_params.len() + 1,
+            filter.value.clone(),
+        );
+        parts.push(clause);
+        if let Some(value) = param {
+            param_type_summary.push(format!("{}:{}", filter.field.name, filter.operator));
+            bound_params.push(value);
+        }
+    }
+
+    if let Some(predicate) = &ir.predicate {
+        parts.push(emit_predicate(
+            dialect,
+            metadata,
+            predicate,
+            table,
+            qualify_columns,
+            bound_params,
+            param_type_summary,
+        )?);
+    }
+
+    if parts.is_empty() {
+        Ok(None)
+    } else if parts.len() == 1 {
+        Ok(Some(parts.remove(0)))
+    } else {
+        Ok(Some(format!("({})", parts.join(" AND "))))
+    }
+}
+
+fn emit_predicate(
+    dialect: Dialect,
+    metadata: &ModelMetadata,
+    predicate: &Predicate,
+    table: &str,
+    qualify_columns: bool,
+    bound_params: &mut Vec<BindValue>,
+    param_type_summary: &mut Vec<String>,
+) -> Result<String, CompileError> {
+    match predicate {
+        Predicate::And { children } => {
+            let subs: Result<Vec<String>, CompileError> = children
+                .iter()
+                .map(|child| {
+                    emit_predicate(
+                        dialect,
+                        metadata,
+                        child,
+                        table,
+                        qualify_columns,
+                        bound_params,
+                        param_type_summary,
+                    )
+                })
+                .collect();
+            Ok(format!("({})", subs?.join(" AND ")))
+        }
+        Predicate::Or { children } => {
+            let subs: Result<Vec<String>, CompileError> = children
+                .iter()
+                .map(|child| {
+                    emit_predicate(
+                        dialect,
+                        metadata,
+                        child,
+                        table,
+                        qualify_columns,
+                        bound_params,
+                        param_type_summary,
+                    )
+                })
+                .collect();
+            Ok(format!("({})", subs?.join(" OR ")))
+        }
+        Predicate::Not { child } => Ok(format!(
+            "NOT ({})",
+            emit_predicate(
+                dialect,
+                metadata,
+                child,
+                table,
+                qualify_columns,
+                bound_params,
+                param_type_summary,
+            )?
+        )),
+        Predicate::Filter { filter } => {
+            let col = qualify_base_column(
+                dialect,
+                table,
+                &metadata.fields[filter.field.index].column_name,
+                qualify_columns,
+            );
+            let (clause, param) = filter_clause(
+                dialect,
+                &col,
+                &filter.operator,
+                bound_params.len() + 1,
+                filter.value.clone(),
+            );
+            if let Some(value) = param {
+                param_type_summary.push(format!("{}:{}", filter.field.name, filter.operator));
+                bound_params.push(value);
+            }
+            Ok(clause)
+        }
+    }
 }
 
 /// Build a WHERE predicate and optional bound parameter for a filter.
@@ -349,6 +744,23 @@ fn filter_clause(
             (format!("{col} {sql_op} {placeholder}"), Some(value))
         }
     }
+}
+
+fn postgres_value_cast(field_type: ferrum_core::ir::metadata::FieldType, placeholder: &str) -> String {
+    use ferrum_core::ir::metadata::FieldType;
+    let cast = match field_type {
+        FieldType::Int | FieldType::BigInt => "bigint",
+        FieldType::Float | FieldType::Decimal => "double precision",
+        FieldType::Text | FieldType::Uuid | FieldType::TsVector => "text",
+        FieldType::Bool => "boolean",
+        FieldType::Datetime => "timestamptz",
+        FieldType::Date => "date",
+        FieldType::Time => "time",
+        FieldType::Json => "jsonb",
+        FieldType::Bytes => "bytea",
+        FieldType::Vector => "vector",
+    };
+    format!("{placeholder}::{cast}")
 }
 
 fn vector_metric_to_sql(metric: VectorMetric) -> &'static str {
@@ -439,6 +851,10 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            predicate: None,
+            distinct: false,
+            exists: false,
+            joins: vec![],
         }
     }
 
@@ -669,6 +1085,10 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            predicate: None,
+            distinct: false,
+            exists: false,
+            joins: vec![],
         }
     }
 
@@ -732,6 +1152,65 @@ mod tests {
         assert!(q.sql_text.contains("\"email\""));
     }
 
+    #[test]
+    fn emit_bulk_insert_multi_row_placeholders() {
+        let meta = make_metadata();
+        let ir = QuerySetIR {
+            version: ferrum_core::ir::IR_VERSION,
+            model_name: "User".into(),
+            operation: ferrum_core::ir::Operation::BulkInsert {
+                rows: vec![
+                    vec![
+                        (
+                            FieldRef {
+                                name: "id".into(),
+                                index: 0,
+                            },
+                            BindValue::Int(1),
+                        ),
+                        (
+                            FieldRef {
+                                name: "email".into(),
+                                index: 1,
+                            },
+                            BindValue::Text("a@example.com".into()),
+                        ),
+                    ],
+                    vec![
+                        (
+                            FieldRef {
+                                name: "id".into(),
+                                index: 0,
+                            },
+                            BindValue::Int(2),
+                        ),
+                        (
+                            FieldRef {
+                                name: "email".into(),
+                                index: 1,
+                            },
+                            BindValue::Text("b@example.com".into()),
+                        ),
+                    ],
+                ],
+                returning: true,
+            },
+            filters: vec![],
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            vector_order_by: None,
+            predicate: None,
+            distinct: false,
+            exists: false,
+            joins: vec![],
+        };
+        let q = emit_bulk_insert(Dialect::Postgres, &meta, &ir).unwrap();
+        assert!(q.sql_text.contains("VALUES ($1, $2), ($3, $4)"));
+        assert!(!q.sql_text.contains("a@example.com"));
+        assert_eq!(q.bound_params.len(), 4);
+    }
+
     // ── UPDATE tests ─────────────────────────────────────────────────────────
 
     fn update_ir(assignments: Vec<(FieldRef, BindValue)>, filters: Vec<Filter>) -> QuerySetIR {
@@ -747,6 +1226,10 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            predicate: None,
+            distinct: false,
+            exists: false,
+            joins: vec![],
         }
     }
 
@@ -815,6 +1298,10 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            predicate: None,
+            distinct: false,
+            exists: false,
+            joins: vec![],
         }
     }
 

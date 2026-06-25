@@ -211,6 +211,25 @@ def test_drop_table_sql_uses_if_exists() -> None:
     assert sql == 'DROP TABLE IF EXISTS "old_logs"'
 
 
+def test_alter_column_sql_type_change() -> None:
+    op = {
+        "kind": "alter_column",
+        "table": "items",
+        "column": "qty",
+        "sql_type": "BIGINT",
+    }
+    sql = _op_to_sql(op)
+    assert 'ALTER TABLE "items"' in sql
+    assert 'ALTER COLUMN "qty" TYPE BIGINT' in sql
+
+
+def test_alter_column_set_not_null_is_destructive_class() -> None:
+    from ferrum.migrations.operations import AlterColumn
+
+    op = AlterColumn("items", "qty", not_null=True)
+    assert op.classification == "destructive"
+
+
 # ---------------------------------------------------------------------------
 # _op_to_sql: add_column
 # ---------------------------------------------------------------------------

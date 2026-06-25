@@ -53,6 +53,30 @@ async def run_migrate(
 
             modules = _loader.scan(migrations_dir)
 
+            # Checksum gate: fail when an applied migration file was edited on disk.
+            for module in modules:
+                content = module.path.read_text(encoding="utf-8")
+                digest = _ledger.compute_digest(module.name, content)
+                await _ledger.verify_checksum(conn, module.name, digest)
+
+            # Drift warning when model classes are registered in the process.
+            try:
+                from ferrum.cli.makemigrations_cmd import _get_all_model_subclasses
+                from ferrum.migrations.drift import detect_drift
+
+                model_classes = _get_all_model_subclasses()
+                if model_classes:
+                    drift_report = await detect_drift(conn, model_classes)
+                    if drift_report.has_drift:
+                        print("Warning: schema drift detected before migrate.")
+                        for table in drift_report.missing_tables:
+                            print(f"  - missing table: {table}")
+                        for table, diff in drift_report.column_diffs.items():
+                            for col in diff.get("missing_columns", []):
+                                print(f"  - missing column: {table}.{col}")
+            except Exception:
+                pass
+
             # Pair each module with its content-keyed digest and filter applied.
             unapplied: list[tuple[_loader.MigrationModule, str]] = []
             for module in modules:

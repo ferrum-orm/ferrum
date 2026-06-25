@@ -135,6 +135,26 @@ def revert_cmd(
     dispatch_revert(target=target, env=env, confirm=confirm, migrations_dir=migrations_dir)
 
 
+@cli.command("sqlmigrate")
+def sqlmigrate_cmd(
+    migration_name: str = typer.Argument(..., help="Migration name (e.g. 0001_create_note)"),
+    migrations_dir: Path | None = typer.Option(
+        None,
+        "--migrations-dir",
+        help="Migrations directory (default: ./migrations)",
+    ),
+    dialect: str = typer.Option(
+        "postgres",
+        "--dialect",
+        help="SQL dialect for offline rendering (default: postgres)",
+    ),
+) -> None:
+    """Print offline SQL for a migration (no database connection)."""
+    from ferrum.cli.sqlmigrate_cmd import sqlmigrate
+
+    sqlmigrate(migration_name, migrations_dir=migrations_dir, dialect=dialect)
+
+
 @cli.command("showmigrations")
 def showmigrations_cmd(
     migrations_dir: Path | None = typer.Option(

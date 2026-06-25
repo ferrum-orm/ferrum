@@ -165,3 +165,20 @@ class TestSettingsImport:
 
         assert "toml_settings" in sys.modules
         assert sys.modules["toml_settings"].FROM_TOML is True  # type: ignore[attr-defined]
+
+    def test_pyproject_toml_settings_takes_effect(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """[ferrum].settings in pyproject.toml is imported when ferrum.toml is absent."""
+        settings_file = tmp_path / "pyproject_settings.py"
+        settings_file.write_text("FROM_PYPROJECT = True\n")
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "x"\n\n[ferrum]\nsettings = "pyproject_settings"\n'
+        )
+        monkeypatch.delenv("FERRUM_SETTINGS", raising=False)
+        sys.modules.pop("pyproject_settings", None)
+
+        _run_bootstrap(monkeypatch, tmp_path)
+
+        assert "pyproject_settings" in sys.modules
+        assert sys.modules["pyproject_settings"].FROM_PYPROJECT is True  # type: ignore[attr-defined]
