@@ -9,7 +9,23 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.1.3] - 2026-06-26
+
 ### Added
+
+- **SQL Server (thin parity)**: `ferrum-orm[mssql]` extra with `aioodbc` driver,
+  T-SQL dialect (`?` placeholders, bracket quoting, `OUTPUT INSERTED.*`,
+  `OFFSET/FETCH` pagination), and migration orchestration/introspection aligned
+  with MySQL/SQLite backends.
+- **MessagePack wire format**: opt-in Python↔Rust IR/hydration serialization via
+  `ferrum-orm[msgpack]` and `FERRUM_WIRE_FORMAT=msgpack` or `[ferrum] wire_format`
+  in `ferrum.toml` / `pyproject.toml` (JSON remains the default).
+- **Ticket-analyzer compatibility**: composite primary keys, array/JSONB field types,
+  `QuerySet.upsert()` / `bulk_upsert()`, RLS/tenant session helpers, `call_function`,
+  migration ops for extensions/RLS/function DDL, and `ferrum.ext.pgvector.vector_search()`
+  with per-row similarity scores.
 - **Production runtime (Phase 4)**: `connect()` / `Connection` accept `acquire_timeout`,
   `query_timeout`, `statement_timeout` (ms), `max_lifetime`, `drain_timeout`, and an
   explicit opt-in `RetryPolicy` (default: no retries). Queries time out at the Python
@@ -28,14 +44,15 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ferrum sqlmigrate` offline SQL rendering; `AlterColumn` operation; `showmigrations`
   checksum-mismatch indicator; schema drift warning at `ferrum migrate` when models
   are loaded; `revert --target` walks applied migrations down to a named target.
-- IR v2 predicate trees: ``Q`` objects with ``&`` / ``|`` / ``~``, ``exclude()``, ``distinct()``,
-  ``exists()``, ``values()`` / ``values_list()``, ``only()`` / ``defer()`` (deferred field access
-  raises ``FerrumDeferredFieldError``), and QuerySet slicing.
-- Relationship loading: ``select_related()`` (FK/O2O JOIN), ``prefetch_related()`` (reverse FK /
-  M2M batched queries), forward relation instance access, and ``FerrumRelationNotLoadedError`` when
+- IR v2 predicate trees: `Q` objects with `&` / `|` / `~`, `exclude()`, `distinct()`,
+  `exists()`, `values()` / `values_list()`, `only()` / `defer()` (deferred field access
+  raises `FerrumDeferredFieldError`), and QuerySet slicing.
+- Relationship loading: `select_related()` (FK/O2O JOIN), `prefetch_related()` (reverse FK /
+  M2M batched queries), forward relation instance access, and `FerrumRelationNotLoadedError` when
   a relation was not loaded.
 
 ### Changed
+
 - QuerySet IR version bumped to **2** (predicate / distinct / exists nodes).
 
 ---
@@ -43,6 +60,7 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.1.2] - 2026-06-19
 
 ### Added
+
 - `Connection.transaction()` and `Transaction`: async context manager for units of work
   with commit-on-success / rollback-on-error, optional isolation / readonly / deferrable
   modifiers, optional deadline, and nested `savepoint()` support (PostgreSQL/asyncpg).
@@ -50,10 +68,12 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   multiple statements share one pinned connection inside a transaction.
 
 ### Fixed
+
 - Upgraded PyO3 from 0.22 to 0.29, resolving RUSTSEC-2025-0020 and RUSTSEC-2026-0177;
   removed the corresponding `deny.toml` advisory ignores.
 
 ### Changed
+
 - PyO3 0.29 API migration in `ferrum-pyo3` (`Bound` → unbound types, `IntoPyObjectExt`).
 
 ---
@@ -61,13 +81,15 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.1.1] - 2026-06-18
 
 ### Fixed
+
 - Row hydration: build the model dict from `row.keys()` instead of iterating the
-  row. An asyncpg `Record` iterates *values*, not column names, so reads and
+  row. An asyncpg `Record` iterates _values_, not column names, so reads and
   `create()` raised `TypeError: keywords must be strings` / `KeyError`.
 - Migration replay guard now catches the driver-mapped `FerrumIntegrityError`
   (duplicate digest) and surfaces `FerrumMigrationError`.
 
 ### Changed
+
 - Multi-database drivers (`pg`/`mysql`/`sqlite` extras) with a uniform driver
   protocol; the connection pool now lives behind the driver.
 - CI/packaging: ty/ruff fixes for the driver code, native ARM64 wheel build,
@@ -75,6 +97,7 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-[Unreleased]: https://github.com/ferrumdb/ferrum/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/ferrumdb/ferrum/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/ferrumdb/ferrum/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/ferrumdb/ferrum/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/ferrumdb/ferrum/compare/v0.1.0...v0.1.1
