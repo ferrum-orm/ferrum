@@ -219,7 +219,8 @@ Runnable samples live under [`examples/`](examples/):
 
 ## Contributing
 
-Contributions are welcome.
+Contributions are welcome. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) for local setup,
+scoped verification, architecture rules, and pull request expectations.
 
 ## License
 
