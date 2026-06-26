@@ -16,17 +16,24 @@ _MIGRATION_FILE_PATTERN = re.compile(r"^\d{4}_[a-z0-9_]+\.py$")
 
 @dataclass
 class MigrationModule:
+    """Loaded migration module plus the dependency metadata needed for ordering."""
+
     name: str  # e.g. "0001_create_note"
     path: Path
     migration: type[Migration]  # the Migration subclass
 
     @property
     def dependencies(self) -> list[str]:
+        """Return declared migration dependencies as a mutable list copy."""
         return list(getattr(self.migration, "dependencies", []))
 
 
 def load_module(path: Path) -> type[Migration]:
     """Import a migration .py file and return its Migration class.
+
+    Migration modules are developer-authored code and may have import-time side
+    effects. The loader does not sandbox them; it only enforces the convention
+    that each file exports one ``Migration`` class.
 
     Raises ValueError if the file has no Migration class.
     """

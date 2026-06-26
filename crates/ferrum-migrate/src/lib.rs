@@ -23,50 +23,57 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MigrationOp {
+    /// `CREATE TABLE <table> (…)` with the given column definitions.
     CreateTable {
         table: String,
         columns: Vec<ColumnDef>,
     },
-    DropTable {
-        table: String,
-    },
-    AddColumn {
-        table: String,
-        column: ColumnDef,
-    },
-    DropColumn {
-        table: String,
-        column: String,
-    },
+    /// `DROP TABLE <table>`. Destructive — `MigrationPlan::destructive` will be `true`.
+    DropTable { table: String },
+    /// `ALTER TABLE <table> ADD COLUMN …`.
+    AddColumn { table: String, column: ColumnDef },
+    /// `ALTER TABLE <table> DROP COLUMN <column>`. Destructive.
+    DropColumn { table: String, column: String },
+    /// `ALTER TABLE <table> RENAME COLUMN <from> TO <to>`. Non-destructive.
     RenameColumn {
         table: String,
         from: String,
         to: String,
     },
+    /// `CREATE [UNIQUE] INDEX <name> ON <table> (<columns>)`.
     AddIndex {
         table: String,
         name: String,
         columns: Vec<String>,
         unique: bool,
     },
-    DropIndex {
-        name: String,
-    },
+    /// `DROP INDEX <name>`.
+    DropIndex { name: String },
+    /// Arbitrary SQL supplied by the Python planner.
+    ///
     /// `safe = false` means the SQL may be destructive or irreversible.
-    /// Python's apply path must require `--unsafe` when `safe = false`.
-    RawSql {
-        sql: String,
-        safe: bool,
-    },
+    /// Python's apply path must require `--unsafe` (or explicit confirmation)
+    /// when `safe = false`. Never include credentials or bound values here —
+    /// `to_json()` emits this field verbatim in dry-run output.
+    RawSql { sql: String, safe: bool },
 }
 
 /// Column definition used in `CreateTable` and `AddColumn` ops.
+///
+/// All identifier and type fields come from model-metadata allowlists on the
+/// Python side — never from raw user input. The `default` and `sql_type` strings
+/// are validated Python-side before reaching this type.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ColumnDef {
+    /// Database column name.
     pub name: String,
+    /// SQL type expression, e.g. `"TEXT"`, `"BIGINT"`, `"UUID DEFAULT gen_random_uuid()"`.
     pub sql_type: String,
+    /// Whether the column accepts NULL.
     pub nullable: bool,
+    /// Optional SQL DEFAULT expression (Python-side default, not user input).
     pub default: Option<String>,
+    /// Whether this column is part of the primary key.
     pub primary_key: bool,
 }
 

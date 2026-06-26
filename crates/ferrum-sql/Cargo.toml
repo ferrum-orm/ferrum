@@ -17,6 +17,9 @@ thiserror = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
+# Exercises the MessagePack wire-format round-trip used by the PyO3 boundary.
+rmp-serde = { workspace = true }
+serde_json = { workspace = true }
 
 [[bench]]
 name = "compile"

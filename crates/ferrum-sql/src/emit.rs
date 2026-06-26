@@ -189,6 +189,14 @@ pub fn emit_insert(
             cols = col_names.join(", "),
             vals = placeholders.join(", "),
         )
+    } else if dialect.uses_output_returning() {
+        // T-SQL: OUTPUT INSERTED.<cols> sits after the column list, before VALUES.
+        format!(
+            "INSERT INTO {table} ({cols}) OUTPUT {output} VALUES ({vals})",
+            cols = col_names.join(", "),
+            output = output_inserted_fields(dialect, metadata),
+            vals = placeholders.join(", "),
+        )
     } else {
         format!(
             "INSERT INTO {table} ({cols}) VALUES ({vals})",
@@ -256,6 +264,11 @@ pub fn emit_update(
     let returning = returning_all_fields(dialect, metadata);
 
     let mut sql = format!("UPDATE {table} SET {}", set_clauses.join(", "));
+    // T-SQL: OUTPUT INSERTED.<cols> sits after SET, before WHERE.
+    if dialect.uses_output_returning() {
+        write!(sql, " OUTPUT {}", output_inserted_fields(dialect, metadata))
+            .expect("write to String is infallible");
+    }
     if !where_clauses.is_empty() {
         write!(sql, " WHERE {}", where_clauses.join(" AND "))
             .expect("write to String is infallible");
@@ -362,6 +375,13 @@ pub fn emit_bulk_insert(
             cols = col_names.join(", "),
             groups = value_groups.join(", "),
         )
+    } else if *returning && dialect.uses_output_returning() {
+        format!(
+            "INSERT INTO {table} ({cols}) OUTPUT {output} VALUES {groups}",
+            cols = col_names.join(", "),
+            output = output_inserted_fields(dialect, metadata),
+            groups = value_groups.join(", "),
+        )
     } else {
         format!(
             "INSERT INTO {table} ({cols}) VALUES {groups}",
@@ -407,7 +427,8 @@ pub fn emit_bulk_update(
 
     if dialect != Dialect::Postgres {
         return Err(CompileError::MalformedIr {
-            reason: "bulk_update is only supported on PostgreSQL".into(),
+            reason: "bulk_update is only supported on PostgreSQL (not MySQL, SQLite, or MSSQL)"
+                .into(),
         });
     }
 
@@ -587,6 +608,23 @@ fn returning_all_fields(dialect: Dialect, metadata: &ModelMetadata) -> String {
         .join(", ")
 }
 
+/// Build the T-SQL `OUTPUT INSERTED.<col>, …` projection for all model fields.
+///
+/// Uses the metadata allowlist, never user input. Mirrors `returning_all_fields`
+/// for dialects that surface mutated rows via `OUTPUT` instead of `RETURNING`.
+fn output_inserted_fields(dialect: Dialect, metadata: &ModelMetadata) -> String {
+    metadata
+        .fields
+        .iter()
+        .map(|f| format!("INSERTED.{}", dialect.quote_ident(&f.column_name)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Optionally qualify a base-model column with its table alias.
+///
+/// Used when JOINs are present so base-table columns are unambiguous
+/// (e.g. `"users"."id"` vs a joined table's `"id"`).
 fn qualify_base_column(dialect: Dialect, table: &str, column_name: &str, qualify: bool) -> String {
     let col = dialect.quote_ident(column_name);
     if qualify {
@@ -596,6 +634,16 @@ fn qualify_base_column(dialect: Dialect, table: &str, column_name: &str, qualify
     }
 }
 
+/// Append ORDER BY, LIMIT, and OFFSET clauses to `sql`, adding bound parameters.
+///
+/// LIMIT and OFFSET are always emitted as `$N` / `?` placeholders — never as
+/// SQL integer literals — to prevent numeric injection and keep the SQL shape
+/// stable for the fingerprint / plan cache (SQL-2).
+///
+/// T-SQL (MSSQL) uses `OFFSET … ROWS [FETCH NEXT … ROWS ONLY]` instead of
+/// `LIMIT … OFFSET …`. When no ORDER BY is present but pagination is requested,
+/// a stable no-op `ORDER BY (SELECT NULL)` is injected because T-SQL requires
+/// an ORDER BY before OFFSET/FETCH.
 #[allow(clippy::too_many_arguments)]
 fn append_order_limit_offset(
     dialect: Dialect,
@@ -644,6 +692,30 @@ fn append_order_limit_offset(
         bound_params.push(vector_order.value.clone());
     }
 
+    if dialect == Dialect::Mssql {
+        // T-SQL pagination: OFFSET … ROWS [FETCH NEXT … ROWS ONLY]. The OFFSET/FETCH
+        // clause requires an ORDER BY; inject a stable no-op order when none exists.
+        if ir.limit.is_some() || ir.offset.is_some() {
+            let has_order = !ir.order_by.is_empty() || ir.vector_order_by.is_some();
+            if !has_order {
+                write!(sql, " ORDER BY (SELECT NULL)").expect("write to String is infallible");
+            }
+            let offset = ir.offset.unwrap_or(0);
+            let placeholder = dialect.placeholder(bound_params.len() + 1);
+            write!(sql, " OFFSET {placeholder} ROWS").expect("write to String is infallible");
+            param_type_summary.push("offset:int".into());
+            bound_params.push(BindValue::Int(i64::try_from(offset).unwrap_or(i64::MAX)));
+            if let Some(limit) = ir.limit {
+                let placeholder = dialect.placeholder(bound_params.len() + 1);
+                write!(sql, " FETCH NEXT {placeholder} ROWS ONLY")
+                    .expect("write to String is infallible");
+                param_type_summary.push("limit:int".into());
+                bound_params.push(BindValue::Int(i64::try_from(limit).unwrap_or(i64::MAX)));
+            }
+        }
+        return Ok(());
+    }
+
     if let Some(limit) = ir.limit {
         let placeholder = dialect.placeholder(bound_params.len() + 1);
         write!(sql, " LIMIT {placeholder}").expect("write to String is infallible");
@@ -659,6 +731,12 @@ fn append_order_limit_offset(
     Ok(())
 }
 
+/// Build the complete WHERE clause SQL from flat filters and an optional predicate tree.
+///
+/// Flat `ir.filters` and the `ir.predicate` tree are AND-ed together.
+/// Returns `None` when there are no constraints (caller omits the `WHERE` keyword).
+/// All column references come from metadata allowlists; all values travel as
+/// bound parameters (SQL-1 + SQL-2).
 fn build_where_sql(
     dialect: Dialect,
     metadata: &ModelMetadata,
@@ -712,6 +790,11 @@ fn build_where_sql(
     }
 }
 
+/// Recursively emit SQL for a `Predicate` node.
+///
+/// `And`/`Or` wrap their children in parentheses to preserve grouping semantics
+/// regardless of SQL operator precedence. `Not` wraps its child in `NOT (…)`.
+/// Leaf `Filter` nodes delegate to `filter_clause`.
 fn emit_predicate(
     dialect: Dialect,
     metadata: &ModelMetadata,
@@ -791,7 +874,15 @@ fn emit_predicate(
     }
 }
 
-/// Build a WHERE predicate and optional bound parameter for a filter.
+/// Build a single WHERE predicate fragment and its optional bound parameter.
+///
+/// Returns `(sql_fragment, Some(value))` for parameterized operators or
+/// `(sql_fragment, None)` for null-checks (`is_null` / `is_not_null`) which
+/// require no bound value.
+///
+/// The `match` operator maps to `@@ plainto_tsquery($N)` on `PostgreSQL` and
+/// falls back to `LIKE $N` on other dialects that lack full-text search.
+/// All other operators are mapped by `operator_to_sql`.
 fn filter_clause(
     dialect: Dialect,
     col: &str,
@@ -821,6 +912,11 @@ fn filter_clause(
     }
 }
 
+/// Wrap a placeholder in an explicit `PostgreSQL` type cast for `BulkUpdate` VALUES rows.
+///
+/// `UPDATE … FROM (VALUES …)` requires explicit casts so `PostgreSQL` can infer
+/// the correct column types when the VALUES clause contains multiple rows.
+/// The cast is appended to the placeholder, e.g. `$1::bigint`, `$2::text`.
 fn postgres_value_cast(
     field_type: ferrum_core::ir::metadata::FieldType,
     placeholder: &str,
@@ -844,6 +940,7 @@ fn postgres_value_cast(
     format!("{placeholder}::{cast}")
 }
 
+/// Map a `VectorMetric` to its pgvector SQL distance operator.
 fn vector_metric_to_sql(metric: VectorMetric) -> &'static str {
     match metric {
         VectorMetric::L2 => "<->",
@@ -1429,5 +1526,242 @@ mod tests {
         );
         assert_eq!(q.bound_params.len(), 1);
         assert!(matches!(q.bound_params[0], BindValue::Int(7)));
+    }
+
+    // ── MSSQL (T-SQL) tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn mssql_select_uses_bracket_quoting_and_placeholder() {
+        let meta = make_metadata();
+        let mut ir = select_ir(vec![FieldRef {
+            name: "id".into(),
+            index: 0,
+        }]);
+        ir.filters.push(Filter {
+            field: FieldRef {
+                name: "email".into(),
+                index: 1,
+            },
+            operator: "eq".into(),
+            value: BindValue::Text("x@example.com".into()),
+        });
+        let q = emit_select(Dialect::Mssql, &meta, &ir).unwrap();
+        assert!(q.sql_text.contains("[users]"), "bracket-quoted table");
+        assert!(q.sql_text.contains("[email]"), "bracket-quoted column");
+        assert!(q.sql_text.contains('?'), "? placeholder for aioodbc/pyodbc");
+        assert!(!q.sql_text.contains('$'), "no $N placeholders for MSSQL");
+        assert!(!q.sql_text.contains("x@example.com"));
+    }
+
+    #[test]
+    fn mssql_select_pagination_injects_order_by_and_offset_fetch() {
+        let meta = make_metadata();
+        let mut ir = select_ir(vec![FieldRef {
+            name: "id".into(),
+            index: 0,
+        }]);
+        ir.limit = Some(10);
+        ir.offset = Some(5);
+        let q = emit_select(Dialect::Mssql, &meta, &ir).unwrap();
+        assert!(
+            q.sql_text.contains("ORDER BY (SELECT NULL)"),
+            "must inject ORDER BY when none present: {}",
+            q.sql_text
+        );
+        assert!(q.sql_text.contains("OFFSET ? ROWS"), "{}", q.sql_text);
+        assert!(
+            q.sql_text.contains("FETCH NEXT ? ROWS ONLY"),
+            "{}",
+            q.sql_text
+        );
+        assert!(!q.sql_text.contains("LIMIT"), "no LIMIT keyword on MSSQL");
+        // OFFSET first (5), then FETCH limit (10) — both bound, not literal.
+        assert_eq!(q.bound_params.len(), 2);
+        assert!(matches!(q.bound_params[0], BindValue::Int(5)));
+        assert!(matches!(q.bound_params[1], BindValue::Int(10)));
+    }
+
+    #[test]
+    fn mssql_select_limit_only_uses_offset_zero() {
+        let meta = make_metadata();
+        let mut ir = select_ir(vec![FieldRef {
+            name: "id".into(),
+            index: 0,
+        }]);
+        ir.order_by.push(OrderBy {
+            field: FieldRef {
+                name: "id".into(),
+                index: 0,
+            },
+            direction: SortDirection::Asc,
+        });
+        ir.limit = Some(20);
+        let q = emit_select(Dialect::Mssql, &meta, &ir).unwrap();
+        // Explicit ORDER BY present → no injected (SELECT NULL).
+        assert!(!q.sql_text.contains("(SELECT NULL)"));
+        assert!(q.sql_text.contains("OFFSET ? ROWS"));
+        assert!(q.sql_text.contains("FETCH NEXT ? ROWS ONLY"));
+        assert_eq!(q.bound_params.len(), 2);
+        assert!(matches!(q.bound_params[0], BindValue::Int(0)), "offset 0");
+        assert!(matches!(q.bound_params[1], BindValue::Int(20)), "limit 20");
+    }
+
+    #[test]
+    fn mssql_insert_uses_output_inserted() {
+        let meta = make_metadata();
+        let ir = insert_ir(vec![(
+            FieldRef {
+                name: "email".into(),
+                index: 1,
+            },
+            BindValue::Text("secret@example.com".into()),
+        )]);
+        let q = emit_insert(Dialect::Mssql, &meta, &ir).unwrap();
+        assert!(
+            q.sql_text
+                .contains("OUTPUT INSERTED.[id], INSERTED.[email]"),
+            "OUTPUT INSERTED projection: {}",
+            q.sql_text
+        );
+        assert!(!q.sql_text.contains("RETURNING"), "MSSQL has no RETURNING");
+        // OUTPUT precedes VALUES in T-SQL.
+        let output_pos = q.sql_text.find("OUTPUT").unwrap();
+        let values_pos = q.sql_text.find("VALUES").unwrap();
+        assert!(output_pos < values_pos, "OUTPUT before VALUES");
+        assert!(!q.sql_text.contains("secret@example.com"));
+    }
+
+    #[test]
+    fn mssql_update_output_between_set_and_where() {
+        let meta = make_metadata();
+        let ir = update_ir(
+            vec![(
+                FieldRef {
+                    name: "email".into(),
+                    index: 1,
+                },
+                BindValue::Text("new@example.com".into()),
+            )],
+            vec![Filter {
+                field: FieldRef {
+                    name: "id".into(),
+                    index: 0,
+                },
+                operator: "eq".into(),
+                value: BindValue::Int(42),
+            }],
+        );
+        let q = emit_update(Dialect::Mssql, &meta, &ir).unwrap();
+        assert!(q.sql_text.contains("OUTPUT INSERTED."), "{}", q.sql_text);
+        assert!(!q.sql_text.contains("RETURNING"));
+        let set_pos = q.sql_text.find("SET").unwrap();
+        let output_pos = q.sql_text.find("OUTPUT").unwrap();
+        let where_pos = q.sql_text.find("WHERE").unwrap();
+        assert!(
+            set_pos < output_pos && output_pos < where_pos,
+            "{}",
+            q.sql_text
+        );
+    }
+
+    #[test]
+    fn mssql_bulk_update_rejected() {
+        let meta = make_metadata();
+        let ir = QuerySetIR {
+            version: IR_VERSION,
+            model_name: "User".into(),
+            operation: Operation::BulkUpdate {
+                pk_fields: vec![FieldRef {
+                    name: "id".into(),
+                    index: 0,
+                }],
+                fields: vec![FieldRef {
+                    name: "email".into(),
+                    index: 1,
+                }],
+                rows: vec![],
+            },
+            filters: vec![],
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            vector_order_by: None,
+            predicate: None,
+            distinct: false,
+            exists: false,
+            joins: vec![],
+        };
+        let err = emit_bulk_update(Dialect::Mssql, &meta, &ir).unwrap_err();
+        assert!(matches!(err, CompileError::MalformedIr { .. }));
+    }
+
+    // ── MessagePack wire-format round-trip ───────────────────────────────────
+
+    /// IR + metadata `MessagePack`-encoded (NAMED) decode back into the same serde
+    /// types and emit byte-identical SQL to the in-memory path — the property the
+    /// `PyO3` `compile_query_msgpack` boundary relies on.
+    #[test]
+    fn msgpack_round_trip_matches_native_compile() {
+        let meta = make_metadata();
+        let mut ir = select_ir(vec![FieldRef {
+            name: "id".into(),
+            index: 0,
+        }]);
+        ir.filters.push(Filter {
+            field: FieldRef {
+                name: "email".into(),
+                index: 1,
+            },
+            operator: "eq".into(),
+            value: BindValue::Text("a@example.com".into()),
+        });
+        ir.limit = Some(5);
+
+        let native = emit_select(Dialect::Postgres, &meta, &ir).unwrap();
+
+        let meta_mp = rmp_serde::to_vec_named(&meta).unwrap();
+        let ir_mp = rmp_serde::to_vec_named(&ir).unwrap();
+        let decoded_meta: ModelMetadata = rmp_serde::from_slice(&meta_mp).unwrap();
+        let decoded_ir: QuerySetIR = rmp_serde::from_slice(&ir_mp).unwrap();
+        let from_mp = emit_select(Dialect::Postgres, &decoded_meta, &decoded_ir).unwrap();
+
+        assert_eq!(native.sql_text, from_mp.sql_text);
+        assert_eq!(native.bound_params.len(), from_mp.bound_params.len());
+        assert_eq!(native.fingerprint, from_mp.fingerprint);
+    }
+
+    /// `to_vec_named` serializes the adjacently-tagged `BindValue` enum as a map
+    /// (`{"type": …, "value": …}`); the default positional encoder would not, and
+    /// Python `msgpack.unpackb` would then read tuples instead of dicts.
+    #[test]
+    fn bind_value_named_encoding_is_map_shaped() {
+        let params = vec![
+            BindValue::Text("hello".into()),
+            BindValue::Int(42),
+            BindValue::Bool(true),
+            BindValue::Null,
+        ];
+        let blob = rmp_serde::encode::to_vec_named(&params).unwrap();
+        let value: serde_json::Value = rmp_serde::from_slice(&blob).unwrap();
+        let arr = value.as_array().expect("top-level array");
+        assert_eq!(arr.len(), 4);
+        let first = arr[0].as_object().expect("BindValue must encode as a map");
+        assert_eq!(
+            first.get("type").and_then(serde_json::Value::as_str),
+            Some("text")
+        );
+        assert_eq!(
+            first.get("value").and_then(serde_json::Value::as_str),
+            Some("hello")
+        );
+        let last = arr[3].as_object().expect("null variant is a map");
+        assert_eq!(
+            last.get("type").and_then(serde_json::Value::as_str),
+            Some("null")
+        );
+
+        let back: Vec<BindValue> = rmp_serde::from_slice(&blob).unwrap();
+        assert!(matches!(back[1], BindValue::Int(42)));
+        assert!(matches!(back[3], BindValue::Null));
     }
 }

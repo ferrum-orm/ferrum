@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, cast
 from uuid import UUID
 
 import ferrum.hooks as _hooks
+from ferrum.config import resolve_wire_format as _resolve_wire_format
 from ferrum.errors import (
     FerrumCompileError,
     FerrumConfigError,
@@ -61,6 +62,38 @@ _EXT_NOT_BUILT_MSG = (
     "ferrum._native extension not built. "
     "Run: maturin develop  (or: uv run maturin develop) [FERR-C001]"
 )
+
+# Wire format for the Python↔Rust boundary, resolved once at import so the hot
+# query path never re-reads config. "json" (default) or "msgpack".
+_WIRE_FORMAT: str = _resolve_wire_format()
+
+# msgpack is an optional dependency; imported lazily on first use only when the
+# msgpack wire format is active (mirrors the driver lazy-import pattern).
+_msgpack_mod: types.ModuleType | None = None
+
+
+def _require_msgpack() -> types.ModuleType:
+    """Return the ``msgpack`` module or raise an install-hint error (Pattern C)."""
+    global _msgpack_mod
+    if _msgpack_mod is None:
+        try:
+            _msgpack_mod = importlib.import_module("msgpack")
+        except ImportError as exc:
+            raise FerrumConfigError(
+                "MessagePack wire format selected (FERRUM_WIRE_FORMAT=msgpack or "
+                "[ferrum] wire_format) but the 'msgpack' package is not installed. "
+                "Install with: uv add 'ferrum-orm[msgpack]' [FERR-C001]"
+            ) from exc
+    return _msgpack_mod
+
+
+def _msgpack_row_default(obj: Any) -> Any:  # noqa: ANN401
+    """``msgpack.packb`` ``default`` hook mirroring ``_RowEncoder`` conversions."""
+    if isinstance(obj, (datetime, UUID)):
+        return str(obj)
+    if hasattr(obj, "_mapping"):
+        return dict(obj._mapping)
+    raise TypeError(f"Object of type {type(obj).__name__} is not msgpack-serializable")
 
 
 def _encode_bind_value(value: object) -> dict[str, object]:
@@ -115,13 +148,16 @@ def _encode_bind_value(value: object) -> dict[str, object]:
     return {"type": "text", "value": str(value)}
 
 
-def _decode_bound_param(param_json: str) -> object:
-    """Decode a BindValue JSON string (from ``compile_query``) to a Python value.
+def _decode_bound_param(param: str | dict[str, Any]) -> object:
+    """Decode one compiled BindValue to a Python value for the driver.
 
-    Reverses ``_encode_bind_value`` so that bound parameters can be passed to
-    asyncpg. Called on each element of ``compiled["bound_params"]``.
+    Reverses ``_encode_bind_value``. Accepts either a JSON string (the
+    ``compile_query`` JSON path) or an already-unpacked tagged dict (the
+    ``compile_query_msgpack`` path, where ``bound_params`` is a single
+    MessagePack blob unpacked to a list of dicts). Called on each element of
+    ``compiled["bound_params"]``.
     """
-    parsed: dict[str, Any] = json.loads(param_json)
+    parsed: dict[str, Any] = json.loads(param) if isinstance(param, str) else param
     typ: str = parsed["type"]
     if typ == "null":
         return None
@@ -181,6 +217,12 @@ class _RowEncoder(json.JSONEncoder):
 
 
 def _parse_lookup(lookup: str) -> tuple[str, str]:
+    """Split ``field__operator`` lookup syntax into a field name and operator.
+
+    Bare field names are equality lookups. The split is intentionally from the
+    right so field names may contain relation-style prefixes in later IR shapes
+    without changing the lookup operator rule.
+    """
     if "__" in lookup:
         field_name, operator = lookup.rsplit("__", 1)
         return field_name, operator
@@ -194,6 +236,13 @@ def _validate_lookup(
     *,
     field_index: dict[str, int],
 ) -> None:
+    """Validate a filter field/operator pair against immutable model metadata.
+
+    This is the Python-side Stage 0 SQL safety gate: unknown field names and
+    unsupported operators fail before an IR reaches Rust and before any SQL can
+    be emitted. Values are deliberately not inspected here because they travel
+    separately as bound ``BindValue`` payloads.
+    """
     if field_name not in field_index:
         raise FerrumCompileError(
             f"Unknown field {field_name!r} on model {metadata.model_name!r}.",
@@ -216,6 +265,7 @@ def _filter_dict_to_ir(
     metadata: ModelMetadata,
     field_index: dict[str, int],
 ) -> dict[str, Any]:
+    """Convert one normalized filter dict to a compiler-ready IR leaf."""
     field_name: str = flt["field"]
     operator: str = flt["operator"]
     _validate_lookup(field_name, operator, metadata, field_index=field_index)
@@ -231,6 +281,7 @@ def _kwargs_to_ir_filters(
     metadata: ModelMetadata,
     field_index: dict[str, int],
 ) -> list[dict[str, Any]]:
+    """Convert Django-style keyword lookups into validated predicate leaves."""
     leaves: list[dict[str, Any]] = []
     for lookup, value in kwargs.items():
         field_name, operator = _parse_lookup(lookup)
@@ -253,6 +304,13 @@ def _q_to_predicate(
     metadata: ModelMetadata,
     field_index: dict[str, int],
 ) -> dict[str, Any]:
+    """Serialize a ``Q`` boolean tree into the IR predicate shape.
+
+    Each leaf is validated through the same metadata allowlist as plain
+    ``filter(**kwargs)``. Empty ``Q()`` objects are rejected because compiling an
+    empty predicate would make caller intent ambiguous for destructive terminals.
+    """
+
     def walk(node: Q) -> dict[str, Any]:
         children_ir: list[dict[str, Any]] = []
         for child in node.children:
@@ -315,9 +373,17 @@ def _hydrate_rows(
 
         if metadata is not None:
             try:
-                metadata_json = metadata.to_metadata_json()
-                rows_json = json.dumps(row_dicts, cls=_RowEncoder)
-                _native_ext.hydrate_rows(metadata_json, rows_json)
+                if _WIRE_FORMAT == "msgpack":
+                    msgpack = _require_msgpack()
+                    meta_mp = msgpack.packb(metadata.to_metadata_dict(), use_bin_type=True)
+                    rows_mp = msgpack.packb(
+                        row_dicts, default=_msgpack_row_default, use_bin_type=True
+                    )
+                    _native_ext.hydrate_rows_msgpack(meta_mp, rows_mp)
+                else:
+                    metadata_json = metadata.to_metadata_json()
+                    rows_json = json.dumps(row_dicts, cls=_RowEncoder)
+                    _native_ext.hydrate_rows(metadata_json, rows_json)
             except Exception as exc:
                 mapped = map_native_error(exc, _native_mod=_native_ext)
                 _hooks.hydration_failure(
@@ -461,6 +527,12 @@ class QuerySet(Generic[_M]):
         return qs
 
     def __getitem__(self, key: slice | int) -> QuerySet[_M]:
+        """Return a sliced QuerySet using offset/limit shorthand.
+
+        ``qs[10:20]`` is equivalent to ``qs.offset(10).limit(10)`` and remains
+        lazy. Integer indexing is intentionally unsupported because it would
+        imply immediate I/O or surprising ``LIMIT 1`` semantics.
+        """
         if isinstance(key, slice):
             qs = self
             start = key.start if key.start is not None else 0
@@ -641,6 +713,7 @@ class QuerySet(Generic[_M]):
         return ir
 
     def _resolve_select_field_names(self, metadata: ModelMetadata) -> list[str]:
+        """Return the model field names that should appear in the SELECT list."""
         all_names = [f.name for f in metadata.fields]
         if self._only_fields is not None:
             return list(self._only_fields)
@@ -649,6 +722,7 @@ class QuerySet(Generic[_M]):
         return all_names
 
     def _deferred_field_names(self, metadata: ModelMetadata) -> frozenset[str] | None:
+        """Return field names that should raise on attribute access after hydration."""
         if self._only_fields is not None:
             loaded = frozenset(self._only_fields)
             return frozenset(f.name for f in metadata.fields if f.name not in loaded)
@@ -688,13 +762,41 @@ class QuerySet(Generic[_M]):
         """
         if _native_ext is None:
             raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
-        ir_json = json.dumps(ir)
         metadata = self._get_metadata()
+        if _WIRE_FORMAT == "msgpack":
+            return self._compile_ir_msgpack(ir, metadata, dialect=dialect)
+        ir_json = json.dumps(ir)
         metadata_json = metadata.to_metadata_json() if metadata is not None else "{}"
         try:
             return _native_ext.compile_query(metadata_json, ir_json, dialect)  # type: ignore[return-value]
         except Exception as exc:
             raise map_native_error(exc, _native_mod=_native_ext) from exc
+
+    def _compile_ir_msgpack(
+        self,
+        ir: dict[str, Any],
+        metadata: ModelMetadata | None,
+        *,
+        dialect: str,
+    ) -> dict[str, Any]:
+        """Compile via the MessagePack boundary, normalizing ``bound_params``.
+
+        ``compile_query_msgpack`` returns ``bound_params`` as a single
+        MessagePack blob (the NAMED encoder, so tagged ``BindValue`` dicts
+        round-trip). It is unpacked here into a list of tagged dicts so callers'
+        ``_decode_bound_param`` consumes both wire formats identically.
+        """
+        msgpack = _require_msgpack()
+        assert _native_ext is not None  # guarded by caller  # noqa: S101
+        metadata_dict = metadata.to_metadata_dict() if metadata is not None else {}
+        meta_mp = msgpack.packb(metadata_dict, use_bin_type=True)
+        ir_mp = msgpack.packb(ir, use_bin_type=True)
+        try:
+            compiled: dict[str, Any] = _native_ext.compile_query_msgpack(meta_mp, ir_mp, dialect)
+        except Exception as exc:
+            raise map_native_error(exc, _native_mod=_native_ext) from exc
+        compiled["bound_params"] = msgpack.unpackb(compiled["bound_params"], raw=False)
+        return compiled
 
     def _build_insert_ir(self, values: dict[str, Any]) -> dict[str, Any]:
         """Build an INSERT IR dict from the provided field values.
@@ -876,6 +978,7 @@ class QuerySet(Generic[_M]):
         return pk_names if pk_names else [metadata.fields[0].name] if metadata.fields else ["id"]
 
     def _object_to_row_dict(self, obj: _M | dict[str, Any]) -> dict[str, Any]:
+        """Normalize a bulk-write input object to a mutable field-value dict."""
         if isinstance(obj, dict):
             return dict(obj)
         if hasattr(obj, "model_dump"):
@@ -889,6 +992,13 @@ class QuerySet(Generic[_M]):
         *,
         returning: bool,
     ) -> dict[str, Any]:
+        """Build BulkInsert IR after validating row shape and field names.
+
+        All rows in a single compiled statement must share the same field set so
+        the Rust compiler can emit one column list and one repeated VALUES shape.
+        Auto-generated primary keys with empty sentinel values are omitted to let
+        database defaults run.
+        """
         metadata: ModelMetadata | None = self._get_metadata()
         if metadata is None:
             raise FerrumCompileError(
@@ -1089,6 +1199,11 @@ class QuerySet(Generic[_M]):
         Raises:
             FerrumConfigError: if the native extension is not built.
             FerrumCompileError: for unknown fields or inconsistent row shapes.
+
+        Notes:
+            Batching reduces round-trips but each batch is still compiled through
+            the same IR path as single-row inserts, preserving identifier
+            allowlisting and bound-parameter handling.
         """
         if _native_ext is None:
             raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
@@ -1180,6 +1295,10 @@ class QuerySet(Generic[_M]):
         written; other columns are left unchanged.
 
         Returns the total affected row count (sum of per-batch driver counts).
+
+        Composite primary keys are encoded in ``ModelMetadata.pk_fields`` order.
+        Empty input is a no-op, while an empty ``fields`` sequence is rejected by
+        the IR builder because it cannot express a meaningful UPDATE.
         """
         if _native_ext is None:
             raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
@@ -1275,6 +1394,10 @@ class QuerySet(Generic[_M]):
         """Delete rows by primary-key values in batched ``DELETE … IN (…)`` statements.
 
         Returns the total deleted row count.
+
+        For composite primary keys, each element in ``ids`` must be a sequence in
+        ``ModelMetadata.pk_fields`` order. Empty input is a no-op, not an
+        unscoped table delete.
         """
         if _native_ext is None:
             raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
@@ -1349,6 +1472,7 @@ class QuerySet(Generic[_M]):
         conflict_fields: list[str],
         update_fields: list[str] | None,
         returning: bool,
+        dialect: str = "postgres",
     ) -> tuple[str, list[Any]]:
         """Build an upsert SQL string and bound-parameter list for a single row.
 
@@ -1358,7 +1482,15 @@ class QuerySet(Generic[_M]):
         - All values travel as ``$N`` positional parameters — never interpolated.
         - ``conflict_fields`` and ``update_fields`` are validated against the
           metadata allowlist before this method is called.
+
+        Upsert is PostgreSQL ``ON CONFLICT`` only. The thin-parity backends
+        (MySQL, SQLite, MSSQL) raise rather than emit a non-portable statement.
         """
+        if dialect == "mssql":
+            raise FerrumConfigError(
+                "upsert()/bulk_upsert() (MERGE) is not supported on the MSSQL backend "
+                "in this version. Use separate insert/update calls. [FERR-C001]"
+            )
         field_by_name = {f.name: f for f in metadata.fields}
         table = f'"{metadata.table_name}"'
 
@@ -1475,6 +1607,7 @@ class QuerySet(Generic[_M]):
             conflict_fields=conflict_fields,
             update_fields=update_fields,
             returning=returning,
+            dialect=conn.dialect,
         )
 
         driver = conn._require_driver()
@@ -1584,6 +1717,7 @@ class QuerySet(Generic[_M]):
                     conflict_fields=conflict_fields,
                     update_fields=update_fields,
                     returning=returning,
+                    dialect=conn.dialect,
                 )
                 _hooks.query_start(
                     fingerprint="",
@@ -2088,7 +2222,12 @@ class QuerySet(Generic[_M]):
         return count_val
 
     async def exists(self, conn: ConnectionLike) -> bool:
-        """Return whether any row matches (``SELECT EXISTS(...)``)."""
+        """Return whether any row matches without hydrating rows.
+
+        The compiler emits an ``EXISTS`` operation rather than fetching a row and
+        discarding it, so this terminal is the cheapest presence check and still
+        emits Tier A hook payloads only.
+        """
         if _native_ext is None:
             raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
         metadata = self._get_metadata()
@@ -2130,6 +2269,7 @@ class QuerySet(Generic[_M]):
     # ------------------------------------------------------------------
 
     def _clone(self) -> QuerySet[_M]:
+        """Copy accumulated query state for immutable chaining."""
         qs: QuerySet[_M] = QuerySet(self._model)
         qs._filters = list(self._filters)
         qs._order_by = list(self._order_by)

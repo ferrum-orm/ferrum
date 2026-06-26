@@ -42,7 +42,16 @@ def get_driver_for_dsn(dsn: str, **kwargs: Any) -> DriverProtocol:
                 "SQLite driver not installed. Install with: uv add 'ferrum-orm[sqlite]' [FERR-C001]"
             ) from exc
         return AiosqliteDriver(dsn, **kwargs)
+    if scheme in ("mssql", "sqlserver"):
+        try:
+            from ferrum.drivers.mssql import AioodbcDriver
+        except ImportError as exc:
+            raise FerrumConfigError(
+                "MSSQL driver not installed. Install with: uv add 'ferrum-orm[mssql]' [FERR-C001]"
+            ) from exc
+        return AioodbcDriver(dsn, **kwargs)
     raise FerrumConfigError(
         f"Unknown database scheme {scheme!r}. Install ferrum-orm[pg] for PostgreSQL, "
-        "ferrum-orm[mysql] for MySQL, or ferrum-orm[sqlite] for SQLite. [FERR-C001]"
+        "ferrum-orm[mysql] for MySQL, ferrum-orm[sqlite] for SQLite, or "
+        "ferrum-orm[mssql] for SQL Server. [FERR-C001]"
     )

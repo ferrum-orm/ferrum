@@ -58,6 +58,20 @@ CREATE TABLE IF NOT EXISTS {LEDGER_TABLE} (
     description TEXT
 )
 """.strip()
+    if dialect == "mssql":
+        # NVARCHAR(MAX) cannot be UNIQUE/indexed in SQL Server, so digest and
+        # environment use bounded NVARCHAR. CREATE TABLE IF NOT EXISTS is not
+        # valid T-SQL — guard with an OBJECT_ID existence check instead.
+        return f"""
+IF OBJECT_ID(N'{LEDGER_TABLE}', N'U') IS NULL
+CREATE TABLE {LEDGER_TABLE} (
+    id          BIGINT IDENTITY(1,1) PRIMARY KEY,
+    digest      NVARCHAR(255)    NOT NULL UNIQUE,
+    applied_at  DATETIMEOFFSET   NOT NULL DEFAULT SYSDATETIMEOFFSET(),
+    environment NVARCHAR(255)    NOT NULL DEFAULT 'development',
+    description NVARCHAR(MAX)
+)
+""".strip()
     return f"""
 CREATE TABLE IF NOT EXISTS {LEDGER_TABLE} (
     id          BIGSERIAL PRIMARY KEY,
@@ -70,25 +84,25 @@ CREATE TABLE IF NOT EXISTS {LEDGER_TABLE} (
 
 
 def _insert_ledger_sql(dialect: str) -> str:
-    if dialect in ("mysql", "sqlite"):
+    if dialect in ("mysql", "sqlite", "mssql"):
         return f"INSERT INTO {LEDGER_TABLE} (digest, environment, description) VALUES (?, ?, ?)"
     return f"INSERT INTO {LEDGER_TABLE} (digest, environment, description) VALUES ($1, $2, $3)"
 
 
 def _select_digest_sql(dialect: str) -> str:
-    if dialect in ("mysql", "sqlite"):
+    if dialect in ("mysql", "sqlite", "mssql"):
         return f"SELECT 1 FROM {LEDGER_TABLE} WHERE digest = ?"
     return f"SELECT 1 FROM {LEDGER_TABLE} WHERE digest = $1"
 
 
 def _delete_digest_sql(dialect: str) -> str:
-    if dialect in ("mysql", "sqlite"):
+    if dialect in ("mysql", "sqlite", "mssql"):
         return f"DELETE FROM {LEDGER_TABLE} WHERE digest = ?"
     return f"DELETE FROM {LEDGER_TABLE} WHERE digest = $1"
 
 
 def _select_digest_by_description_sql(dialect: str) -> str:
-    if dialect in ("mysql", "sqlite"):
+    if dialect in ("mysql", "sqlite", "mssql"):
         return f"SELECT digest FROM {LEDGER_TABLE} WHERE description = ?"
     return f"SELECT digest FROM {LEDGER_TABLE} WHERE description = $1"
 

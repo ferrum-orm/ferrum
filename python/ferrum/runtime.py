@@ -68,6 +68,7 @@ class RetryPolicy:
             raise ValueError("max_attempts must be at least 1.")
 
     def should_retry(self, exc: Exception, attempt: int) -> bool:
+        """Return whether ``exc`` should be retried before mapping to Ferrum errors."""
         if attempt >= self.max_attempts:
             return False
         category = _exception_category(exc)
@@ -134,6 +135,7 @@ class TimedQueryExecutor:
         self.dialect: str = getattr(inner, "dialect", "postgres")
 
     async def _run(self, op: Callable[[], Awaitable[_T]]) -> _T:
+        """Run one driver await while accounting for connection shutdown."""
         self._lifecycle.begin()
         try:
             return await self._execute_with_policy(op)
@@ -141,6 +143,12 @@ class TimedQueryExecutor:
             self._lifecycle.end()
 
     async def _execute_with_policy(self, op: Callable[[], Awaitable[_T]]) -> _T:
+        """Apply timeout/retry policy at the Python await boundary.
+
+        Retries are opt-in and category-limited. Exhausted or non-retriable
+        driver exceptions are mapped through ``map_db_error`` so raw driver
+        details do not escape the runtime layer.
+        """
         retry = self._runtime.retry
         attempt = 0
         while True:

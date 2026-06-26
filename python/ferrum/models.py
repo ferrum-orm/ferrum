@@ -248,15 +248,13 @@ class ModelMetadata:
         """Backward-compat alias: index of the *first* PK field."""
         return self.pk_fields[0] if self.pk_fields else 0
 
-    def to_metadata_json(self) -> str:
-        """Serialize to the JSON string expected by ``ferrum._native.compile_query``.
+    def to_metadata_dict(self) -> dict[str, Any]:
+        """Build the ``ModelMetadata`` payload dict Rust's serde deserializer expects.
 
-        Produces the ``ModelMetadata`` shape that Rust's serde deserializer
-        expects (ADR-002 §ModelMetadata.fields). Field ``pk`` is Python-internal
-        and is not sent across the boundary.
-
-        Emits both ``pk_index`` (legacy, first PK) and ``pk_fields`` (all PK
-        indices) so the Rust side can use either depending on the operation.
+        Shared by the JSON (:meth:`to_metadata_json`) and MessagePack boundary
+        paths. Field ``pk`` is Python-internal and is not sent across the
+        boundary. Emits both ``pk_index`` (legacy, first PK) and ``pk_fields``
+        (all PK indices) so the Rust side can use either depending on the operation.
         """
         field_payloads: list[dict[str, Any]] = []
         for f in self.fields:
@@ -270,15 +268,21 @@ class ModelMetadata:
             if f.vector_dimensions is not None:
                 payload["vector_dimensions"] = f.vector_dimensions
             field_payloads.append(payload)
-        return json.dumps(
-            {
-                "model_name": self.model_name,
-                "table_name": self.table_name,
-                "pk_index": self.pk_index,
-                "pk_fields": list(self.pk_fields),
-                "fields": field_payloads,
-            }
-        )
+        return {
+            "model_name": self.model_name,
+            "table_name": self.table_name,
+            "pk_index": self.pk_index,
+            "pk_fields": list(self.pk_fields),
+            "fields": field_payloads,
+        }
+
+    def to_metadata_json(self) -> str:
+        """Serialize to the JSON string expected by ``ferrum._native.compile_query``.
+
+        Produces the ``ModelMetadata`` shape that Rust's serde deserializer
+        expects (ADR-002 §ModelMetadata.fields).
+        """
+        return json.dumps(self.to_metadata_dict())
 
 
 # ---------------------------------------------------------------------------

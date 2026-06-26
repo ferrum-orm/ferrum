@@ -40,8 +40,12 @@ def get_db_identity(conn: Connection) -> str:
         host = parsed.hostname or ("memory" if ":memory:" in dsn else "unknown")
         if parsed.scheme.startswith("sqlite"):
             port = "0"
+        elif parsed.scheme.startswith("mysql"):
+            port = str(parsed.port or 3306)
+        elif parsed.scheme in ("mssql", "sqlserver"):
+            port = str(parsed.port or 1433)
         else:
-            port = str(parsed.port or (3306 if parsed.scheme.startswith("mysql") else 5432))
+            port = str(parsed.port or 5432)
         dbname = (parsed.path or "").lstrip("/") or "unknown"
         user = parsed.username or "unknown"
         return f"host={host} port={port} dbname={dbname} user={user}"
@@ -118,6 +122,33 @@ async def _fetch_existing_tables_sqlite(conn: Connection) -> dict[str, list[str]
     return tables
 
 
+async def _fetch_existing_tables_mssql(
+    conn: Connection,
+    *,
+    schema: str,
+) -> dict[str, list[str]]:
+    mssql_schema = "dbo" if schema in ("public", "") else schema
+    driver = conn._require_driver()
+    rows = await driver.fetch(
+        """
+        SELECT c.TABLE_NAME, c.COLUMN_NAME
+        FROM INFORMATION_SCHEMA.COLUMNS AS c
+        JOIN INFORMATION_SCHEMA.TABLES AS t
+            ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
+        WHERE c.TABLE_SCHEMA = ? AND t.TABLE_TYPE = 'BASE TABLE'
+        ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION
+        """,
+        mssql_schema,
+    )
+    tables: dict[str, list[str]] = {}
+    for row in rows:
+        table = row["TABLE_NAME"] if isinstance(row, dict) else row[0]
+        column = row["COLUMN_NAME"] if isinstance(row, dict) else row[1]
+        if table not in _EXCLUDED_TABLES:
+            tables.setdefault(table, []).append(column)
+    return tables
+
+
 async def fetch_existing_tables(
     conn: Connection,
     *,
@@ -134,6 +165,8 @@ async def fetch_existing_tables(
         return await _fetch_existing_tables_mysql(conn, schema=schema)
     if dialect == "sqlite":
         return await _fetch_existing_tables_sqlite(conn)
+    if dialect == "mssql":
+        return await _fetch_existing_tables_mssql(conn, schema=schema)
     raise ValueError(f"Unsupported dialect for introspection: {dialect!r}")
 
 
@@ -244,6 +277,51 @@ async def _fetch_schema_state_sqlite(conn: Connection) -> dict[str, dict[str, di
     return tables
 
 
+async def _fetch_schema_state_mssql(
+    conn: Connection,
+    *,
+    schema: str,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    mssql_schema = "dbo" if schema in ("public", "") else schema
+    driver = conn._require_driver()
+    rows = await driver.fetch(
+        """
+        SELECT
+            c.TABLE_NAME,
+            c.COLUMN_NAME,
+            c.DATA_TYPE,
+            c.IS_NULLABLE,
+            c.COLUMN_DEFAULT
+        FROM INFORMATION_SCHEMA.COLUMNS AS c
+        JOIN INFORMATION_SCHEMA.TABLES AS t
+            ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
+        WHERE c.TABLE_SCHEMA = ? AND t.TABLE_TYPE = 'BASE TABLE'
+        ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION
+        """,
+        mssql_schema,
+    )
+    tables: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in rows:
+        if isinstance(row, dict):
+            table, column, data_type, is_nullable, default = (
+                row["TABLE_NAME"],
+                row["COLUMN_NAME"],
+                row["DATA_TYPE"],
+                row["IS_NULLABLE"],
+                row["COLUMN_DEFAULT"],
+            )
+        else:
+            table, column, data_type, is_nullable, default = row
+        if table in _EXCLUDED_TABLES:
+            continue
+        tables.setdefault(table, {})[column] = {
+            "type": data_type,
+            "nullable": is_nullable == "YES",
+            "default": default,
+        }
+    return tables
+
+
 async def fetch_schema_state(
     conn: Connection,
     *,
@@ -257,6 +335,8 @@ async def fetch_schema_state(
         return await _fetch_schema_state_mysql(conn)
     if dialect == "sqlite":
         return await _fetch_schema_state_sqlite(conn)
+    if dialect == "mssql":
+        return await _fetch_schema_state_mssql(conn, schema=schema)
     raise ValueError(f"Unsupported dialect for introspection: {dialect!r}")
 
 

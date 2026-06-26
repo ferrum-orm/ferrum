@@ -44,6 +44,14 @@ except ImportError:
     aiosqlite = None
     _HAS_AIOSQLITE = False
 
+try:
+    import pyodbc as _pyodbc  # type: ignore[import-untyped]
+
+    _HAS_AIOODBC: bool = True
+except ImportError:
+    _pyodbc = None
+    _HAS_AIOODBC = False
+
 
 class FerrumError(Exception):
     """Base class for all Ferrum exceptions."""
@@ -375,6 +383,29 @@ def map_db_error(exc: Exception, *, context: dict | None = None) -> FerrumError:
                 f"SQLite connection error: {type(exc).__name__}. [FERR-E101]"
             )
         if isinstance(exc, aiosqlite.DatabaseError):
+            return FerrumDatabaseError(f"Database error: {type(exc).__name__}. [FERR-D001]")
+
+    if _HAS_AIOODBC and _pyodbc is not None:
+        # pyodbc hierarchy: Error → DatabaseError → {IntegrityError,
+        # OperationalError, ProgrammingError, DataError, …}. Order matters:
+        # check leaf classes before DatabaseError. Only the exception class name
+        # is surfaced — never the SQL Server message text or row data (ERR-1).
+        integrity_cls = getattr(_pyodbc, "IntegrityError", None)
+        if integrity_cls is not None and isinstance(exc, integrity_cls):
+            return FerrumIntegrityError(
+                f"Integrity constraint violation ({type(exc).__name__}). [FERR-D201]",
+                category="integrity_error",
+            )
+        prog_err = getattr(_pyodbc, "ProgrammingError", None)
+        if prog_err is not None and isinstance(exc, prog_err):
+            return FerrumSchemaError(f"Schema object not found ({type(exc).__name__}). [FERR-S001]")
+        op_err = getattr(_pyodbc, "OperationalError", None)
+        if op_err is not None and isinstance(exc, op_err):
+            return FerrumConnectionError(
+                f"SQL Server connection error: {type(exc).__name__}. [FERR-E101]"
+            )
+        db_err = getattr(_pyodbc, "DatabaseError", None)
+        if db_err is not None and isinstance(exc, db_err):
             return FerrumDatabaseError(f"Database error: {type(exc).__name__}. [FERR-D001]")
 
     return FerrumInternalError(

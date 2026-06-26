@@ -9,7 +9,7 @@ description = "Next-generation async ORM for Python with a Rust-powered core"
 license = { text = "Apache-2.0" }
 readme = "README.md"
 requires-python = ">=3.11"
-keywords = ["orm", "async", "postgresql", "mysql", "sqlite", "pydantic", "rust"]
+keywords = ["orm", "async", "postgresql", "mysql", "sqlite", "mssql", "pydantic", "rust"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Framework :: AsyncIO",
@@ -33,6 +33,8 @@ dependencies = [
 pg = ["asyncpg>=0.29"]
 mysql = ["asyncmy>=0.2"]
 sqlite = ["aiosqlite>=0.19"]
+mssql = ["aioodbc>=0.5"]
+msgpack = ["msgpack>=1.0"]
 cli = [
     "typer>=0.12",
     "rich>=13",
@@ -45,6 +47,8 @@ all = [
     "ferrum-orm[pg]",
     "ferrum-orm[mysql]",
     "ferrum-orm[sqlite]",
+    "ferrum-orm[mssql]",
+    "ferrum-orm[msgpack]",
     "ferrum-orm[cli]",
     "ferrum-orm[dotenv]",
 ]
@@ -137,7 +141,7 @@ extra-paths = ["python"]
 include = ["python/ferrum"]
 
 [tool.ty.analysis]
-allowed-unresolved-imports = ["asyncpg.**", "asyncmy.**", "aiosqlite.**", "testcontainers.**", "opentelemetry.**"]
+allowed-unresolved-imports = ["asyncpg.**", "asyncmy.**", "aiosqlite.**", "aioodbc.**", "pyodbc.**", "msgpack.**", "testcontainers.**", "opentelemetry.**"]
 
 # ---------------------------------------------------------------------------
 # pytest

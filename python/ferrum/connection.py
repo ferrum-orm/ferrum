@@ -141,7 +141,7 @@ class Connection:
 
     @property
     def dialect(self) -> str:
-        """Dialect for Rust SQL compilation: ``postgres``, ``mysql``, or ``sqlite``."""
+        """Dialect for Rust SQL compilation: ``postgres``, ``mysql``, ``sqlite``, or ``mssql``."""
         if self._driver is not None:
             return self._driver.dialect
         scheme = urlparse(self._dsn).scheme.lower()
@@ -151,6 +151,8 @@ class Connection:
             return "mysql"
         if scheme in ("sqlite", "sqlite+aiosqlite"):
             return "sqlite"
+        if scheme in ("mssql", "sqlserver"):
+            return "mssql"
         return "postgres"
 
     def _require_driver(self) -> QueryExecutorProtocol:
@@ -329,7 +331,8 @@ class Connection:
         if tx_factory is None or not callable(tx_factory):
             raise FerrumConfigError(
                 f"The active {self.dialect!r} driver does not support transactions. "
-                "Transactions require the PostgreSQL (asyncpg) driver in v0.1. [FERR-C001]"
+                "Transactions require the PostgreSQL (asyncpg) driver; the MySQL, "
+                "SQLite, and MSSQL backends are thin-parity and omit them. [FERR-C001]"
             )
         tx_cm = tx_factory(isolation=isolation, readonly=readonly, deferrable=deferrable)
         dialect = self.dialect

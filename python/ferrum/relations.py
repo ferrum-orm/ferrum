@@ -1,4 +1,10 @@
-"""Relationship loading, instance cache, and reverse accessors."""
+"""Relationship loading, instance cache, and reverse accessors.
+
+Forward to-one relations are populated by ``select_related()`` using JOIN output
+from the Rust compiler. To-many and many-to-many relations are populated by
+``prefetch_related()`` using explicit batched Python queries. Accessing an
+unloaded relation raises a Ferrum error instead of silently issuing implicit I/O.
+"""
 
 from __future__ import annotations
 
@@ -30,6 +36,12 @@ _RELATION_DESCRIPTORS_INSTALLED: set[type] = set()
 
 
 def register_reverse(*, target_model: str, meta: ReverseRelationMeta) -> None:
+    """Register a reverse relation and install it immediately when possible.
+
+    Relationship targets may be imported after the declaring model, so unresolved
+    reverse metadata is kept in ``_REVERSE`` and descriptors are installed later
+    by ``install_relation_descriptors()`` when the target model becomes known.
+    """
     _REVERSE.setdefault(target_model, {})[meta.accessor] = meta
     try:
         cls = get_model(target_model)
@@ -39,6 +51,7 @@ def register_reverse(*, target_model: str, meta: ReverseRelationMeta) -> None:
 
 
 def reverse_for(model_name: str) -> dict[str, ReverseRelationMeta]:
+    """Return registered reverse accessors for a model name."""
     return _REVERSE.get(model_name, {})
 
 
@@ -56,6 +69,12 @@ def install_relation_descriptors(model_cls: type[Model]) -> None:
 
 
 def relation_cache(obj: Model) -> dict[str, Any]:
+    """Return the per-instance relation cache, creating it on first use.
+
+    The cache lives in the model instance ``__dict__`` and is intentionally not
+    part of Pydantic validation or serialization. It stores only loaded relation
+    objects produced by explicit eager-loading calls.
+    """
     cache = object.__getattribute__(obj, "__dict__").get("__ferrum_relations__")
     if cache is None:
         cache = {}
@@ -64,10 +83,12 @@ def relation_cache(obj: Model) -> dict[str, Any]:
 
 
 def set_relation(obj: Model, name: str, value: Any) -> None:  # noqa: ANN401
+    """Store a loaded relation value on one model instance."""
     relation_cache(obj)[name] = value
 
 
 def get_loaded_relation(obj: Model, name: str) -> Any:  # noqa: ANN401
+    """Return a loaded relation or raise when the caller skipped eager loading."""
     cache = relation_cache(obj)
     if name not in cache:
         raise FerrumRelationNotLoadedError(
@@ -125,6 +146,12 @@ def build_join_ir(
     relation_name: str,
     field_index: dict[str, int],
 ) -> dict[str, Any]:
+    """Build the JOIN IR entry for one ``select_related()`` relation.
+
+    Only ForeignKey and OneToOne relations are valid here because they preserve
+    one output row per parent row. To-many relations must use prefetching to
+    avoid row multiplication and surprising hydration behavior.
+    """
     rel = resolve_relation(metadata, relation_name)
     if rel.kind not in ("fk", "one_to_one"):
         raise FerrumCompileError(
@@ -210,7 +237,12 @@ async def prefetch_related_objects(
     prefetch_names: tuple[str, ...],
     conn: ConnectionLike,
 ) -> None:
-    """Run batched prefetch queries and populate instance relation caches."""
+    """Run batched prefetch queries and populate instance relation caches.
+
+    Each requested relation performs at most one query per relation kind, keyed
+    by the parent primary-key values already in memory. This avoids N+1 queries
+    while keeping to-many loading outside the SELECT compiler's JOIN path.
+    """
     if not instances or not prefetch_names:
         return
     metadata = model.get_metadata()

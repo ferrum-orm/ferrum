@@ -64,20 +64,35 @@ pub struct QuerySetIR {
 }
 
 /// JOIN metadata for ``select_related`` (`PostgreSQL` LEFT JOIN).
+///
+/// The emitter produces `LEFT JOIN <remote_table> AS <alias> ON <base_table>.<local_col> = <alias>.<remote_pk_column>`.
+/// All identifier fields are validated on the Python side before this struct is serialized into the IR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinSpec {
+    /// Python relation name (e.g. `"author"`) — used in aliased column output keys.
     pub relation: String,
+    /// SQL alias for the joined table (e.g. `"author"`).
     pub alias: String,
+    /// The FK field on the base model that joins to the remote PK.
     pub local_field: FieldRef,
+    /// Remote table name (from model metadata, not user input).
     pub remote_table: String,
+    /// Remote table PK column name (from model metadata).
     pub remote_pk_column: String,
+    /// Columns to project from the remote table into `<alias>__<column>` aliases.
     pub remote_fields: Vec<JoinFieldRef>,
 }
 
+/// A field reference into a joined (remote) model's metadata.
+///
+/// Projected as `<alias>.<column> AS "<alias>__<column>"` in the SELECT list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinFieldRef {
+    /// Index into the remote model's `ModelMetadata::fields`.
     pub index: usize,
+    /// Python attribute name of the remote field (used in output key construction).
     pub name: String,
+    /// Database column name of the remote field.
     pub column: String,
 }
 
@@ -152,37 +167,60 @@ pub struct FieldRef {
     pub index: usize,
 }
 
-/// A filter predicate.
+/// A filter predicate (one leaf of the WHERE clause).
+///
+/// `operator` must be in `FieldMeta::allowed_operators` for `field`; the compiler
+/// rejects any string not in that allowlist before SQL is produced (SQL-1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Filter {
+    /// The model field being filtered.
     pub field: FieldRef,
+    /// Ferrum operator string, e.g. `"eq"`, `"gt"`, `"icontains"`, `"is_null"`.
+    /// Validated against `FieldMeta::allowed_operators` before SQL emission.
     pub operator: String,
+    /// Bound value for the filter — never interpolated into SQL text.
     pub value: BindValue,
 }
 
 /// Composable boolean predicate tree (``Q`` objects on the Python side).
+///
+/// `And`/`Or`/`Not` compose leaf `Filter` nodes into arbitrarily nested WHERE
+/// expressions. The compiler validates every leaf `Filter` against the metadata
+/// allowlist before any SQL is produced.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Predicate {
+    /// All children must be true (SQL `… AND …`).
     And { children: Vec<Predicate> },
+    /// At least one child must be true (SQL `… OR …`).
     Or { children: Vec<Predicate> },
+    /// Negates the child predicate (SQL `NOT (…)`).
     Not { child: Box<Predicate> },
+    /// A leaf filter — validated against `FieldMeta::allowed_operators`.
     Filter { filter: Filter },
 }
 
 /// An ORDER BY clause element.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderBy {
+    /// The model field to sort by (validated against the metadata allowlist).
     pub field: FieldRef,
+    /// Sort direction; `Unknown` is rejected by the compiler before SQL is produced.
     pub direction: SortDirection,
 }
 
 /// pgvector distance metric for KNN ordering.
+///
+/// Each variant maps to a pgvector operator in the emitted SQL:
+/// `L2` → `<->`, `Cosine` → `<=>`, `InnerProduct` → `<#>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VectorMetric {
+    /// Euclidean (L2) distance — `ORDER BY col <-> $n`.
     L2,
+    /// Cosine distance — `ORDER BY col <=> $n`.
     Cosine,
+    /// Negative inner product — `ORDER BY col <#> $n`.
     InnerProduct,
 }
 

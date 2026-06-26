@@ -19,6 +19,7 @@ ferrum-core = { path = "../ferrum-core" }
 ferrum-sql = { path = "../ferrum-sql" }
 pyo3 = { workspace = true }
 serde_json = { workspace = true }
+rmp-serde = { workspace = true }
 thiserror = { workspace = true }
 
 [lints.clippy]

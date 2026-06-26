@@ -1,4 +1,10 @@
-"""Driver protocol for async database I/O."""
+"""Driver protocol for async database I/O.
+
+The Python connection layer owns all awaitable database I/O. QuerySet terminals
+depend only on this minimal protocol, while SQL compilation remains in Rust.
+PostgreSQL is the canonical backend; secondary drivers implement this shape for
+thin parity and may intentionally omit higher-level features such as transactions.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +21,11 @@ class RowProtocol(Protocol):
 
 @runtime_checkable
 class QueryExecutorProtocol(Protocol):
-    """Minimal async SQL surface QuerySet terminals call on ``_require_driver()``."""
+    """Minimal async SQL surface QuerySet terminals call on ``_require_driver()``.
+
+    Implementations must execute already-compiled SQL with positional bound
+    parameters. They must not perform SQL string construction from user input.
+    """
 
     async def fetch(self, sql: str, *params: object) -> list[Any]: ...
     async def fetchrow(self, sql: str, *params: object) -> Any | None: ...
@@ -25,7 +35,11 @@ class QueryExecutorProtocol(Protocol):
 
 @runtime_checkable
 class DriverProtocol(Protocol):
-    """Uniform async driver surface for QuerySet and migrations."""
+    """Uniform async driver surface for QuerySet and migrations.
+
+    Concrete drivers map native exceptions into Ferrum's sanitized error
+    taxonomy before exceptions reach application code.
+    """
 
     dialect: str  # "postgres" | "mysql" | "sqlite"
 

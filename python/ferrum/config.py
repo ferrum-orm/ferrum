@@ -16,6 +16,10 @@ from pathlib import Path
 DEFAULT_DATABASE_URL_ENV = "FERRUM_DATABASE_URL"
 FALLBACK_DATABASE_URL_ENV = "DATABASE_URL"
 
+WIRE_FORMAT_ENV = "FERRUM_WIRE_FORMAT"
+DEFAULT_WIRE_FORMAT = "json"
+_VALID_WIRE_FORMATS: frozenset[str] = frozenset({"json", "msgpack"})
+
 
 @dataclasses.dataclass(frozen=True)
 class FerrumConfig:
@@ -44,6 +48,11 @@ class FerrumConfig:
 
     When ``None`` or empty, :func:`resolve_database_url` tries
     ``FERRUM_DATABASE_URL`` then ``DATABASE_URL``."""
+
+    wire_format: str = DEFAULT_WIRE_FORMAT
+    """Serialization for the Python↔Rust IR/hydration boundary: ``"json"``
+    (default) or ``"msgpack"``. The ``FERRUM_WIRE_FORMAT`` environment variable
+    overrides this value. ``msgpack`` additionally requires ``ferrum-orm[msgpack]``."""
 
 
 def find_project_root(start: Path) -> Path:
@@ -131,12 +140,28 @@ def _config_from_section(section: dict[str, object]) -> FerrumConfig:
         stripped = str(raw_database_url_env).strip()
         database_url_env = stripped or None
 
+    raw_wire_format = section.get("wire_format")
+    wire_format = (
+        _str_with_default(raw_wire_format, DEFAULT_WIRE_FORMAT).strip().lower()
+        if raw_wire_format is not None
+        else DEFAULT_WIRE_FORMAT
+    )
+    if wire_format not in _VALID_WIRE_FORMATS:
+        print(
+            f"Warning: [ferrum] wire_format={wire_format!r} is invalid "
+            f"(expected one of {', '.join(sorted(_VALID_WIRE_FORMATS))}); using "
+            f"{DEFAULT_WIRE_FORMAT!r}.",
+            file=sys.stderr,
+        )
+        wire_format = DEFAULT_WIRE_FORMAT
+
     return FerrumConfig(
         settings=_optional_str(section.get("settings")),
         migrations_dir=_str_with_default(section.get("migrations_dir"), "migrations"),
         default_env=_str_with_default(section.get("default_env"), "development"),
         env_file=_str_with_default(section.get("env_file"), ".env"),
         database_url_env=database_url_env,
+        wire_format=wire_format,
     )
 
 
@@ -192,3 +217,27 @@ def resolve_database_url_for_cwd() -> tuple[str | None, str | None]:
     root = find_project_root(Path.cwd())
     cfg = load_config(root)
     return resolve_database_url(database_url_env=cfg.database_url_env), cfg.database_url_env
+
+
+def resolve_wire_format() -> str:
+    """Resolve the IR/hydration wire format: env var first, then project config.
+
+    Precedence: ``FERRUM_WIRE_FORMAT`` (when set to a valid value), then the
+    ``[ferrum] wire_format`` config key, defaulting to ``"json"``. An unknown
+    env value falls back to ``"json"`` rather than raising — selection is a
+    performance knob, not a correctness gate.
+    """
+    env_value = _env_get(WIRE_FORMAT_ENV)
+    if env_value is not None:
+        normalized = env_value.strip().lower()
+        if normalized in _VALID_WIRE_FORMATS:
+            return normalized
+        print(
+            f"Warning: {WIRE_FORMAT_ENV}={env_value!r} is invalid "
+            f"(expected one of {', '.join(sorted(_VALID_WIRE_FORMATS))}); using "
+            f"{DEFAULT_WIRE_FORMAT!r}.",
+            file=sys.stderr,
+        )
+        return DEFAULT_WIRE_FORMAT
+    root = find_project_root(Path.cwd())
+    return load_config(root).wire_format

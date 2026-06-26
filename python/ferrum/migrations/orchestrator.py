@@ -206,13 +206,111 @@ def _quote_ident(name: str, dialect: str) -> str:
     """Quote a DDL identifier for the target dialect."""
     if dialect == "mysql":
         return "`" + name.replace("`", "``") + "`"
+    if dialect == "mssql":
+        return "[" + name.replace("]", "]]") + "]"
     escaped = name.replace('"', '""')
     return f'"{escaped}"'
+
+
+# Base type tokens permitted in MSSQL DDL after mapping (parameter portion,
+# e.g. ``(MAX)`` / ``(10,2)``, is appended separately and not allowlisted here).
+_MSSQL_TYPE_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "INT",
+        "BIGINT",
+        "SMALLINT",
+        "BIT",
+        "FLOAT",
+        "REAL",
+        "NUMERIC",
+        "DECIMAL",
+        "NVARCHAR",
+        "NCHAR",
+        "VARBINARY",
+        "UNIQUEIDENTIFIER",
+        "DATETIMEOFFSET",
+        "DATETIME2",
+        "DATE",
+        "TIME",
+        "INT IDENTITY",
+        "BIGINT IDENTITY",
+        "SMALLINT IDENTITY",
+    }
+)
+
+# Migration op kinds that are PostgreSQL-only and rejected on the MSSQL backend
+# (thin parity: no RLS, extensions, stored functions, in-place column alters,
+# or column rename DDL in v0.1).
+_MSSQL_UNSUPPORTED_KINDS: frozenset[str] = frozenset(
+    {
+        "alter_column",
+        "rename_column",
+        "create_extension",
+        "drop_extension",
+        "enable_rls",
+        "disable_rls",
+        "create_policy",
+        "drop_policy",
+        "create_function",
+        "drop_function",
+    }
+)
+
+
+def _map_sql_type_mssql(sql_type: str) -> str:
+    """Map a canonical SQL type to its T-SQL token (preserving any ``(...)``)."""
+    upper = sql_type.upper()
+    base = upper.split("(")[0].strip()
+    paren = sql_type[sql_type.index("(") :] if "(" in sql_type else ""
+    direct: dict[str, str] = {
+        "SERIAL": "INT IDENTITY(1,1)",
+        "SERIAL4": "INT IDENTITY(1,1)",
+        "BIGSERIAL": "BIGINT IDENTITY(1,1)",
+        "SERIAL8": "BIGINT IDENTITY(1,1)",
+        "SMALLSERIAL": "SMALLINT IDENTITY(1,1)",
+        "SERIAL2": "SMALLINT IDENTITY(1,1)",
+        "BOOLEAN": "BIT",
+        "BOOL": "BIT",
+        "BYTEA": "VARBINARY(MAX)",
+        "UUID": "UNIQUEIDENTIFIER",
+        "TIMESTAMPTZ": "DATETIMEOFFSET",
+        "TIMESTAMP": "DATETIME2",
+        "TEXT": "NVARCHAR(MAX)",
+        "JSONB": "NVARCHAR(MAX)",
+        "JSON": "NVARCHAR(MAX)",
+        "DOUBLE PRECISION": "FLOAT",
+        "FLOAT8": "FLOAT",
+        "FLOAT": "FLOAT",
+        "FLOAT4": "REAL",
+        "REAL": "REAL",
+        "INT": "INT",
+        "INT4": "INT",
+        "INTEGER": "INT",
+        "INT8": "BIGINT",
+        "BIGINT": "BIGINT",
+        "INT2": "SMALLINT",
+        "SMALLINT": "SMALLINT",
+        "DATE": "DATE",
+        "TIME": "TIME",
+    }
+    if base in direct:
+        return direct[base]
+    if base in ("VARCHAR", "CHARACTER VARYING"):
+        return f"NVARCHAR{paren}" if paren else "NVARCHAR(MAX)"
+    if base in ("CHAR", "CHARACTER"):
+        return f"NCHAR{paren}" if paren else "NCHAR(1)"
+    if base in ("NUMERIC", "DECIMAL"):
+        return f"NUMERIC{paren}"
+    raise FerrumMigrationError(
+        f"SQL type {sql_type!r} is not supported on the MSSQL backend (thin parity). [FERR-M001]"
+    )
 
 
 def _map_sql_type(sql_type: str, dialect: str) -> str:
     """Map canonical SQL types to dialect-specific DDL tokens."""
     upper = sql_type.upper()
+    if dialect == "mssql":
+        return _map_sql_type_mssql(sql_type)
     if dialect == "mysql" and upper.startswith("BOOLEAN"):
         return sql_type.replace("BOOLEAN", "TINYINT(1)").replace("boolean", "TINYINT(1)")
     if dialect == "mysql" and upper == "BYTEA":
@@ -241,7 +339,10 @@ def _col_def(col: dict[str, Any], *, dialect: str = "postgres") -> str:
     base_type = sql_type.split("(")[0].upper()
     # Array types end with "[]"; strip that suffix before allowlist check.
     base_type_check = base_type.rstrip("[]") if base_type.endswith("[]") else base_type
-    if (
+    if dialect == "mssql":
+        if base_type not in _MSSQL_TYPE_ALLOWLIST:
+            raise FerrumMigrationError(f"Unsupported SQL type {sql_type!r}. [FERR-M001]")
+    elif (
         base_type not in _SQL_TYPE_ALLOWLIST
         and base_type_check not in _SQL_TYPE_ALLOWLIST
         and dialect != "mysql"
@@ -304,6 +405,12 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
     """
     kind = op.get("kind", "")
 
+    if dialect == "mssql" and kind in _MSSQL_UNSUPPORTED_KINDS:
+        raise FerrumMigrationError(
+            f"Migration op {kind!r} is not supported on the MSSQL backend "
+            "(thin parity: no RLS, extensions, functions, column alter/rename). [FERR-M001]"
+        )
+
     if kind == "create_table":
         table = op["table"]
         col_defs_list = [_col_def(c, dialect=dialect) for c in op.get("columns", [])]
@@ -314,6 +421,12 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
             pk_cols_sql = ", ".join(_quote_ident(col, dialect) for col in composite_pk_cols)
             col_defs_list.append(f"PRIMARY KEY ({pk_cols_sql})")
         col_defs = ", ".join(col_defs_list)
+        if dialect == "mssql":
+            # T-SQL has no CREATE TABLE IF NOT EXISTS; guard on object existence.
+            return (
+                f"IF OBJECT_ID(N'{table}', N'U') IS NULL "
+                f"CREATE TABLE {_quote_ident(table, dialect)} ({col_defs})"
+            )
         sql = f"CREATE TABLE IF NOT EXISTS {_quote_ident(table, dialect)} ({col_defs})"
         if dialect == "mysql":
             sql += " ENGINE=InnoDB"
@@ -326,6 +439,10 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
     if kind == "add_column":
         table = op["table"]
         col = {**op, "kind": "add_column"}
+        if dialect == "mssql":
+            # T-SQL adds columns with ALTER TABLE ... ADD <coldef> (no COLUMN keyword).
+            coldef = _col_def(col, dialect=dialect)
+            return f"ALTER TABLE {_quote_ident(table, dialect)} ADD {coldef}"
         return (
             f"ALTER TABLE {_quote_ident(table, dialect)} "
             f"ADD COLUMN {_col_def(col, dialect=dialect)}"
@@ -408,14 +525,22 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
         using = op.get("using", "btree")
         if using not in _INDEX_USING_ALLOWLIST:
             raise FerrumMigrationError(f"Unsupported index access method {using!r}. [FERR-M001]")
-        sql = (
-            f"CREATE {unique_kw}INDEX IF NOT EXISTS {_quote_ident(name, dialect)} "
-            f"ON {_quote_ident(table, dialect)}"
-        )
-        if dialect == "postgres":
-            sql += f" USING {using} ({cols})"
+        if dialect == "mssql":
+            # T-SQL has no CREATE INDEX IF NOT EXISTS / USING; the ledger ensures
+            # each migration runs once, so an unguarded CREATE INDEX is safe.
+            sql = (
+                f"CREATE {unique_kw}INDEX {_quote_ident(name, dialect)} "
+                f"ON {_quote_ident(table, dialect)} ({cols})"
+            )
         else:
-            sql += f" ({cols})"
+            sql = (
+                f"CREATE {unique_kw}INDEX IF NOT EXISTS {_quote_ident(name, dialect)} "
+                f"ON {_quote_ident(table, dialect)}"
+            )
+            if dialect == "postgres":
+                sql += f" USING {using} ({cols})"
+            else:
+                sql += f" ({cols})"
         where = op.get("where")
         if where:
             sql = f"{sql} WHERE {where}"
@@ -423,7 +548,7 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
 
     if kind == "drop_index":
         name = op["name"]
-        if dialect == "mysql":
+        if dialect in ("mysql", "mssql"):
             table = op.get("table", "")
             if table:
                 return f"DROP INDEX {_quote_ident(name, dialect)} ON {_quote_ident(table, dialect)}"

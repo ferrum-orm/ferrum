@@ -18,8 +18,12 @@ class FerrumHydrationError(RuntimeError):
 def compile_query(metadata_json: str, ir_json: str, dialect: str = "postgres") -> dict[str, object]:
     """Compile a ``QuerySetIR`` (JSON) against model metadata (JSON).
 
+    ``dialect`` is one of ``postgres``, ``mysql``, ``sqlite``, ``mssql``.
+
     Returns a dict with keys:
-        sql_text: str — parameterized SQL ($1/$2 for PostgreSQL, ? for MySQL/SQLite)
+        sql_text: str — parameterized SQL ($1/$2 for PostgreSQL, ? for
+            MySQL/SQLite/MSSQL; MSSQL uses [bracket] quoting, OUTPUT INSERTED.*
+            for returning, and OFFSET/FETCH pagination)
         bound_params: list[str] — JSON-encoded bound values in placeholder order
         param_type_summary: list[str] — Tier A observability summary (no values)
         fingerprint: str — stable FNV-1a hash of the SQL shape
@@ -38,6 +42,35 @@ def hydrate_rows(metadata_json: str, rows_json: str) -> list[dict[str, object]]:
 
     Raises:
         FerrumHydrationError: Required column missing/null, or JSON is malformed.
+        FerrumInternalError: Rust panic (should never occur in normal use).
+    """
+    ...
+
+def compile_query_msgpack(
+    metadata_mp: bytes, ir_mp: bytes, dialect: str = "postgres"
+) -> dict[str, object]:
+    """Compile a ``QuerySetIR`` from MessagePack-encoded metadata and IR.
+
+    Identical semantics to :func:`compile_query` but ``metadata_mp`` and
+    ``ir_mp`` are MessagePack bytes. ``bound_params`` is returned as a single
+    MessagePack blob (``bytes``) — the NAMED encoder, so the tagged ``BindValue``
+    enum round-trips as a map that ``msgpack.unpackb`` reads. Other keys
+    (``sql_text``, ``param_type_summary``, ``fingerprint``, ``operation``) are
+    native dict values.
+
+    Raises:
+        FerrumCompileError: IR invalid or MessagePack input malformed.
+        FerrumInternalError: Rust panic or bound_params encode failure.
+    """
+    ...
+
+def hydrate_rows_msgpack(metadata_mp: bytes, rows_mp: bytes) -> list[dict[str, object]]:
+    """Hydrate DB-origin rows from MessagePack-encoded metadata and rows.
+
+    Identical semantics to :func:`hydrate_rows` but accepts MessagePack bytes.
+
+    Raises:
+        FerrumHydrationError: Required column missing/null, or input malformed.
         FerrumInternalError: Rust panic (should never occur in normal use).
     """
     ...

@@ -24,7 +24,7 @@ Ferrum aims to provide all four.
 - Pydantic-first models
 - Django-inspired ORM experience
 - Rust-powered query engine
-- PostgreSQL-first architecture (MySQL and SQLite via optional extras)
+- PostgreSQL-first architecture (MySQL, SQLite, and SQL Server via optional extras)
 - Type-safe query construction
 - Automatic migrations
 - High-performance result hydration
@@ -197,6 +197,12 @@ pip install 'ferrum-orm[mysql]'
 # SQLite + migrations CLI (testing / local dev)
 pip install 'ferrum-orm[sqlite,cli]'
 
+# SQL Server (also needs a system ODBC driver, e.g. msodbcsql18)
+pip install 'ferrum-orm[mssql]'
+
+# Optional MessagePack wire format for the Python<->Rust boundary
+pip install 'ferrum-orm[msgpack]'
+
 # Everything (all drivers + CLI + dotenv)
 pip install 'ferrum-orm[all]'
 
@@ -205,7 +211,19 @@ pip install ferrum-orm
 ```
 
 Bare `ferrum-orm` installs Pydantic and the Rust core only. Choose a driver extra
-(`pg`, `mysql`, or `sqlite`) before calling `ferrum.connect()`.
+(`pg`, `mysql`, `sqlite`, or `mssql`) before calling `ferrum.connect()`.
+
+MySQL, SQLite, and SQL Server are **thin-parity** backends: they support core CRUD
+and migrations but not transactions, upsert, `bulk_update`, RLS, or pgvector
+(PostgreSQL only). SQL Server connects via `aioodbc`/`pyodbc` and requires a system
+ODBC driver such as `msodbcsql18`; DSNs use the `mssql://` or `sqlserver://` scheme.
+
+### Wire format (advanced)
+
+The Python↔Rust IR/hydration boundary defaults to JSON. Installing the `msgpack`
+extra lets you switch it to MessagePack, selected via the `FERRUM_WIRE_FORMAT`
+environment variable (`json` | `msgpack`) or the `[ferrum] wire_format` key in
+`ferrum.toml` / `pyproject.toml`. JSON remains the default; MessagePack is opt-in.
 
 From source, build the native extension with `maturin develop` (or `mise run dev`).
 

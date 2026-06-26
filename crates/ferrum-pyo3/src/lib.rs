@@ -15,15 +15,82 @@
 
 use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError};
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use pyo3::IntoPyObjectExt;
 
 // With abi3, PyO3 does not support subclassing native types via `extends`.
 // Use `create_exception!` to define custom exception classes that inherit from
 // `RuntimeError` on the Python side. These are registered into the module by
 // `m.add(name, exc)` rather than `m.add_class::<T>()`.
+
+// `FerrumInternalError` — Python exception for unexpected Rust panics caught at the
+// boundary (ERR-2). The message is deliberately generic: no internal path or address.
 pyo3::create_exception!(ferrum_native, FerrumInternalError, PyRuntimeError);
+
+// `FerrumCompileError` — raised when IR → SQL compilation fails.
+// Message contains only structured fields (model/field/operator names) — no user
+// query values, credentials, or raw SQL. Maps to `CompileError` in `ferrum-core::error`.
 pyo3::create_exception!(ferrum_native, FerrumCompileError, PyRuntimeError);
+
+// `FerrumHydrationError` — raised when row hydration fails.
+// Carries model and column name only; no row data or bound values.
+// Maps to `HydrateError` in `ferrum-core::error`.
 pyo3::create_exception!(ferrum_native, FerrumHydrationError, PyRuntimeError);
+
+/// Dispatch a parsed IR through allowlist validation and the correct emitter.
+///
+/// Shared by the JSON (`compile_query`) and `MessagePack` (`compile_query_msgpack`)
+/// entry points so both wire formats traverse identical validation/emit logic.
+/// Returns the compiled query plus the Python routing key.
+fn dispatch_compile(
+    metadata: &ferrum_core::ir::ModelMetadata,
+    ir: &ferrum_core::ir::QuerySetIR,
+    dialect: &str,
+) -> Result<(ferrum_core::compile::CompiledQuery, &'static str), ferrum_core::error::CompileError> {
+    let sql_dialect = ferrum_sql::dialect::Dialect::parse(dialect).ok_or_else(|| {
+        ferrum_core::error::CompileError::MalformedIr {
+            reason: format!(
+                "unknown dialect {dialect:?}; expected postgres, mysql, sqlite, or mssql"
+            ),
+        }
+    })?;
+
+    let operation_name: &'static str = match &ir.operation {
+        ferrum_core::ir::Operation::Select { .. } => "select",
+        ferrum_core::ir::Operation::Insert { .. } => "insert",
+        ferrum_core::ir::Operation::Update { .. } => "update",
+        ferrum_core::ir::Operation::Delete { .. } => "delete",
+        ferrum_core::ir::Operation::BulkInsert { .. } => "bulk_insert",
+        ferrum_core::ir::Operation::BulkUpdate { .. } => "bulk_update",
+        ferrum_core::ir::Operation::BulkDelete { .. } => "bulk_delete",
+    };
+
+    let compiled = match &ir.operation {
+        ferrum_core::ir::Operation::Select { .. } => {
+            ferrum_sql::emit::emit_select(sql_dialect, metadata, ir)
+        }
+        ferrum_core::ir::Operation::Insert { .. } => {
+            ferrum_sql::emit::emit_insert(sql_dialect, metadata, ir)
+        }
+        ferrum_core::ir::Operation::Update { .. } => {
+            ferrum_sql::emit::emit_update(sql_dialect, metadata, ir)
+        }
+        ferrum_core::ir::Operation::Delete { .. } => {
+            ferrum_sql::emit::emit_delete(sql_dialect, metadata, ir)
+        }
+        ferrum_core::ir::Operation::BulkInsert { .. } => {
+            ferrum_sql::emit::emit_bulk_insert(sql_dialect, metadata, ir)
+        }
+        ferrum_core::ir::Operation::BulkUpdate { .. } => {
+            ferrum_sql::emit::emit_bulk_update(sql_dialect, metadata, ir)
+        }
+        ferrum_core::ir::Operation::BulkDelete { .. } => {
+            ferrum_sql::emit::emit_bulk_delete(sql_dialect, metadata, ir)
+        }
+    }?;
+
+    Ok((compiled, operation_name))
+}
 
 /// Compile a `QuerySetIR` (JSON-serialized) against model metadata (JSON-serialized).
 ///
@@ -56,51 +123,10 @@ fn compile_query(
             }
         })?;
 
-        let sql_dialect = ferrum_sql::dialect::Dialect::parse(dialect).ok_or_else(|| {
-            ferrum_core::error::CompileError::MalformedIr {
-                reason: format!("unknown dialect {dialect:?}; expected postgres, mysql, or sqlite"),
-            }
-        })?;
-
-        // Determine operation name for the Python routing key.
-        let operation_name: &'static str = match &ir.operation {
-            ferrum_core::ir::Operation::Select { .. } => "select",
-            ferrum_core::ir::Operation::Insert { .. } => "insert",
-            ferrum_core::ir::Operation::Update { .. } => "update",
-            ferrum_core::ir::Operation::Delete { .. } => "delete",
-            ferrum_core::ir::Operation::BulkInsert { .. } => "bulk_insert",
-            ferrum_core::ir::Operation::BulkUpdate { .. } => "bulk_update",
-            ferrum_core::ir::Operation::BulkDelete { .. } => "bulk_delete",
-        };
-
         // Dispatch to the correct emitter. Each emitter calls
         // `ferrum_core::compile::compile` first — allowlist checks fail fast
         // before any SQL text is produced (SQL-1).
-        let compiled = match &ir.operation {
-            ferrum_core::ir::Operation::Select { .. } => {
-                ferrum_sql::emit::emit_select(sql_dialect, &metadata, &ir)
-            }
-            ferrum_core::ir::Operation::Insert { .. } => {
-                ferrum_sql::emit::emit_insert(sql_dialect, &metadata, &ir)
-            }
-            ferrum_core::ir::Operation::Update { .. } => {
-                ferrum_sql::emit::emit_update(sql_dialect, &metadata, &ir)
-            }
-            ferrum_core::ir::Operation::Delete { .. } => {
-                ferrum_sql::emit::emit_delete(sql_dialect, &metadata, &ir)
-            }
-            ferrum_core::ir::Operation::BulkInsert { .. } => {
-                ferrum_sql::emit::emit_bulk_insert(sql_dialect, &metadata, &ir)
-            }
-            ferrum_core::ir::Operation::BulkUpdate { .. } => {
-                ferrum_sql::emit::emit_bulk_update(sql_dialect, &metadata, &ir)
-            }
-            ferrum_core::ir::Operation::BulkDelete { .. } => {
-                ferrum_sql::emit::emit_bulk_delete(sql_dialect, &metadata, &ir)
-            }
-        }?;
-
-        Ok::<_, ferrum_core::error::CompileError>((compiled, operation_name))
+        dispatch_compile(&metadata, &ir, dialect)
     }));
 
     match result {
@@ -220,6 +246,104 @@ fn hydrate_rows(py: Python<'_>, metadata_json: &str, rows_json: &str) -> PyResul
     }
 }
 
+/// Compile a `QuerySetIR` from `MessagePack`-encoded inputs (optional wire format).
+///
+/// Identical semantics to [`compile_query`] but accepts `MessagePack` bytes for
+/// `metadata` and `ir` and returns `bound_params` as a single `MessagePack` blob
+/// (the NAMED encoder, so the adjacently-tagged `BindValue` enum round-trips as
+/// a map that Python `msgpack.unpackb` reads). Other keys are native dict values.
+///
+/// # Errors
+/// - `FerrumCompileError` — IR invalid or `MessagePack` input malformed.
+/// - `FerrumInternalError` — Rust panic or `bound_params` encode failure.
+#[pyfunction]
+fn compile_query_msgpack(
+    py: Python<'_>,
+    metadata_mp: &[u8],
+    ir_mp: &[u8],
+    dialect: &str,
+) -> PyResult<Py<PyAny>> {
+    // `AssertUnwindSafe` is sound: only `&[u8]`/`&str` (RefUnwindSafe) cross the
+    // panic boundary, and the closure is called exactly once.
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let metadata: ferrum_core::ir::ModelMetadata = rmp_serde::from_slice(metadata_mp)
+                .map_err(|e| ferrum_core::error::CompileError::MalformedIr {
+                    reason: format!("metadata deserialization failed: {e}"),
+                })?;
+            let ir: ferrum_core::ir::QuerySetIR = rmp_serde::from_slice(ir_mp).map_err(|e| {
+                ferrum_core::error::CompileError::MalformedIr {
+                    reason: format!("IR deserialization failed: {e}"),
+                }
+            })?;
+            dispatch_compile(&metadata, &ir, dialect)
+        }));
+
+    match result {
+        Ok(Ok((compiled, operation_name))) => {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("sql_text", compiled.sql_text.as_str())?;
+            // `to_vec_named` is REQUIRED: the default rmp-serde enum encoding is
+            // positional (arrays); the named encoder emits maps so the
+            // `#[serde(tag="type", content="value")]` BindValue shape survives
+            // the round-trip to Python `msgpack.unpackb`. Never log this blob.
+            let params_blob =
+                rmp_serde::encode::to_vec_named(&compiled.bound_params).map_err(|e| {
+                    FerrumInternalError::new_err(format!(
+                        "internal Ferrum error: bound_params msgpack encode failed ({e})"
+                    ))
+                })?;
+            dict.set_item("bound_params", PyBytes::new(py, &params_blob))?;
+            dict.set_item("param_type_summary", compiled.param_type_summary)?;
+            dict.set_item("fingerprint", compiled.fingerprint.as_str())?;
+            dict.set_item("operation", operation_name)?;
+            Ok(dict.into_any().unbind())
+        }
+        Ok(Err(compile_err)) => Err(FerrumCompileError::new_err(format!("{compile_err}"))),
+        Err(_panic_payload) => Err(FerrumInternalError::new_err(
+            "internal Ferrum error: unexpected panic in Rust core (category: compile)",
+        )),
+    }
+}
+
+/// Hydrate a batch of DB-origin rows from `MessagePack`-encoded inputs.
+///
+/// Identical semantics to [`hydrate_rows`] but accepts `MessagePack` bytes for
+/// `metadata` and `rows`. Returns the hydrated rows as a Python list of dicts.
+///
+/// # Errors
+/// - `FerrumHydrationError` — deserialization failed or a required column is
+///   missing/null in a row.
+/// - `FerrumInternalError` — Rust panic (should never occur in normal use; ERR-2).
+#[pyfunction]
+fn hydrate_rows_msgpack(py: Python<'_>, metadata_mp: &[u8], rows_mp: &[u8]) -> PyResult<Py<PyAny>> {
+    let unwind_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let metadata: ferrum_core::ir::ModelMetadata = rmp_serde::from_slice(metadata_mp)
+            .map_err(|e| format!("metadata deserialization error: {e}"))?;
+        let rows: Vec<ferrum_core::hydrate::RowPayload> = rmp_serde::from_slice(rows_mp)
+            .map_err(|e| format!("rows deserialization error: {e}"))?;
+        ferrum_core::hydrate::hydrate_rows(&metadata, rows).map_err(|e| format!("{e}"))
+    }));
+
+    match unwind_result {
+        Ok(Ok(rows)) => {
+            let list = pyo3::types::PyList::empty(py);
+            for row in &rows {
+                let dict = pyo3::types::PyDict::new(py);
+                for (k, v) in row {
+                    dict.set_item(k, json_value_to_pyobj(py, v)?)?;
+                }
+                list.append(dict)?;
+            }
+            Ok(list.into_any().unbind())
+        }
+        Ok(Err(msg)) => Err(FerrumHydrationError::new_err(msg)),
+        Err(_panic_payload) => Err(FerrumInternalError::new_err(
+            "internal Ferrum error: unexpected panic in Rust core (category: hydrate)",
+        )),
+    }
+}
+
 /// Migration planning stub — not yet implemented (Wave 4).
 ///
 /// # Errors
@@ -239,7 +363,9 @@ fn plan_migration() -> PyResult<()> {
 #[pymodule]
 fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compile_query, m)?)?;
+    m.add_function(wrap_pyfunction!(compile_query_msgpack, m)?)?;
     m.add_function(wrap_pyfunction!(hydrate_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(hydrate_rows_msgpack, m)?)?;
     m.add_function(wrap_pyfunction!(plan_migration, m)?)?;
     m.add("FerrumInternalError", py.get_type::<FerrumInternalError>())?;
     m.add("FerrumCompileError", py.get_type::<FerrumCompileError>())?;
