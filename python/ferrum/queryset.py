@@ -56,7 +56,15 @@ with contextlib.suppress(ImportError):
     _native_ext = importlib.import_module("ferrum._native")
 
 # IR version — must stay in sync with ferrum-core IR_VERSION (crates/ferrum-core/src/ir/mod.rs).
-_IR_VERSION: int = 2
+_IR_VERSION: int = 3
+
+# Maps QuerySet ``mode=`` kwargs to filter lookup operators and IR ``TextSearchMode`` tags.
+_TEXT_SEARCH_MODES: dict[str, tuple[str, str]] = {
+    "plain": ("match", "plain"),
+    "phrase": ("match_phrase", "phrase"),
+    "websearch": ("match_websearch", "websearch"),
+    "boolean": ("match_boolean", "boolean"),
+}
 
 _EXT_NOT_BUILT_MSG = (
     "ferrum._native extension not built. "
@@ -419,6 +427,7 @@ class QuerySet(Generic[_M]):
         self._offset: int | None = None
         self._is_filtered: bool = False
         self._vector_order_by: dict[str, Any] | None = None
+        self._text_rank_by: dict[str, Any] | None = None
         self._predicate_q: Q | None = None
         self._distinct: bool = False
         self._only_fields: tuple[str, ...] | None = None
@@ -608,6 +617,69 @@ class QuerySet(Generic[_M]):
         }
         return qs
 
+    def rank_by(
+        self,
+        field: str,
+        query: str,
+        *,
+        mode: Literal["plain", "phrase", "websearch", "boolean"] = "plain",
+    ) -> QuerySet[_M]:
+        """Order results by full-text relevance (``text_rank_by`` IR node)."""
+        if mode not in _TEXT_SEARCH_MODES:
+            raise FerrumCompileError(
+                f"Invalid text search mode {mode!r}.",
+                model=self._model.__name__,
+            )
+        metadata = self._get_metadata()
+        if metadata is None:
+            raise FerrumCompileError(
+                f"Model {self._model.__name__!r} has no metadata.",
+                model=self._model.__name__,
+            )
+        field_index = {f.name: i for i, f in enumerate(metadata.fields)}
+        if field not in field_index:
+            raise FerrumCompileError(
+                f"Unknown field {field!r} on model {metadata.model_name!r}.",
+                model=metadata.model_name,
+                field=field,
+            )
+        field_meta = metadata.fields[field_index[field]]
+        if field_meta.field_type not in ("tsvector", "text"):
+            raise FerrumCompileError(
+                f"rank_by() requires a full-text field; {field!r} is {field_meta.field_type!r}.",
+                model=metadata.model_name,
+                field=field,
+            )
+        if self._vector_order_by is not None:
+            raise FerrumCompileError(
+                "Cannot combine nearest_to() and rank_by() on the same QuerySet.",
+                model=metadata.model_name,
+            )
+        _, ir_mode = _TEXT_SEARCH_MODES[mode]
+        qs = self._clone()
+        qs._text_rank_by = {
+            "field": {"index": field_index[field], "name": field},
+            "query": _encode_bind_value(query),
+            "mode": ir_mode,
+        }
+        return qs
+
+    def search(
+        self,
+        query: str,
+        *,
+        field: str,
+        mode: Literal["plain", "phrase", "websearch", "boolean"] = "plain",
+    ) -> QuerySet[_M]:
+        """Filter and rank by full-text relevance on ``field``."""
+        if mode not in _TEXT_SEARCH_MODES:
+            raise FerrumCompileError(
+                f"Invalid text search mode {mode!r}.",
+                model=self._model.__name__,
+            )
+        operator, _ = _TEXT_SEARCH_MODES[mode]
+        return self.filter(**{f"{field}__{operator}": query}).rank_by(field, query, mode=mode)
+
     # ------------------------------------------------------------------
     # IR builder (no I/O, no SQL — QUERY_ENGINE.md §6 Stage 0)
     # ------------------------------------------------------------------
@@ -704,6 +776,8 @@ class QuerySet(Generic[_M]):
             ir["joins"] = []
         if self._vector_order_by is not None:
             ir["vector_order_by"] = self._vector_order_by
+        if self._text_rank_by is not None:
+            ir["text_rank_by"] = self._text_rank_by
         return ir
 
     def _build_exists_ir(self) -> dict[str, Any]:
@@ -2279,6 +2353,7 @@ class QuerySet(Generic[_M]):
         qs._vector_order_by = (
             dict(self._vector_order_by) if self._vector_order_by is not None else None
         )
+        qs._text_rank_by = dict(self._text_rank_by) if self._text_rank_by is not None else None
         qs._predicate_q = self._predicate_q
         qs._distinct = self._distinct
         qs._only_fields = self._only_fields

@@ -19,7 +19,7 @@ import re
 import types as _types
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Any, ClassVar, Literal, Union, cast, get_args, get_origin
+from typing import Annotated, Any, ClassVar, Literal, Union, cast, get_args, get_origin
 from uuid import UUID
 
 from pydantic import BaseModel as _PydanticBaseModel
@@ -110,7 +110,7 @@ _ALLOWED_OPERATORS: dict[str, tuple[str, ...]] = {
     # JSONB: containment + key existence operators (PostgreSQL @>, ?, ?|)
     "json": ("eq", "is_null", "contains", "has_key", "has_any_keys"),
     "vector": ("is_null",),
-    "tsvector": ("match", "is_null"),
+    "tsvector": ("match", "match_phrase", "match_websearch", "match_boolean", "is_null"),
     # PostgreSQL array types — array containment and overlap operators
     "array_text": ("eq", "is_null", "contains", "contained_by", "overlap"),
     "array_int": ("eq", "is_null", "contains", "contained_by", "overlap"),
@@ -173,6 +173,9 @@ class FieldMeta:
     vector_dimensions: int | None = None
     # For enum fields: the allowed string values (drives CHECK constraint in DDL).
     enum_values: tuple[str, ...] | None = None
+    # Full-text search metadata (Wave 0 / ADR-007).
+    fts_config: str | None = None
+    fts_source_columns: tuple[str, ...] | None = None
 
     @property
     def sql_type(self) -> str:
@@ -189,6 +192,26 @@ class IndexMeta:
     unique: bool = False
     using: str = "btree"
     where: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class FullTextIndex:
+    """Declarative full-text index for ``class Meta: full_text_indexes = [...]``."""
+
+    fields: tuple[str, ...]
+    name: str | None = None
+    config: str | None = None
+    sqlite_content_table: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class FullTextIndexMeta:
+    """Immutable descriptor for a model-level full-text index."""
+
+    name: str
+    fields: tuple[str, ...]
+    config: str | None = None
+    sqlite_content_table: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -237,6 +260,7 @@ class ModelMetadata:
     model_name: str
     fields: tuple[FieldMeta, ...]
     indexes: tuple[IndexMeta, ...] = ()
+    full_text_indexes: tuple[FullTextIndexMeta, ...] = ()
     allowed_sort_directions: tuple[str, ...] = ("asc", "desc")
     # pk_fields: all PK field indices in definition order.
     # Defaults to (0,) so the first field is implicitly the PK when not specified.
@@ -267,13 +291,26 @@ class ModelMetadata:
             }
             if f.vector_dimensions is not None:
                 payload["vector_dimensions"] = f.vector_dimensions
+            if f.fts_config is not None:
+                payload["fts_config"] = f.fts_config
+            if f.fts_source_columns is not None:
+                payload["fts_source_columns"] = list(f.fts_source_columns)
             field_payloads.append(payload)
+        fts_payloads = [
+            {
+                "name": idx.name,
+                "fields": list(idx.fields),
+                **({"config": idx.config} if idx.config is not None else {}),
+            }
+            for idx in self.full_text_indexes
+        ]
         return {
             "model_name": self.model_name,
             "table_name": self.table_name,
             "pk_index": self.pk_index,
             "pk_fields": list(self.pk_fields),
             "fields": field_payloads,
+            "full_text_indexes": fts_payloads,
         }
 
     def to_metadata_json(self) -> str:
@@ -532,6 +569,8 @@ def Field(  # noqa: N802
     primary_key: bool = False,
     uuid_generate: Literal["v4", "v7"] | None = None,
     vector_dimensions: int | None = None,
+    fts_config: str | None = None,
+    fts_source_columns: list[str] | None = None,
     **kwargs: Any,  # noqa: ANN401
 ) -> Any:  # noqa: ANN401
     """Ferrum field descriptor with column-level constraints.
@@ -557,6 +596,8 @@ def Field(  # noqa: N802
         "db_index": db_index,
         "primary_key": primary_key,
         "vector_dimensions": vector_dimensions,
+        "fts_config": fts_config,
+        "fts_source_columns": fts_source_columns,
     }
 
     if uuid_generate == "v4":
@@ -633,15 +674,26 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
     for idx, (name, field_info) in enumerate(cls.model_fields.items()):
         annotation = field_info.annotation
         base_type, nullable = _unwrap_optional(annotation)
+        ferrum_extras: dict[str, Any] = {}
+        if get_origin(base_type) is Annotated:
+            ann_args = get_args(base_type)
+            base_type = ann_args[0]
+            base_type, ann_nullable = _unwrap_optional(base_type)
+            nullable = nullable or ann_nullable
+            for meta in ann_args[1:]:
+                jse = getattr(meta, "json_schema_extra", None)
+                if isinstance(jse, dict) and "__ferrum__" in jse:
+                    ferrum_extras = jse["__ferrum__"]
+                    break
 
         # Extract Ferrum field extras from Annotated metadata or FieldInfo.json_schema_extra.
         # Annotated[T, Field(...)] path: Pydantic stores the FieldInfo items in metadata.
-        ferrum_extras: dict[str, Any] = {}
-        for meta in getattr(field_info, "metadata", []):
-            jse = getattr(meta, "json_schema_extra", None)
-            if isinstance(jse, dict) and "__ferrum__" in jse:
-                ferrum_extras = jse["__ferrum__"]
-                break
+        if not ferrum_extras:
+            for meta in getattr(field_info, "metadata", []):
+                jse = getattr(meta, "json_schema_extra", None)
+                if isinstance(jse, dict) and "__ferrum__" in jse:
+                    ferrum_extras = jse["__ferrum__"]
+                    break
         # Bare default-value path: `field: T = Field(...)` stores extras directly.
         finfo_jse = field_info.json_schema_extra or {}
         if isinstance(finfo_jse, dict) and "__ferrum__" in finfo_jse:
@@ -686,6 +738,17 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
             python_default = field_info.default
 
         vector_dimensions = ferrum_extras.get("vector_dimensions")
+        fts_config = ferrum_extras.get("fts_config")
+        if fts_config is not None:
+            cfg = str(fts_config)
+            if not cfg.replace("_", "").isalnum():
+                raise ValueError(
+                    f"Model {cls.__name__!r} field {name!r}: invalid fts_config {cfg!r}."
+                )
+        raw_fts_source = ferrum_extras.get("fts_source_columns")
+        fts_source_columns: tuple[str, ...] | None = None
+        if raw_fts_source is not None:
+            fts_source_columns = tuple(str(c) for c in raw_fts_source)
         if db_type == "vector" and vector_dimensions is None:
             raise ValueError(
                 f"Model {cls.__name__!r} field {name!r}: Vector columns require "
@@ -718,12 +781,15 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                 python_default=python_default,
                 vector_dimensions=vector_dimensions,
                 enum_values=enum_values,
+                fts_config=str(fts_config) if fts_config is not None else None,
+                fts_source_columns=fts_source_columns,
             )
         )
 
     field_column_names: set[str] = {f.column_name for f in fields}
     field_names = {f.name for f in fields}
     indexes: list[IndexMeta] = []
+    full_text_indexes: list[FullTextIndexMeta] = []
     if meta_cls is not None:
         raw_indexes = getattr(meta_cls, "indexes", None) or ()
         for raw_index in raw_indexes:
@@ -751,6 +817,38 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                     unique=index.unique,
                     using=index.using,
                     where=index.where,
+                )
+            )
+
+        raw_fts_indexes = getattr(meta_cls, "full_text_indexes", None) or ()
+        for raw_fts in raw_fts_indexes:
+            if isinstance(raw_fts, FullTextIndex):
+                fts_index = raw_fts
+            elif isinstance(raw_fts, dict):
+                fts_index = FullTextIndex(**raw_fts)
+            else:
+                raise TypeError(
+                    f"Model {cls.__name__!r} Meta.full_text_indexes entries must be "
+                    "FullTextIndex instances."
+                )
+            if not fts_index.fields:
+                raise ValueError(
+                    f"Model {cls.__name__!r} FullTextIndex requires at least one field."
+                )
+            for fts_field in fts_index.fields:
+                if fts_field not in field_names:
+                    raise ValueError(
+                        f"Model {cls.__name__!r} FullTextIndex references unknown field "
+                        f"{fts_field!r}."
+                    )
+            cols_joined = "_".join(fts_index.fields)
+            fts_name = fts_index.name or f"fts_{table_name}_{cols_joined}"
+            full_text_indexes.append(
+                FullTextIndexMeta(
+                    name=fts_name,
+                    fields=fts_index.fields,
+                    config=fts_index.config,
+                    sqlite_content_table=fts_index.sqlite_content_table,
                 )
             )
 
@@ -825,11 +923,24 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
     if not pk_indices and fields:
         pk_indices = [0]
 
+    fts_field_names: set[str] = set()
+    for idx in full_text_indexes:
+        fts_field_names.update(idx.fields)
+    if fts_field_names:
+        fts_ops = _ALLOWED_OPERATORS["tsvector"]
+        fields = [
+            dataclasses.replace(f, allowed_operators=fts_ops)
+            if f.name in fts_field_names and f.field_type == "text"
+            else f
+            for f in fields
+        ]
+
     return ModelMetadata(
         table_name=table_name,
         model_name=cls.__name__,
         fields=tuple(fields),
         indexes=tuple(indexes),
+        full_text_indexes=tuple(full_text_indexes),
         pk_fields=tuple(pk_indices),
         relations=tuple(relations),
     )

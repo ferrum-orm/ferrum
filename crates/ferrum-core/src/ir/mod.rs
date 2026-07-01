@@ -15,7 +15,7 @@ pub mod metadata;
 pub use metadata::ModelMetadata;
 
 /// Version of the IR contract this crate implements.
-pub const IR_VERSION: u32 = 2;
+pub const IR_VERSION: u32 = 3;
 
 /// The root IR node produced by `QuerySet._build_ir()` on the Python side.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +44,10 @@ pub struct QuerySetIR {
     /// Optional pgvector KNN ordering (``QuerySet.nearest_to``).
     #[serde(default)]
     pub vector_order_by: Option<VectorOrderBy>,
+
+    /// Optional full-text relevance ordering (``QuerySet.rank_by`` / ``QuerySet.search``).
+    #[serde(default)]
+    pub text_rank_by: Option<TextRankBy>,
 
     /// Optional boolean predicate tree (``Q`` objects). When present, combined with
     /// ``filters`` (AND). When absent, ``filters`` are AND-ed as in IR v1.
@@ -230,6 +234,28 @@ pub struct VectorOrderBy {
     pub field: FieldRef,
     pub metric: VectorMetric,
     pub value: BindValue,
+}
+
+/// Full-text query parsing mode for ``match_*`` filters and ``text_rank_by``.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextSearchMode {
+    /// Natural-language / plain terms (``plainto_tsquery``, ``FREETEXT``, etc.).
+    Plain,
+    /// Exact phrase (``phraseto_tsquery``, phrase mode).
+    Phrase,
+    /// Web-style search syntax (``websearch_to_tsquery``).
+    Websearch,
+    /// Boolean / prefix query DSL (``to_tsquery``, ``IN BOOLEAN MODE``).
+    Boolean,
+}
+
+/// Full-text relevance ordering (``ORDER BY <rank> DESC``).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextRankBy {
+    pub field: FieldRef,
+    pub query: BindValue,
+    pub mode: TextSearchMode,
 }
 
 /// Sort direction — only `Asc` and `Desc` are valid; anything else deserialized

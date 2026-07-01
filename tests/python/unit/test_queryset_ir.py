@@ -109,7 +109,7 @@ class TestBuildIrStructure:
     def test_ir_version(self) -> None:
         qs: QuerySet[Article] = QuerySet(Article)
         ir = qs._build_ir()
-        assert ir["version"] == 2
+        assert ir["version"] == 3
 
     def test_model_name(self) -> None:
         qs: QuerySet[Article] = QuerySet(Article)

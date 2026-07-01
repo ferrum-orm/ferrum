@@ -58,6 +58,42 @@ class TestTsvectorFilterIr:
         assert flt["value"]["type"] == "text"
         assert flt["value"]["value"] == "python orm"
 
+    def test_match_phrase_operator_in_ir(self) -> None:
+        qs = Doc.objects.filter(search_vector__match_phrase="exact phrase")
+        ir = json.loads(qs.to_ir_json())
+        assert ir["predicate"]["filter"]["operator"] == "match_phrase"
+
+    def test_match_websearch_operator_in_ir(self) -> None:
+        qs = Doc.objects.filter(search_vector__match_websearch='"rust" -python')
+        ir = json.loads(qs.to_ir_json())
+        assert ir["predicate"]["filter"]["operator"] == "match_websearch"
+
+    def test_match_boolean_operator_in_ir(self) -> None:
+        qs = Doc.objects.filter(search_vector__match_boolean="rust & postgres")
+        ir = json.loads(qs.to_ir_json())
+        assert ir["predicate"]["filter"]["operator"] == "match_boolean"
+
+
+class TestTextRankByIr:
+    def test_rank_by_adds_text_rank_by(self) -> None:
+        qs = Doc.objects.rank_by("search_vector", "orm", mode="phrase")
+        ir = json.loads(qs.to_ir_json())
+        assert ir["version"] == 3
+        trb = ir["text_rank_by"]
+        assert trb["field"]["name"] == "search_vector"
+        assert trb["mode"] == "phrase"
+        assert trb["query"]["value"] == "orm"
+
+    def test_search_sets_filter_and_rank(self) -> None:
+        qs = Doc.objects.search("hello world", field="search_vector", mode="websearch")
+        ir = json.loads(qs.to_ir_json())
+        assert ir["predicate"]["filter"]["operator"] == "match_websearch"
+        assert ir["text_rank_by"]["mode"] == "websearch"
+
+    def test_rank_by_non_tsvector_raises(self) -> None:
+        with pytest.raises(FerrumCompileError, match="full-text field"):
+            Doc.objects.rank_by("id", "x")
+
 
 class TestVectorFilterCompile:
     def test_nearest_to_compiles_to_order_by_distance(self) -> None:
@@ -76,3 +112,34 @@ class TestVectorFilterCompile:
         sql = compiled["sql_text"]
         assert "@@ plainto_tsquery" in sql
         assert "rust postgres" not in sql
+
+    def test_match_phrase_compiles_to_phraseto_tsquery(self) -> None:
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        qs = Doc.objects.filter(search_vector__match_phrase="exact phrase")
+        compiled = qs._compile()
+        assert "@@ phraseto_tsquery" in compiled["sql_text"]
+
+    def test_rank_by_compiles_to_ts_rank(self) -> None:
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        qs = Doc.objects.rank_by("search_vector", "orm")
+        compiled = qs._compile(dialect="postgres")
+        assert "ORDER BY" in compiled["sql_text"]
+        assert "ts_rank" in compiled["sql_text"]
+
+    @pytest.mark.parametrize(
+        ("dialect", "needles"),
+        [
+            ("mysql", ("MATCH", "NATURAL LANGUAGE MODE")),
+            ("sqlite", ("MATCH", "rowid IN")),
+            ("mssql", ("FREETEXT",)),
+        ],
+    )
+    def test_match_non_postgres_dialect_dispatch(
+        self, dialect: str, needles: tuple[str, ...]
+    ) -> None:
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        qs = Doc.objects.filter(search_vector__match="hello")
+        compiled = qs._compile(dialect=dialect)
+        sql = compiled["sql_text"]
+        for needle in needles:
+            assert needle in sql

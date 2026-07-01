@@ -25,10 +25,13 @@ import ferrum.migrations.operations as operations
 from ferrum.migrations.base import Migration
 from ferrum.migrations.operations import (
     CreateExtension,
+    CreateFullTextCatalog,
+    CreateFullTextIndex,
     CreateFunction,
     CreatePolicy,
     DisableRLS,
     DropExtension,
+    DropFullTextIndex,
     DropFunction,
     DropPolicy,
     EnableRLS,
@@ -37,10 +40,13 @@ from ferrum.migrations.orchestrator import MigrationResult, _op_to_sql, apply, c
 
 __all__ = [
     "CreateExtension",
+    "CreateFullTextCatalog",
+    "CreateFullTextIndex",
     "CreateFunction",
     "CreatePolicy",
     "DisableRLS",
     "DropExtension",
+    "DropFullTextIndex",
     "DropFunction",
     "DropPolicy",
     "EnableRLS",

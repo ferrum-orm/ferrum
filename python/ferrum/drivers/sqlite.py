@@ -25,7 +25,8 @@ def _sqlite_path_from_dsn(dsn: str) -> str:
 
 def _row_to_dict(row: Any) -> dict[str, Any]:
     if hasattr(row, "keys"):
-        return {k: row[k] for k in row}
+        # aiosqlite.Row iterates column values, not names — zip with keys().
+        return dict(zip(row.keys(), row, strict=True))
     return dict(row)
 
 
@@ -34,8 +35,18 @@ class AiosqliteDriver:
 
     dialect = "sqlite"
 
-    def __init__(self, dsn: str, *, min_size: int = 1, max_size: int = 10) -> None:
-        del min_size, max_size  # SQLite serializes writes; pooling is not meaningful.
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        min_size: int = 1,
+        max_size: int = 10,
+        acquire_timeout: float | None = None,
+        statement_timeout_ms: int | None = None,
+        max_lifetime: float | None = None,
+    ) -> None:
+        del min_size, max_size, acquire_timeout, statement_timeout_ms, max_lifetime
+        # SQLite serializes writes; pooling and pool knobs are not meaningful.
         self._dsn = dsn
         self._db_path = _sqlite_path_from_dsn(dsn)
         self._conn: Any = None

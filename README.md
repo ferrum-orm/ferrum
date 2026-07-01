@@ -113,6 +113,50 @@ Performance-critical components are implemented in Rust:
 
 This allows Ferrum to maintain a Pythonic API without sacrificing performance.
 
+### Cross-Driver Full-Text Search
+
+Native full-text search across PostgreSQL, MySQL, SQLite FTS5, and SQL Server — one
+QuerySet API, dialect-specific SQL emit and migration DDL.
+
+**Query modes** (filter lookups and ranking):
+
+| Mode        | Lookup operator   | Typical use                          |
+| ----------- | ----------------- | ------------------------------------ |
+| `plain`     | `__match`         | Natural-language terms               |
+| `phrase`    | `__match_phrase`  | Exact phrase                         |
+| `websearch` | `__match_websearch` | Web-style quotes, `-` negation   |
+| `boolean`   | `__match_boolean` | Boolean operators (`&`, `\|`, `!`) |
+
+**Convenience methods:**
+
+```python
+# Filter + relevance ranking in one call
+hits = await Article.objects.search(
+    "python async orm", field="body", mode="websearch"
+).limit(10).all(conn)
+
+# Rank without an implicit filter
+ranked = await Article.objects.rank_by("body", "rust", mode="plain").all(conn)
+```
+
+**Index declaration** — PostgreSQL uses `TSVector` columns; other drivers index base
+`text` columns via `Meta.full_text_indexes`:
+
+```python
+from ferrum.models import Field, FullTextIndex
+
+class Article(Model):
+    search_vector: Annotated[TSVector, Field(fts_config="english")] | None = None
+    body: str = ""
+
+    class Meta:
+        full_text_indexes = [FullTextIndex(fields=("body",), config="english")]
+```
+
+Query strings are always bound parameters; `fts_config` and index names come from
+model-metadata allowlists only. See [Getting Started → Vector and full-text columns](docs/getting-started.md)
+and [API Reference](docs/api-reference.md) for per-dialect DDL and operator mapping.
+
 ## Architecture
 
 ```text
@@ -153,7 +197,7 @@ This allows Ferrum to maintain a Pythonic API without sacrificing performance.
 - [x] Migrations (schema diff, apply, revert, CLI)
 - [x] Relationships (ForeignKey, OneToOne, ManyToMany)
 - [x] pgvector KNN search and HNSW/IVFFLAT index DDL
-- [x] Full-text search (TSVector / `plainto_tsquery`)
+- [x] Full-text search (cross-dialect: PostgreSQL, MySQL, SQLite FTS5, SQL Server)
 - [x] Observability hooks (Tier A/B/C)
 - [x] CLI (`makemigrations`, `migrate`, `revert`, `showmigrations`, `inspectdb`, `resetdb`)
 

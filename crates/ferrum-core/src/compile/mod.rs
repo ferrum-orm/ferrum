@@ -139,6 +139,7 @@ pub fn compile(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<CompiledQuer
     validate_joins(metadata, ir)?;
     validate_order_by(metadata, ir)?;
     validate_vector_order_by(metadata, ir)?;
+    validate_text_search(metadata, ir)?;
 
     // Validation passed. Return empty CompiledQuery — sql_text and bound_params
     // are populated by the SQL emitter in `ferrum-sql::emit`.
@@ -331,6 +332,147 @@ fn validate_vector_order_by(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result
     Ok(())
 }
 
+/// Ferrum full-text filter operators (validated against ``tsvector`` fields).
+pub const FTS_OPERATORS: &[&str] = &["match", "match_phrase", "match_websearch", "match_boolean"];
+
+fn is_valid_fts_identifier(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn validate_fts_field_metadata(
+    field_meta: &crate::ir::metadata::FieldMeta,
+) -> Result<(), CompileError> {
+    if let Some(config) = &field_meta.fts_config {
+        if !is_valid_fts_identifier(config) {
+            return Err(CompileError::MalformedIr {
+                reason: format!("invalid fts_config identifier: {config:?}"),
+            });
+        }
+    }
+    if let Some(cols) = &field_meta.fts_source_columns {
+        for col in cols {
+            if !is_valid_fts_identifier(col) {
+                return Err(CompileError::MalformedIr {
+                    reason: format!("invalid fts_source_columns identifier: {col:?}"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn field_supports_fts(
+    metadata: &ModelMetadata,
+    field_meta: &crate::ir::metadata::FieldMeta,
+) -> bool {
+    if field_meta.field_type == FieldType::TsVector {
+        return true;
+    }
+    if field_meta.field_type == FieldType::Text {
+        let in_index = metadata
+            .full_text_indexes
+            .iter()
+            .any(|idx| idx.fields.iter().any(|f| f == &field_meta.name));
+        return in_index || field_meta.fts_source_columns.is_some();
+    }
+    false
+}
+
+fn validate_fts_filter(
+    metadata: &ModelMetadata,
+    filter: &crate::ir::Filter,
+) -> Result<(), CompileError> {
+    let field_meta =
+        metadata
+            .fields
+            .get(filter.field.index)
+            .ok_or_else(|| CompileError::UnknownField {
+                model: metadata.model_name.clone(),
+                field: filter.field.name.clone(),
+            })?;
+    if !field_supports_fts(metadata, field_meta) {
+        return Err(CompileError::UnsupportedOperator {
+            model: metadata.model_name.clone(),
+            field: filter.field.name.clone(),
+            operator: filter.operator.clone(),
+        });
+    }
+    if !matches!(filter.value, BindValue::Text(_)) {
+        return Err(CompileError::MalformedIr {
+            reason: format!(
+                "FTS operator {} requires a text bind value",
+                filter.operator
+            ),
+        });
+    }
+    validate_fts_field_metadata(field_meta)
+}
+
+fn validate_text_rank_by(
+    metadata: &ModelMetadata,
+    rank: &crate::ir::TextRankBy,
+) -> Result<(), CompileError> {
+    let field_meta =
+        metadata
+            .fields
+            .get(rank.field.index)
+            .ok_or_else(|| CompileError::UnknownField {
+                model: metadata.model_name.clone(),
+                field: rank.field.name.clone(),
+            })?;
+    if !field_supports_fts(metadata, field_meta) {
+        return Err(CompileError::UnsupportedOperator {
+            model: metadata.model_name.clone(),
+            field: rank.field.name.clone(),
+            operator: "rank_by".into(),
+        });
+    }
+    if !matches!(rank.query, BindValue::Text(_)) {
+        return Err(CompileError::MalformedIr {
+            reason: "text_rank_by.query must be a text bind value".into(),
+        });
+    }
+    validate_fts_field_metadata(field_meta)?;
+    // Mode is enum-validated at deserialization; no per-query config strings.
+    let _ = rank.mode;
+    Ok(())
+}
+
+fn validate_text_search(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<(), CompileError> {
+    for filter in &ir.filters {
+        if FTS_OPERATORS.contains(&filter.operator.as_str()) {
+            validate_fts_filter(metadata, filter)?;
+        }
+    }
+    if let Some(predicate) = &ir.predicate {
+        validate_predicate_fts(metadata, predicate)?;
+    }
+    if let Some(rank) = &ir.text_rank_by {
+        validate_text_rank_by(metadata, rank)?;
+    }
+    Ok(())
+}
+
+fn validate_predicate_fts(
+    metadata: &ModelMetadata,
+    predicate: &Predicate,
+) -> Result<(), CompileError> {
+    match predicate {
+        Predicate::And { children } | Predicate::Or { children } => {
+            for child in children {
+                validate_predicate_fts(metadata, child)?;
+            }
+        }
+        Predicate::Not { child } => validate_predicate_fts(metadata, child)?,
+        Predicate::Filter { filter } => {
+            if FTS_OPERATORS.contains(&filter.operator.as_str()) {
+                validate_fts_filter(metadata, filter)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// True when the IR carries at least one WHERE constraint (flat filters or a predicate tree).
 #[must_use]
 pub fn ir_has_where_clause(ir: &QuerySetIR) -> bool {
@@ -393,6 +535,8 @@ mod tests {
                     allowed_operators: vec!["eq".into(), "gt".into(), "lt".into()],
                     nullable: false,
                     vector_dimensions: None,
+                    fts_config: None,
+                    fts_source_columns: None,
                 },
                 FieldMeta {
                     name: "email".into(),
@@ -401,10 +545,13 @@ mod tests {
                     allowed_operators: vec!["eq".into(), "icontains".into()],
                     nullable: false,
                     vector_dimensions: None,
+                    fts_config: None,
+                    fts_source_columns: None,
                 },
             ],
             pk_index: 0,
             pk_fields: vec![0],
+            full_text_indexes: vec![],
         }
     }
 
@@ -429,6 +576,7 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            text_rank_by: None,
             predicate: None,
             distinct: false,
             exists: false,
@@ -521,6 +669,73 @@ mod tests {
     }
 
     #[test]
+    fn rejects_fts_operator_on_non_tsvector_field() {
+        let meta = make_metadata();
+        let mut ir = base_ir("User");
+        ir.filters.push(Filter {
+            field: FieldRef {
+                name: "email".into(),
+                index: 1,
+            },
+            operator: "match".into(),
+            value: BindValue::Text("hello".into()),
+        });
+        let err = compile(&meta, &ir).unwrap_err();
+        assert!(matches!(err, CompileError::UnsupportedOperator { .. }));
+    }
+
+    #[test]
+    fn accepts_tsvector_match_and_text_rank_by() {
+        let meta = ModelMetadata {
+            model_name: "Doc".into(),
+            table_name: "docs".into(),
+            fields: vec![FieldMeta {
+                name: "search_vector".into(),
+                column_name: "search_vector".into(),
+                field_type: FieldType::TsVector,
+                allowed_operators: vec![
+                    "match".into(),
+                    "match_phrase".into(),
+                    "match_websearch".into(),
+                    "match_boolean".into(),
+                    "is_null".into(),
+                ],
+                nullable: true,
+                vector_dimensions: None,
+                fts_config: Some("english".into()),
+                fts_source_columns: None,
+            }],
+            pk_index: 0,
+            pk_fields: vec![0],
+            full_text_indexes: vec![],
+        };
+        let mut ir = base_ir("Doc");
+        ir.operation = Operation::Select {
+            fields: vec![FieldRef {
+                name: "search_vector".into(),
+                index: 0,
+            }],
+        };
+        ir.filters.push(Filter {
+            field: FieldRef {
+                name: "search_vector".into(),
+                index: 0,
+            },
+            operator: "match_phrase".into(),
+            value: BindValue::Text("hello world".into()),
+        });
+        ir.text_rank_by = Some(crate::ir::TextRankBy {
+            field: FieldRef {
+                name: "search_vector".into(),
+                index: 0,
+            },
+            query: BindValue::Text("hello".into()),
+            mode: crate::ir::TextSearchMode::Phrase,
+        });
+        assert!(compile(&meta, &ir).is_ok());
+    }
+
+    #[test]
     fn accepts_valid_ir() {
         let meta = make_metadata();
         let mut ir = base_ir("User");
@@ -570,6 +785,7 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            text_rank_by: None,
             predicate: None,
             distinct: false,
             exists: false,
@@ -598,6 +814,7 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            text_rank_by: None,
             predicate: None,
             distinct: false,
             exists: false,
@@ -621,6 +838,7 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            text_rank_by: None,
             predicate: None,
             distinct: false,
             exists: false,
@@ -653,6 +871,7 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            text_rank_by: None,
             predicate: None,
             distinct: false,
             exists: false,

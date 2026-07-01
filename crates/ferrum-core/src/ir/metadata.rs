@@ -29,6 +29,10 @@ pub struct ModelMetadata {
     /// Empty vec is treated as `[pk_index]` for backward compatibility.
     #[serde(default)]
     pub pk_fields: Vec<usize>,
+
+    /// Declarative full-text indexes from model ``Meta.full_text_indexes``.
+    #[serde(default)]
+    pub full_text_indexes: Vec<FullTextIndexMeta>,
 }
 
 /// Metadata for a single model field.
@@ -53,6 +57,27 @@ pub struct FieldMeta {
     /// pgvector dimensionality (DDL-only metadata; optional).
     #[serde(default)]
     pub vector_dimensions: Option<u32>,
+
+    /// `PostgreSQL` text-search configuration (regconfig), e.g. `english`.
+    /// Validated as an allowlisted identifier before SQL emission.
+    #[serde(default)]
+    pub fts_config: Option<String>,
+
+    /// Source columns backing a generated FTS column (MySQL/SQLite/MSSQL).
+    #[serde(default)]
+    pub fts_source_columns: Option<Vec<String>>,
+}
+
+/// Declarative full-text index metadata (``Meta.full_text_indexes``).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FullTextIndexMeta {
+    /// Index or FTS5 virtual-table name (metadata allowlist).
+    pub name: String,
+    /// Model field names covered by this index.
+    pub fields: Vec<String>,
+    /// Optional language/regconfig identifier (allowlisted).
+    #[serde(default)]
+    pub config: Option<String>,
 }
 
 /// Ferrum-level type tag for a field. Corresponds to Pydantic / Python types.
