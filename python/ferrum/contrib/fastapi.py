@@ -8,10 +8,23 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import AsyncGenerator
-
-from fastapi import Request
+from typing import Protocol
 
 from ferrum.connection import Connection
+
+
+class _ASGIAppWithState(Protocol):
+    state: object
+
+
+class FerrumConnRequest(Protocol):
+    """Structural type for ASGI requests passed to :func:`get_ferrum_conn`.
+
+    Satisfied by Starlette/FastAPI ``Request`` and any object exposing
+    ``app.state`` (where lifespan setup stores ``ferrum_conn``).
+    """
+
+    app: _ASGIAppWithState
 
 
 @contextlib.asynccontextmanager
@@ -51,7 +64,7 @@ async def ferrum_lifespan(
         yield conn
 
 
-async def get_ferrum_conn(request: Request) -> Connection:
+async def get_ferrum_conn(request: FerrumConnRequest) -> Connection:
     """FastAPI dependency returning the pool opened during app lifespan."""
     conn = getattr(request.app.state, "ferrum_conn", None)
     if not isinstance(conn, Connection):
