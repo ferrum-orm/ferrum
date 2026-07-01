@@ -70,10 +70,11 @@ dev = [
 ferrum = "ferrum.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/ferrumdb/ferrum"
-Repository = "https://github.com/ferrumdb/ferrum"
-Documentation = "https://ferrumdb.github.io/ferrum"
-"Bug Tracker" = "https://github.com/ferrumdb/ferrum/issues"
+Homepage = "https://github.com/ferrum-orm/ferrum"
+Repository = "https://github.com/ferrum-orm/ferrum"
+Documentation = "https://github.com/ferrum-orm/ferrum/tree/main/docs"
+Issues = "https://github.com/ferrum-orm/ferrum/issues"
+Changelog = "http://github.com/ferrum-orm/ferrum/blob/main/CHANGELOG.md"
 
 # ---------------------------------------------------------------------------
 # maturin
