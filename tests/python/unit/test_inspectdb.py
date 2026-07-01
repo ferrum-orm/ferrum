@@ -9,17 +9,6 @@ import pytest
 import ferrum.cli.inspectdb_cmd as inspectdb_cmd
 
 
-class _AsyncContext:
-    def __init__(self, value: object) -> None:
-        self.value = value
-
-    async def __aenter__(self) -> object:
-        return self.value
-
-    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
-        return False
-
-
 class _FakeDbConn:
     def __init__(
         self,
@@ -40,19 +29,16 @@ class _FakeDbConn:
         return self._results.pop(0)
 
 
-class _FakePool:
-    def __init__(self, db_conn: _FakeDbConn) -> None:
-        self.db_conn = db_conn
-
-    def acquire(self) -> _AsyncContext:
-        return _AsyncContext(self.db_conn)
-
-
 class _FakeDriver:
+    """Mimics TimedQueryExecutor: fetch-only, no private ``_pool``."""
+
     dialect = "postgres"
 
-    def __init__(self, pool: _FakePool) -> None:
-        self._pool = pool
+    def __init__(self, db_conn: _FakeDbConn) -> None:
+        self._db_conn = db_conn
+
+    async def fetch(self, query: str, schema: str) -> list[dict]:
+        return await self._db_conn.fetch(query, schema)
 
 
 class _FakeConn:
@@ -62,7 +48,7 @@ class _FakeConn:
         self.db_conn = db_conn
 
     def _require_driver(self) -> _FakeDriver:
-        return _FakeDriver(_FakePool(self.db_conn))
+        return _FakeDriver(self.db_conn)
 
 
 class _FakeConnect:

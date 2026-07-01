@@ -291,14 +291,9 @@ async def run_inspectdb(
             if conn.dialect != "postgres":
                 print("inspectdb currently supports PostgreSQL only.")
                 return 2
-            pool = getattr(driver, "_pool", None)
-            if pool is None:
-                print("Connection error: pool not open [FERR-E101]")
-                return 2
-            async with pool.acquire() as db_conn:
-                col_rows = await db_conn.fetch(_COL_QUERY, schema)
-                fk_rows = await db_conn.fetch(_FK_QUERY, schema)
-                pk_rows = await db_conn.fetch(_PK_QUERY, schema)
+            col_rows = await driver.fetch(_COL_QUERY, schema)
+            fk_rows = await driver.fetch(_FK_QUERY, schema)
+            pk_rows = await driver.fetch(_PK_QUERY, schema)
     except FerrumConfigError as exc:
         print(f"Configuration error: {exc}")
         return 2
