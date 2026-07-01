@@ -95,6 +95,33 @@ def test_compile_json_matches_msgpack(dialect: str) -> None:
     assert _decoded_params(json_compiled) == _decoded_params(mp_compiled)
 
 
+class _FtsWireModel(ferrum.Model):
+    id: int = 0
+    search_vector: ferrum.TSVector | None = None
+
+
+@pytest.mark.parametrize("dialect", ["postgres", "mysql", "sqlite", "mssql"])
+def test_text_rank_by_json_matches_msgpack(dialect: str) -> None:
+    qs = (
+        QuerySet(_FtsWireModel)
+        .filter(search_vector__match="hello")
+        .rank_by("search_vector", "hello", mode="plain")
+        .limit(3)
+    )
+    ir = qs._build_ir()
+    meta = _FtsWireModel.get_metadata()
+
+    json_compiled = _native.compile_query(meta.to_metadata_json(), qs.to_ir_json(), dialect)
+    meta_mp = msgpack.packb(meta.to_metadata_dict(), use_bin_type=True)
+    ir_mp = msgpack.packb(ir, use_bin_type=True)
+    mp_compiled = _native.compile_query_msgpack(meta_mp, ir_mp, dialect)
+    mp_compiled["bound_params"] = msgpack.unpackb(mp_compiled["bound_params"], raw=False)
+
+    assert json_compiled["sql_text"] == mp_compiled["sql_text"]
+    assert _decoded_params(json_compiled) == _decoded_params(mp_compiled)
+    assert "text_rank_by" in ir
+
+
 def test_hydrate_json_matches_msgpack() -> None:
     meta = _WireModel.get_metadata()
     rows = [

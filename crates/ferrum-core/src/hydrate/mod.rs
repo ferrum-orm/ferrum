@@ -89,6 +89,8 @@ mod tests {
                     allowed_operators: vec!["eq".into()],
                     nullable: false,
                     vector_dimensions: None,
+                    fts_config: None,
+                    fts_source_columns: None,
                 },
                 FieldMeta {
                     name: "title".into(),
@@ -97,6 +99,8 @@ mod tests {
                     allowed_operators: vec!["eq".into(), "icontains".into()],
                     nullable: false,
                     vector_dimensions: None,
+                    fts_config: None,
+                    fts_source_columns: None,
                 },
                 FieldMeta {
                     name: "bio".into(),
@@ -105,10 +109,13 @@ mod tests {
                     allowed_operators: vec!["eq".into()],
                     nullable: true, // nullable column
                     vector_dimensions: None,
+                    fts_config: None,
+                    fts_source_columns: None,
                 },
             ],
             pk_index: 0,
             pk_fields: vec![0],
+            full_text_indexes: vec![],
         }
     }
 

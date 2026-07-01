@@ -655,3 +655,85 @@ class DropFunction(Operation):
     def __repr__(self) -> str:
         args_str = f", args={self.args!r}" if self.args else ""
         return f"DropFunction({self.function_name!r}{args_str})"
+
+
+class CreateFullTextIndex(Operation):
+    """Create a dialect-specific full-text index."""
+
+    def __init__(
+        self,
+        table_name: str,
+        index_name: str,
+        columns: list[str],
+        *,
+        config: str | None = None,
+        sqlite_content_table: str | None = None,
+        catalog: str | None = None,
+    ) -> None:
+        self.table_name = table_name
+        self.index_name = index_name
+        self.columns = list(columns)
+        self.config = config
+        self.sqlite_content_table = sqlite_content_table
+        self.catalog = catalog
+
+    def to_op_dict(self) -> dict[str, Any]:
+        op: dict[str, Any] = {
+            "kind": "create_full_text_index",
+            "table": self.table_name,
+            "name": self.index_name,
+            "columns": list(self.columns),
+        }
+        if self.config is not None:
+            op["config"] = self.config
+        if self.sqlite_content_table is not None:
+            op["sqlite_content_table"] = self.sqlite_content_table
+        if self.catalog is not None:
+            op["catalog"] = self.catalog
+        return op
+
+    @property
+    def classification(self) -> str:
+        return "safe"
+
+    def __repr__(self) -> str:
+        return f"CreateFullTextIndex({self.table_name!r}, {self.index_name!r}, {self.columns!r})"
+
+
+class DropFullTextIndex(Operation):
+    """Drop a full-text index by name."""
+
+    def __init__(self, table_name: str, index_name: str) -> None:
+        self.table_name = table_name
+        self.index_name = index_name
+
+    def to_op_dict(self) -> dict[str, Any]:
+        return {
+            "kind": "drop_full_text_index",
+            "table": self.table_name,
+            "name": self.index_name,
+        }
+
+    @property
+    def classification(self) -> str:
+        return "safe"
+
+    def __repr__(self) -> str:
+        return f"DropFullTextIndex({self.table_name!r}, {self.index_name!r})"
+
+
+class CreateFullTextCatalog(Operation):
+    """Create a SQL Server full-text catalog (MSSQL only)."""
+
+    def __init__(self, catalog_name: str) -> None:
+        self.catalog_name = catalog_name
+
+    def to_op_dict(self) -> dict[str, Any]:
+        return {"kind": "create_full_text_catalog", "name": self.catalog_name}
+
+    @property
+    def classification(self) -> str:
+        return "safe"
+
+    def __repr__(self) -> str:
+        return f"CreateFullTextCatalog({self.catalog_name!r})"

@@ -6,7 +6,7 @@ Import paths are stable API; internal module paths are not.
 
 from __future__ import annotations
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 __all__ = [
     "CreateExtension",
     "CreateFunction",
@@ -31,6 +31,7 @@ __all__ = [
     "FerrumTimeoutError",
     "Field",
     "ForeignKey",
+    "FullTextIndex",
     "Index",
     "ManyToMany",
     "MigrationResult",
@@ -90,6 +91,7 @@ from ferrum.migrations import (
 from ferrum.models import (
     Field,
     ForeignKey,
+    FullTextIndex,
     Index,
     ManyToMany,
     Model,

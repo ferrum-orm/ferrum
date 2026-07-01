@@ -9,6 +9,54 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Cross-dialect full-text search (ADR-007, IR v3)**: `match`, `match_phrase`,
+  `match_websearch`, and `match_boolean` filter operators; `QuerySet.rank_by()` /
+  `search()` for relevance ordering; `FullTextIndex` model declaration;
+  `CreateFullTextIndex` / `DropFullTextIndex` / `CreateFullTextCatalog` migration
+  ops; per-dialect emit in `ferrum-sql/src/fts/` and DDL in
+  `ferrum.migrations.fts`; optional `ferrum.ext.fts.scored_search` helper.
+- **`Field(fts_config=...)`** for PostgreSQL `regconfig` allowlisting on
+  `TSVector` / indexed text fields.
+
+### Changed
+
+- **IR version 2 → 3** — adds optional `text_rank_by` node. Python `_IR_VERSION`
+  and Rust `IR_VERSION` must stay synchronized.
+
+### Breaking
+
+- **QuerySet IR version bump (2 → 3).** Any code that constructs or validates raw IR
+  JSON (custom tooling, pinned compiler tests) must accept the new optional
+  `text_rank_by` field. The public Python API is backward-compatible — existing
+  filter-only FTS lookups continue to work; ranking is opt-in via `rank_by()` /
+  `search()`.
+
+---
+
+## [0.1.4] - 2026-07-01
+
+### Added
+
+- **Examples**: `examples/sqlite/` (file-based SQLite, no Docker),
+  `examples/mysql/` (`mysql://` + Docker Compose), and
+  `examples/pyproject_config/` (`[ferrum]` in `pyproject.toml` with
+  `database_url_env = "DATABASE_URL"`). Updated `examples/README.md` with a
+  driver extras matrix.
+
+### Changed
+
+- `ferrum-migrate` crate version now follows `[workspace.package]` like the
+  other workspace members.
+
+### Fixed
+
+- SQLite driver: accept pool/runtime constructor kwargs (uniform with other
+  backends) and fix `_row_to_dict` row iteration (`Row.keys()` not value
+  iteration).
+- MySQL driver: accept pool/runtime constructor kwargs for `connect()`.
+
 ---
 
 ## [0.1.3] - 2026-06-26

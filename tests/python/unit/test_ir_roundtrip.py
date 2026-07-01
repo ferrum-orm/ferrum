@@ -32,7 +32,7 @@ class TestIrJsonRoundtrip:
         qs: QuerySet[User] = QuerySet(User)
         ir = self._roundtrip(qs)
 
-        assert ir["version"] == 2
+        assert ir["version"] == 3
         assert ir["model_name"] == "User"
         assert ir["operation"]["kind"] == "select"
         assert isinstance(ir["filters"], list)
@@ -103,7 +103,7 @@ class TestIrJsonRoundtrip:
         )
         ir = self._roundtrip(qs)
 
-        assert ir["version"] == 2
+        assert ir["version"] == 3
         assert ir["model_name"] == "User"
         assert ir["predicate"]["kind"] == "and"
         assert len(ir["predicate"]["children"]) == 2

@@ -652,6 +652,11 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
         args = op.get("args", "")
         return f"DROP FUNCTION IF EXISTS {_quote_ident(name, dialect)}({args})"
 
+    if kind in ("create_full_text_index", "drop_full_text_index", "create_full_text_catalog"):
+        from ferrum.migrations.fts import op_to_sql as fts_op_to_sql
+
+        return fts_op_to_sql(op, dialect=dialect)
+
     raise FerrumMigrationError(f"Unknown migration op kind: {kind!r}. [FERR-M001]")
 
 

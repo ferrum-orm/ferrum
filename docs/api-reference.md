@@ -8,7 +8,7 @@ Everything in `ferrum.__all__`:
 ```python
 from ferrum import (
     Model, ModelConfig, QuerySet, Q,          # modeling + querying
-    Field, Index, Vector, TSVector,        # field types + indexes
+    Field, Index, FullTextIndex, Vector, TSVector,  # field types + indexes
     connect,                               # connections
     Transaction,                           # transaction-scoped handle
     RetryPolicy,                           # explicit retry opt-in
@@ -81,6 +81,8 @@ planner. Never carries connection info, bound values, or row data.
 | `table_name`                | `str`                   | Resolved table name.                                      |
 | `model_name`                | `str`                   | Class name.                                               |
 | `fields`                    | `tuple[FieldMeta, ...]` | Per-field descriptors.                                    |
+| `indexes`                   | `tuple[IndexMeta, ...]` | Declarative btree/GIN/etc. indexes.                         |
+| `full_text_indexes`         | `tuple[FullTextIndexMeta, ...]` | Declarative cross-dialect FTS indexes.              |
 | `allowed_sort_directions`   | `tuple[str, ...]`       | `("asc", "desc")`.                                        |
 | `pk_index`                  | `int`                   | Index of the PK field.                                    |
 | `to_metadata_json() -> str` | method                  | Serializes to the JSON shape the native compiler expects. |
@@ -91,17 +93,36 @@ planner. Never carries connection info, bound values, or row data.
 
 `IndexMeta` (frozen): `name`, `fields`, `unique`, `using`, `where`.
 
+`FullTextIndexMeta` (frozen): `name`, `fields`, optional `config` (PostgreSQL regconfig
+or language name), optional `sqlite_content_table` (external-content FTS5 source table).
+
 ### `class Index`
 
 Declarative index for `class Meta: indexes = [...]`. Fields: `fields`, optional `name`,
 `unique`, `using` (`"btree"` default; also `"gin"`, `"gist"`, `"hash"`, `"brin"`,
 `"hnsw"`, `"ivfflat"`), and optional partial-index `where`.
 
+### `class FullTextIndex`
+
+Declarative full-text index for `class Meta: full_text_indexes = [...]`.
+
+| Field                  | Type              | Description                                                                 |
+| ---------------------- | ----------------- | --------------------------------------------------------------------------- |
+| `fields`               | `tuple[str, ...]` | Base-table columns to index (required).                                     |
+| `name`                 | `str \| None`     | Index / virtual-table name (auto-generated when omitted).                   |
+| `config`               | `str \| None`     | PostgreSQL `regconfig` or language hint (metadata allowlist).               |
+| `sqlite_content_table` | `str \| None`     | SQLite external-content source table when it differs from the model table.  |
+
+On PostgreSQL, prefer a `TSVector` column plus a GIN index for stored vectors; on
+MySQL, SQLite FTS5, and SQL Server, `FullTextIndex` drives dialect-specific migration
+DDL (`FULLTEXT KEY`, FTS5 virtual table + triggers, or catalog + full-text index).
+
 ### `Field(...)`
 
 Ferrum-specific keyword arguments include `primary_key`, `db_column`, `unique`, `db_index`,
-`max_length`, `uuid_generate` (`"v4"` \| `"v7"`), and `vector_dimensions` (required for
-`Vector` columns). A string `default=` value is stored as a DB-side `db_default` expression.
+`max_length`, `uuid_generate` (`"v4"` \| `"v7"`), `vector_dimensions` (required for
+`Vector` columns), and `fts_config` (PostgreSQL `regconfig` allowlist for `TSVector`
+columns). A string `default=` value is stored as a DB-side `db_default` expression.
 
 UUID PK columns auto-receive `db_default = "gen_random_uuid()"` unless overridden.
 `uuid_generate="v7"` sets `db_default = "uuidv7()"`.
@@ -132,7 +153,27 @@ Lazy, chainable, async query builder. Chaining methods return a **new** `QuerySe
 | `limit(count) -> QuerySet[M]`                              | Set `LIMIT`.                                                                            |
 | `offset(count) -> QuerySet[M]`                             | Set `OFFSET`.                                                                           |
 | `nearest_to(field, vector, *, metric="l2") -> QuerySet[M]` | pgvector KNN ordering (`l2`, `cosine`, `inner_product`).                                |
-| `to_ir_json() -> str`                                      | Serialize current state to the ADR-002 v2 IR JSON string (runs allowlist checks).       |
+| `rank_by(field, query, *, mode="plain") -> QuerySet[M]`    | Full-text relevance ordering (`plain`, `phrase`, `websearch`, `boolean`).               |
+| `search(query, *, field, mode="plain") -> QuerySet[M]`    | Filter + rank on a full-text field in one call.                                          |
+| `to_ir_json() -> str`                                      | Serialize current state to the ADR-002 v3 IR JSON string (runs allowlist checks).       |
+
+**Full-text IR (`text_rank_by`)** — when `rank_by()` or `search()` is used, the serialized
+IR includes an optional top-level node:
+
+```json
+{
+  "text_rank_by": {
+    "field": "search_vector",
+    "query": "rust orm",
+    "mode": "plain"
+  }
+}
+```
+
+`mode` is one of `plain`, `phrase`, `websearch`, `boolean`. The Rust compiler maps this
+node to dialect-specific `ORDER BY` relevance expressions (`ts_rank`, `MATCH … AGAINST`,
+`bm25()`, or `CONTAINSTABLE`/`FREETEXTTABLE`). Query strings in both the filter predicate
+and `text_rank_by` are bound parameters — never interpolated into SQL.
 | `qs[start:stop]`                                           | Slice shorthand for `offset` / `limit`.                                                 |
 
 #### Terminal coroutines (require `conn: Connection`)
@@ -169,7 +210,20 @@ the connection.
 | `array_text`, `array_int`, `array_uuid`, `array_float`  | `eq is_null contains contained_by overlap`                                             |
 | `enum`                                                  | `eq ne in is_null`                                                                     |
 | `vector`                                                | `is_null` (KNN via `nearest_to`)                                                       |
-| `tsvector`                                              | `match is_null`                                                                        |
+| `tsvector`                                              | `match match_phrase match_websearch match_boolean is_null`                             |
+| indexed `text` (via `Meta.full_text_indexes`)           | `match match_phrase match_websearch match_boolean` (same as `tsvector`)                |
+
+**Full-text operator SQL mapping** (query string always bound; config/index names from metadata):
+
+| Operator          | PostgreSQL              | MySQL                         | SQLite FTS5              | SQL Server        |
+| ----------------- | ----------------------- | ----------------------------- | ------------------------ | ----------------- |
+| `match`           | `@@ plainto_tsquery`    | `MATCH … NATURAL LANGUAGE`    | virtual table `MATCH`    | `FREETEXT`        |
+| `match_phrase`    | `@@ phraseto_tsquery`   | `MATCH … NATURAL LANGUAGE`    | virtual table `MATCH`    | `CONTAINS`        |
+| `match_websearch` | `@@ websearch_to_tsquery` | `MATCH … NATURAL LANGUAGE`  | virtual table `MATCH`    | `FREETEXT`        |
+| `match_boolean`   | `@@ to_tsquery`         | `MATCH … BOOLEAN MODE`        | virtual table `MATCH`    | `CONTAINS`        |
+
+Ranking via `rank_by()` emits `ts_rank` (PG), `MATCH … AGAINST` (MySQL),
+correlated `bm25()` (SQLite), or `CONTAINSTABLE`/`FREETEXTTABLE` (SQL Server).
 
 **Array operator SQL mapping** (`field__op=value`):
 
@@ -201,7 +255,7 @@ await User.objects.filter(
 ).exclude(banned=True).all(conn)
 ```
 
-Supports `&` (AND), `|` (OR), and `~` (NOT). Lowered to IR v2 predicate trees and
+Supports `&` (AND), `|` (OR), and `~` (NOT). Lowered to IR v3 predicate trees and
 compiled in Rust.
 
 ---
@@ -471,6 +525,9 @@ from ferrum import (
 | `DropPolicy(policy_name, table_name)` | `destructive` | `DROP POLICY IF EXISTS "name" ON "table"` |
 | `CreateFunction(function_name, body)` | `non_transactional` | `body` emitted verbatim |
 | `DropFunction(function_name, *, args="")` | `destructive` | `DROP FUNCTION IF EXISTS "name"(args)` |
+| `CreateFullTextCatalog(catalog_name)` | `safe` | SQL Server full-text catalog DDL |
+| `CreateFullTextIndex(table_name, index_name, columns, *, config=None, sqlite_content_table=None, catalog=None)` | `safe` | Dialect-specific full-text index DDL |
+| `DropFullTextIndex(table_name, index_name)` | `destructive` | Drop full-text index / FTS5 virtual table |
 
 **Security note**: `CreatePolicy.using`, `CreatePolicy.check_expr`, and `CreateFunction.body`
 are raw SQL fragments supplied by the developer in migration files. They are emitted verbatim
@@ -509,3 +566,13 @@ All subclass `FerrumError` and carry a stable `code`.
 
 No exception message ever contains bound parameter values, DSNs, passwords, or raw
 PostgreSQL `DETAIL`/`HINT` row data.
+
+---
+
+## Extension helpers
+
+### `ferrum.ext.fts.scored_search(conn, model, field, query, *, mode="plain", limit=10, score_alias="score", filters=None)`
+
+Optional helper mirroring `ferrum.ext.pgvector.vector_search`. Filters by the mode-mapped
+lookup operator, orders by relevance via `rank_by()`, and returns row dicts with a
+`score_alias` key. Query strings are bound; identifiers come from model metadata only.

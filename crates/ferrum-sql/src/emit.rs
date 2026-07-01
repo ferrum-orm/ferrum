@@ -11,6 +11,7 @@
 //! - `bound_params` never contains SQL identifier strings.
 
 use crate::dialect::Dialect;
+use crate::fts;
 use ferrum_core::{
     compile::CompiledQuery,
     error::CompileError,
@@ -690,13 +691,37 @@ fn append_order_limit_offset(
         write!(sql, " ORDER BY {col} {op} {placeholder}").expect("write to String is infallible");
         param_type_summary.push(format!("{}:nearest_to", vector_order.field.name));
         bound_params.push(vector_order.value.clone());
+    } else if let Some(text_rank) = &ir.text_rank_by {
+        let col = qualify_base_column(
+            dialect,
+            table,
+            &metadata.fields[text_rank.field.index].column_name,
+            qualify_columns,
+        );
+        let field_meta = &metadata.fields[text_rank.field.index];
+        let table_name = metadata.table_name.as_str();
+        let rank_sql = fts::emit_rank_order_for_column(
+            dialect,
+            metadata,
+            text_rank.field.index,
+            &col,
+            text_rank,
+            field_meta,
+            table_name,
+            bound_params.len() + 1,
+        );
+        write!(sql, " ORDER BY {rank_sql}").expect("write to String is infallible");
+        param_type_summary.push(format!("{}:text_rank", text_rank.field.name));
+        bound_params.push(text_rank.query.clone());
     }
 
     if dialect == Dialect::Mssql {
         // T-SQL pagination: OFFSET … ROWS [FETCH NEXT … ROWS ONLY]. The OFFSET/FETCH
         // clause requires an ORDER BY; inject a stable no-op order when none exists.
         if ir.limit.is_some() || ir.offset.is_some() {
-            let has_order = !ir.order_by.is_empty() || ir.vector_order_by.is_some();
+            let has_order = !ir.order_by.is_empty()
+                || ir.vector_order_by.is_some()
+                || ir.text_rank_by.is_some();
             if !has_order {
                 write!(sql, " ORDER BY (SELECT NULL)").expect("write to String is infallible");
             }
@@ -757,6 +782,8 @@ fn build_where_sql(
         );
         let (clause, param) = filter_clause(
             dialect,
+            metadata,
+            filter.field.index,
             &col,
             &filter.operator,
             bound_params.len() + 1,
@@ -860,6 +887,8 @@ fn emit_predicate(
             );
             let (clause, param) = filter_clause(
                 dialect,
+                metadata,
+                filter.field.index,
                 &col,
                 &filter.operator,
                 bound_params.len() + 1,
@@ -885,6 +914,8 @@ fn emit_predicate(
 /// All other operators are mapped by `operator_to_sql`.
 fn filter_clause(
     dialect: Dialect,
+    metadata: &ModelMetadata,
+    field_index: usize,
     col: &str,
     operator: &str,
     param_index: usize,
@@ -893,16 +924,8 @@ fn filter_clause(
     match operator {
         "is_null" => (format!("{col} IS NULL"), None),
         "is_not_null" => (format!("{col} IS NOT NULL"), None),
-        "match" => {
-            if dialect != Dialect::Postgres {
-                let placeholder = dialect.placeholder(param_index);
-                return (format!("{col} LIKE {placeholder}"), Some(value));
-            }
-            let placeholder = dialect.placeholder(param_index);
-            (
-                format!("{col} @@ plainto_tsquery({placeholder})"),
-                Some(value),
-            )
+        op if fts::is_fts_operator(op) => {
+            fts::emit_match(dialect, metadata, field_index, col, op, param_index, value)
         }
         op => {
             let placeholder = dialect.placeholder(param_index);
@@ -1005,6 +1028,8 @@ mod tests {
                     allowed_operators: vec!["eq".into(), "gt".into()],
                     nullable: false,
                     vector_dimensions: None,
+                    fts_config: None,
+                    fts_source_columns: None,
                 },
                 FieldMeta {
                     name: "email".into(),
@@ -1013,10 +1038,13 @@ mod tests {
                     allowed_operators: vec!["eq".into(), "icontains".into()],
                     nullable: false,
                     vector_dimensions: None,
+                    fts_config: None,
+                    fts_source_columns: None,
                 },
             ],
             pk_index: 0,
             pk_fields: vec![0],
+            full_text_indexes: vec![],
         }
     }
 
@@ -1030,6 +1058,7 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            text_rank_by: None,
             predicate: None,
             distinct: false,
             exists: false,
@@ -1264,6 +1293,7 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            text_rank_by: None,
             predicate: None,
             distinct: false,
             exists: false,
@@ -1379,6 +1409,7 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            text_rank_by: None,
             predicate: None,
             distinct: false,
             exists: false,
@@ -1405,6 +1436,7 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            text_rank_by: None,
             predicate: None,
             distinct: false,
             exists: false,
@@ -1477,6 +1509,7 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            text_rank_by: None,
             predicate: None,
             distinct: false,
             exists: false,
@@ -1686,6 +1719,7 @@ mod tests {
             limit: None,
             offset: None,
             vector_order_by: None,
+            text_rank_by: None,
             predicate: None,
             distinct: false,
             exists: false,

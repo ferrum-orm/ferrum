@@ -32,5 +32,6 @@ Apply migrations before hitting routes — see [../migrations/README.md](../migr
 ## What this example shows
 
 - Model definition with Pydantic v2
-- `ferrum_lifespan` for connection pool lifecycle
-- Async query patterns (`filter`, `get`, `all`) — every terminal requires `conn`
+- `ferrum_lifespan` for connection pool lifecycle (stores pool on `app.state.ferrum_conn`)
+- `get_ferrum_conn` FastAPI dependency — every QuerySet terminal requires `conn`
+- Async query patterns (`filter`, `get`, `all`)

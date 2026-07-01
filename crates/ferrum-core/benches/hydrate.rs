@@ -20,6 +20,8 @@ fn bench_metadata() -> ModelMetadata {
                 allowed_operators: vec!["eq".into()],
                 nullable: false,
                 vector_dimensions: None,
+                fts_config: None,
+                fts_source_columns: None,
             },
             FieldMeta {
                 name: "title".into(),
@@ -28,6 +30,8 @@ fn bench_metadata() -> ModelMetadata {
                 allowed_operators: vec!["eq".into(), "icontains".into()],
                 nullable: false,
                 vector_dimensions: None,
+                fts_config: None,
+                fts_source_columns: None,
             },
             FieldMeta {
                 name: "body".into(),
@@ -36,6 +40,8 @@ fn bench_metadata() -> ModelMetadata {
                 allowed_operators: vec!["eq".into()],
                 nullable: true,
                 vector_dimensions: None,
+                fts_config: None,
+                fts_source_columns: None,
             },
             FieldMeta {
                 name: "published".into(),
@@ -44,10 +50,13 @@ fn bench_metadata() -> ModelMetadata {
                 allowed_operators: vec!["eq".into()],
                 nullable: false,
                 vector_dimensions: None,
+                fts_config: None,
+                fts_source_columns: None,
             },
         ],
         pk_index: 0,
         pk_fields: vec![0],
+        full_text_indexes: vec![],
     }
 }
 

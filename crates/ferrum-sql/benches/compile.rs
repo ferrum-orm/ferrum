@@ -23,6 +23,8 @@ fn bench_metadata() -> ModelMetadata {
                 allowed_operators: vec!["eq".into(), "gt".into(), "lt".into()],
                 nullable: false,
                 vector_dimensions: None,
+                fts_config: None,
+                fts_source_columns: None,
             },
             FieldMeta {
                 name: "email".into(),
@@ -31,6 +33,8 @@ fn bench_metadata() -> ModelMetadata {
                 allowed_operators: vec!["eq".into(), "icontains".into()],
                 nullable: false,
                 vector_dimensions: None,
+                fts_config: None,
+                fts_source_columns: None,
             },
             FieldMeta {
                 name: "active".into(),
@@ -39,6 +43,8 @@ fn bench_metadata() -> ModelMetadata {
                 allowed_operators: vec!["eq".into()],
                 nullable: false,
                 vector_dimensions: None,
+                fts_config: None,
+                fts_source_columns: None,
             },
             FieldMeta {
                 name: "score".into(),
@@ -47,10 +53,13 @@ fn bench_metadata() -> ModelMetadata {
                 allowed_operators: vec!["eq".into(), "gt".into()],
                 nullable: true,
                 vector_dimensions: None,
+                fts_config: None,
+                fts_source_columns: None,
             },
         ],
         pk_index: 0,
         pk_fields: vec![0],
+        full_text_indexes: vec![],
     }
 }
 
@@ -111,6 +120,7 @@ fn bench_select_ir() -> QuerySetIR {
         limit: Some(50),
         offset: Some(10),
         vector_order_by: None,
+        text_rank_by: None,
         predicate: None,
         distinct: false,
         exists: false,

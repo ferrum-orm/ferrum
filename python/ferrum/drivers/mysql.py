@@ -44,7 +44,17 @@ class AsyncmyDriver:
 
     dialect = "mysql"
 
-    def __init__(self, dsn: str, *, min_size: int = 1, max_size: int = 10) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        min_size: int = 1,
+        max_size: int = 10,
+        acquire_timeout: float | None = None,
+        statement_timeout_ms: int | None = None,
+        max_lifetime: float | None = None,
+    ) -> None:
+        del acquire_timeout, statement_timeout_ms, max_lifetime
         self._dsn = _normalize_mysql_dsn(dsn)
         self._min_size = min_size
         self._max_size = max_size

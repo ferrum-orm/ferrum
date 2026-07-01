@@ -388,18 +388,31 @@ See [`examples/migrations/`](../examples/migrations/) for a worked example.
 
 ```python
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from ferrum.contrib.fastapi import ferrum_lifespan
+
+from fastapi import Depends, FastAPI
+from ferrum.connection import Connection
+from ferrum.contrib.fastapi import ferrum_lifespan, get_ferrum_conn
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with ferrum_lifespan(database_url=app.state.db_url):
+    async with ferrum_lifespan() as conn:
+        app.state.ferrum_conn = conn
         yield
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/users")
+async def list_users(conn: Connection = Depends(get_ferrum_conn)) -> list[User]:
+    return await User.objects.filter(active=True).all(conn)
 ```
+
+Every QuerySet terminal requires the pool handle — inject it with
+`Depends(get_ferrum_conn)` (or pass `conn` explicitly in scripts).
+`ferrum_lifespan()` reads `FERRUM_DATABASE_URL` / `DATABASE_URL` when no
+DSN is passed.
 
 See [`examples/fastapi_quickstart/`](../examples/fastapi_quickstart/) for the full app.
 
@@ -447,25 +460,77 @@ class Post(ferrum.Model):
 
 ### Vector and full-text columns
 
-pgvector `VECTOR(n)` and PostgreSQL `TSVECTOR` columns use sentinel types:
+pgvector `VECTOR(n)` and full-text columns use sentinel types and declarative indexes:
 
 ```python
+from ferrum.models import Field, FullTextIndex
+
 class Document(ferrum.Model):
     id: Annotated[UUID, ferrum.Field(primary_key=True)]
     embedding: Annotated[ferrum.Vector, ferrum.Field(vector_dimensions=1536)]
-    search_vector: ferrum.TSVector | None = None
+    search_vector: Annotated[ferrum.TSVector, Field(fts_config="english")] | None = None
+    body: str = ""
+
+    class Meta:
+        # MySQL / SQLite / SQL Server: FULLTEXT / FTS5 / catalog indexes
+        full_text_indexes = [FullTextIndex(fields=("body",), config="english")]
 ```
 
-KNN search uses `nearest_to`; full-text search uses the `match` filter operator:
+KNN search uses `nearest_to`. Full-text search supports filter lookups and ranking:
 
 ```python
-results = await (
-    Document.objects
-    .nearest_to("embedding", query_vector, metric="l2")
-    .limit(10)
-    .all(conn)
-)
+# Filter only
 hits = await Document.objects.filter(search_vector__match="python rust orm").all(conn)
+
+# Filter + relevance ranking (all drivers)
+hits = await Document.objects.search(
+    "python rust orm", field="search_vector", mode="websearch"
+).limit(10).all(conn)
+
+# Rank without implicit filter
+ranked = await Document.objects.rank_by("search_vector", "rust", mode="plain").all(conn)
+```
+
+Lookup operators on `tsvector` (and indexed `text` fields): `match`, `match_phrase`,
+`match_websearch`, `match_boolean`. Query strings are always bound parameters.
+
+| Lookup suffix       | `rank_by` / `search` mode | Meaning                                      |
+| ------------------- | ------------------------- | -------------------------------------------- |
+| `__match`           | `plain`                   | Natural-language terms                       |
+| `__match_phrase`    | `phrase`                  | Exact phrase                                 |
+| `__match_websearch` | `websearch`               | Web-style quotes and `-` negation            |
+| `__match_boolean`   | `boolean`                 | Boolean query syntax (`&`, `\|`, `!`, etc.) |
+
+`.search(query, *, field, mode="plain")` combines the matching filter with
+`.rank_by(field, query, mode=mode)` so results are both filtered and ordered by
+relevance. `.rank_by()` alone adds an `ORDER BY` score without requiring a filter.
+
+### Per-dialect notes
+
+| Driver     | Column / index model                         | Filter emit                         | Ranking emit                          |
+| ---------- | -------------------------------------------- | ----------------------------------- | ------------------------------------- |
+| PostgreSQL | `TSVector` column + optional GIN index       | `@@ plainto_/phraseto_/websearch_to_/to_tsquery` | `ts_rank(...)`              |
+| MySQL      | `FULLTEXT` index on base `text` columns      | `MATCH(cols) AGAINST(? IN … MODE)`  | same `MATCH … AGAINST` expression     |
+| SQLite     | FTS5 **virtual table** + content sync        | virtual-table `MATCH`               | correlated `bm25()`                   |
+| SQL Server | `CREATE FULLTEXT CATALOG` + full-text index  | `CONTAINS` / `FREETEXT`             | `CONTAINSTABLE` / `FREETEXTTABLE` JOIN |
+
+- **PostgreSQL:** declare `TSVector` with `Field(fts_config="english")` (regconfig
+  allowlist). GIN indexes on `tsvector` columns use `Meta.indexes` with `using="gin"`.
+- **MySQL:** use `FullTextIndex(fields=("title", "body"))` — migrations emit
+  `FULLTEXT KEY` DDL on the base table.
+- **SQLite:** FTS5 uses an external-content virtual table; set
+  `FullTextIndex(..., sqlite_content_table="documents")` when the shadow table name
+  differs from the model table. Migrations create the virtual table and sync triggers.
+- **SQL Server:** migrations may emit `CreateFullTextCatalog` before
+  `CreateFullTextIndex`. Full-text indexes populate asynchronously — integration tests
+  may need retry/backoff.
+
+Optional scored search helper (mirrors `ferrum.ext.pgvector.vector_search`):
+
+```python
+from ferrum.ext.fts import scored_search
+
+rows = await scored_search(conn, Document, "search_vector", "rust orm", limit=5)
 ```
 
 When reading/writing real vector values through asyncpg, register codecs explicitly:

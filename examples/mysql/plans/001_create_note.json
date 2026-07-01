@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "name": "001_create_note",
+  "ops": [
+    {
+      "kind": "create_table",
+      "table": "note",
+      "columns": [
+        {
+          "name": "id",
+          "sql_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": true
+        },
+        {
+          "name": "body",
+          "sql_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": false
+        }
+      ]
+    }
+  ],
+  "destructive": false,
+  "requires_confirmation": false
+}
