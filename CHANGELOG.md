@@ -9,6 +9,10 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.1.5] - 2026-07-01
+
 ### Added
 
 - **Cross-dialect full-text search (ADR-007, IR v3)**: `match`, `match_phrase`,
@@ -24,6 +28,11 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **IR version 2 → 3** — adds optional `text_rank_by` node. Python `_IR_VERSION`
   and Rust `IR_VERSION` must stay synchronized.
+
+### Fixed
+
+- **inspectdb**: query `information_schema` via `driver.fetch()` instead of
+  reaching into a private `_pool` on the timed query executor.
 
 ### Breaking
 
@@ -145,7 +154,9 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-[Unreleased]: https://github.com/ferrumdb/ferrum/compare/v0.1.3...HEAD
-[0.1.3]: https://github.com/ferrumdb/ferrum/compare/v0.1.2...v0.1.3
-[0.1.2]: https://github.com/ferrumdb/ferrum/compare/v0.1.1...v0.1.2
-[0.1.1]: https://github.com/ferrumdb/ferrum/compare/v0.1.0...v0.1.1
+[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/ferrum-orm/ferrum/compare/v0.1.4...v0.1.5
+[0.1.4]: https://github.com/ferrum-orm/ferrum/compare/v0.1.3...v0.1.4
+[0.1.3]: https://github.com/ferrum-orm/ferrum/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/ferrum-orm/ferrum/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/ferrum-orm/ferrum/compare/v0.1.0...v0.1.1

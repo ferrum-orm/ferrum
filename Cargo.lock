@@ -223,7 +223,7 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "ferrum-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "criterion",
  "proptest",
@@ -234,7 +234,7 @@ dependencies = [
 
 [[package]]
 name = "ferrum-migrate"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ferrum-core",
  "serde",
@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "ferrum-pyo3"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ferrum-core",
  "ferrum-sql",
@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "ferrum-sql"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "criterion",
  "ferrum-core",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "unarray"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 
