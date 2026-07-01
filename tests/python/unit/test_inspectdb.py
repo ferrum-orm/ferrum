@@ -147,8 +147,10 @@ def test_render_class_uses_foreign_key_instead_of_raw_id_field() -> None:
         },
     )
 
-    assert 'author: ForeignKey = ForeignKey(to="UserAccount", on_delete="CASCADE")' in source
-    assert "author_id:" not in source
+    assert (
+        'author: ClassVar[ForeignKey] = ForeignKey(to="UserAccount", on_delete="CASCADE")' in source
+    )
+    assert "author_id: int" in source
     assert "title: Annotated[str, Field(max_length=200)]" in source
 
 

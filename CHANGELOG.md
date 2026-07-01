@@ -11,6 +11,16 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.6] - 2026-07-01
+
+### Fixed
+
+- **inspectdb**: emit FK backing columns (`{name}_id`) and `ClassVar[ForeignKey]`
+  relationship descriptors instead of invalid instance-field `ForeignKey`
+  annotations that broke Pydantic model construction.
+
+---
+
 ## [0.1.5] - 2026-07-01
 
 ### Added
@@ -154,7 +164,8 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/ferrum-orm/ferrum/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/ferrum-orm/ferrum/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/ferrum-orm/ferrum/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/ferrum-orm/ferrum/compare/v0.1.2...v0.1.3

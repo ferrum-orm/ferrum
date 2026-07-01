@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "ferrum-orm"
-version = "0.1.5"
+version = "0.1.6"
 description = "Next-generation async ORM for Python with a Rust-powered core"
 license = { text = "Apache-2.0" }
 readme = "README.md"

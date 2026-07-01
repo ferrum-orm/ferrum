@@ -35,7 +35,7 @@ _HEADER = textwrap.dedent("""\
     from __future__ import annotations
     from datetime import date, datetime, time
     from decimal import Decimal
-    from typing import Annotated
+    from typing import Annotated, ClassVar
     from uuid import UUID
 
     import ferrum
@@ -237,12 +237,18 @@ def _render_class(
             fk = fk_map[col_name]
             target_class = _to_class_name(fk["foreign_table_name"])
             delete_rule = fk["delete_rule"].upper()
-            # Strip the trailing ``_id`` suffix for the field name if present.
-            field_name = col_name[:-3] if col_name.endswith("_id") else col_name
-            lines.append(
-                f'    {field_name}: ForeignKey = ForeignKey(to="{target_class}",'
-                f' on_delete="{delete_rule}")'
-            )
+            annotation = _pg_type_to_ferrum(pg_type, max_len, precision, scale, is_pk, is_nullable)
+            if "Field(" in annotation:
+                lines.append(f"    {col_name}: {annotation}")
+            else:
+                lines.append(f"    {col_name}: {annotation}")
+            # Relation descriptor (ClassVar) — only when the column follows {name}_id.
+            if col_name.endswith("_id"):
+                rel_name = col_name[:-3]
+                lines.append(
+                    f"    {rel_name}: ClassVar[ForeignKey] = ForeignKey("
+                    f'to="{target_class}", on_delete="{delete_rule}")'
+                )
             continue
 
         annotation = _pg_type_to_ferrum(pg_type, max_len, precision, scale, is_pk, is_nullable)
