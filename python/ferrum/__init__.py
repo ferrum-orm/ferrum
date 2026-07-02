@@ -6,7 +6,7 @@ Import paths are stable API; internal module paths are not.
 
 from __future__ import annotations
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 __all__ = [
     "CreateExtension",
     "CreateFunction",
@@ -30,6 +30,7 @@ __all__ = [
     "FerrumSchemaError",
     "FerrumTimeoutError",
     "Field",
+    "FlatValuesListQuerySet",
     "ForeignKey",
     "FullTextIndex",
     "Index",
@@ -43,6 +44,8 @@ __all__ = [
     "RetryPolicy",
     "TSVector",
     "Transaction",
+    "ValuesListQuerySet",
+    "ValuesQuerySet",
     "Vector",
     "clear_hooks",
     "connect",
@@ -101,7 +104,12 @@ from ferrum.models import (
     Vector,
 )
 from ferrum.observability import enable_metrics, enable_opentelemetry, get_metrics
-from ferrum.queryset import QuerySet
+from ferrum.queryset import (
+    FlatValuesListQuerySet,
+    QuerySet,
+    ValuesListQuerySet,
+    ValuesQuerySet,
+)
 from ferrum.runtime import RetryPolicy
 from ferrum.session import (
     current_setting as get_session_config,
