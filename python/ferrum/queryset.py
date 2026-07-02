@@ -22,7 +22,7 @@ import time
 import types
 from collections.abc import Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, Literal, Self, TypeVar, cast, overload
 from uuid import UUID
 
 import ferrum.hooks as _hooks
@@ -48,6 +48,9 @@ if TYPE_CHECKING:
     ConnectionLike = Connection | Transaction
 
 _M = TypeVar("_M", bound="Model")
+# Row type produced by a queryset's terminals. Bound per subclass: ``_M`` for the
+# model queryset, ``dict``/``tuple``/``Any`` for the value variants.
+_R = TypeVar("_R")
 
 # Module-level reference to the native Rust extension.  Absent when the wheel
 # has not been built (e.g. unit-test environments without a compiled extension).
@@ -97,11 +100,13 @@ def _require_msgpack() -> types.ModuleType:
 
 def _msgpack_row_default(obj: Any) -> Any:  # noqa: ANN401
     """``msgpack.packb`` ``default`` hook mirroring ``_RowEncoder`` conversions."""
-    if isinstance(obj, (datetime, UUID)):
-        return str(obj)
     if hasattr(obj, "_mapping"):
         return dict(obj._mapping)
-    raise TypeError(f"Object of type {type(obj).__name__} is not msgpack-serializable")
+    if isinstance(obj, (bytearray, memoryview)):
+        return bytes(obj)
+    # Structural-only copy for the Rust presence/nullability check; the real
+    # value keeps its native type for model_construct, so str() here is lossless.
+    return str(obj)
 
 
 def _encode_bind_value(value: object) -> dict[str, object]:
@@ -211,17 +216,19 @@ class _RowEncoder(json.JSONEncoder):
     """JSON encoder for driver rows and non-JSON-native Python types.
 
     Used to serialize rows for the Rust ``hydrate_rows`` structural check.
-    Complex types (datetime, UUID) are converted to strings — Rust performs
+    Non-JSON-native scalars are converted to strings — Rust performs
     structural validation (presence, nullability) only; Python retains native
     types for ``model_construct``.
     """
 
     def default(self, o: Any) -> Any:  # noqa: ANN401
-        if isinstance(o, (datetime, UUID)):
-            return str(o)
         if hasattr(o, "_mapping"):
             return dict(o._mapping)
-        return super().default(o)
+        if isinstance(o, (bytes, bytearray, memoryview)):
+            return list(bytes(o))
+        # Structural-only copy for the Rust presence/nullability check; the real
+        # value keeps its native type for model_construct, so str() here is lossless.
+        return str(o)
 
 
 def _parse_lookup(lookup: str) -> tuple[str, str]:
@@ -408,19 +415,25 @@ def _hydrate_rows(
     return instances
 
 
-class QuerySet(Generic[_M]):
-    """Lazy, chainable query builder for a Ferrum model.
+class _QuerySetBase(Generic[_R]):
+    """Row-type-generic base for all Ferrum querysets.
 
-    All filter/order/limit/offset methods return a new ``QuerySet`` instance
-    (immutable chaining). Terminal coroutines (``all``, ``get``, ``first``,
-    ``count``, ``delete``, ``update``) are async and require an active connection.
+    Holds the shared, model-agnostic query state (filters, ordering, limit,
+    offset, select/defer projection, relation hints), the IR builder, the Rust
+    ``_compile`` boundary, and the shared async terminals (``all``, ``first``,
+    ``get``, ``count``, ``exists``). Chaining methods return ``Self`` so a chain
+    preserves the concrete subclass type.
+
+    Row shaping is delegated to the overridable ``_materialize`` hook so each
+    concrete subclass (``QuerySet``, ``ValuesQuerySet``, ``ValuesListQuerySet``,
+    ``FlatValuesListQuerySet``) produces its own precise result type.
 
     ``_build_ir()`` serializes the accumulated state to the ADR-002 v1 IR shape
     (a plain dict) without touching the database or emitting any SQL.
     """
 
-    def __init__(self, model: type[_M]) -> None:
-        self._model = model
+    def __init__(self, model: type[Model]) -> None:
+        self._model: type[Model] = model
         self._filters: list[dict[str, Any]] = []
         self._order_by: list[dict[str, Any]] = []
         self._limit: int | None = None
@@ -432,16 +445,14 @@ class QuerySet(Generic[_M]):
         self._distinct: bool = False
         self._only_fields: tuple[str, ...] | None = None
         self._defer_fields: frozenset[str] = frozenset()
-        self._result_type: Literal["models", "values", "values_list"] = "models"
-        self._values_flat: bool = False
         self._select_related: tuple[str, ...] = ()
         self._prefetch_related: tuple[str, ...] = ()
 
     # ------------------------------------------------------------------
-    # Chaining methods (return new QuerySet — no I/O, no SQL)
+    # Chaining methods (return a new queryset of the same type — no I/O, no SQL)
     # ------------------------------------------------------------------
 
-    def filter(self, *args: Q | dict[str, Any], **kwargs: Any) -> QuerySet[_M]:  # noqa: ANN401
+    def filter(self, *args: Q | dict[str, Any], **kwargs: Any) -> Self:  # noqa: ANN401
         """Add filter(s), including ``Q`` boolean trees. Returns a new QuerySet.
 
         Uses Django-style ``field__operator=value`` syntax; bare ``field=value``
@@ -460,82 +471,34 @@ class QuerySet(Generic[_M]):
         qs._is_filtered = True
         return qs
 
-    def exclude(self, *args: Q | dict[str, Any], **kwargs: Any) -> QuerySet[_M]:  # noqa: ANN401
+    def exclude(self, *args: Q | dict[str, Any], **kwargs: Any) -> Self:  # noqa: ANN401
         """Exclude rows matching the given lookups (``~Q(...)``)."""
         q = args_to_q(*args, **kwargs)
         if q is None:
             return self._clone()
         return self.filter(~q)
 
-    def distinct(self) -> QuerySet[_M]:
+    def distinct(self) -> Self:
         """Return a QuerySet that emits ``SELECT DISTINCT``."""
         qs = self._clone()
         qs._distinct = True
         return qs
 
-    def only(self, *fields: str) -> QuerySet[_M]:
+    def only(self, *fields: str) -> Self:
         """Limit SELECT columns; deferred fields raise on access."""
         qs = self._clone()
         qs._only_fields = fields
         qs._defer_fields = frozenset()
         return qs
 
-    def defer(self, *fields: str) -> QuerySet[_M]:
+    def defer(self, *fields: str) -> Self:
         """Defer loading of the given fields."""
         qs = self._clone()
         qs._defer_fields = frozenset(fields)
         qs._only_fields = None
         return qs
 
-    def values(self, *fields: str) -> QuerySet[_M]:
-        """Return rows as dicts instead of model instances."""
-        qs = self._clone()
-        qs._result_type = "values"
-        if fields:
-            qs._only_fields = fields
-        return qs
-
-    def values_list(self, *fields: str, flat: bool = False) -> QuerySet[_M]:
-        """Return rows as tuples (or a flat list when ``flat=True`` and one field)."""
-        qs = self._clone()
-        qs._result_type = "values_list"
-        qs._values_flat = flat
-        if fields:
-            qs._only_fields = fields
-        return qs
-
-    def select_related(self, *relations: str) -> QuerySet[_M]:
-        """Eager-load to-one relations via JOIN (ForeignKey / OneToOne)."""
-        qs = self._clone()
-        metadata = self._get_metadata()
-        if metadata is not None:
-            for name in relations:
-                from ferrum.relations import resolve_relation
-
-                rel = resolve_relation(metadata, name)
-                if rel.kind not in ("fk", "one_to_one"):
-                    raise FerrumCompileError(
-                        f"select_related() only supports ForeignKey and OneToOne; "
-                        f"{name!r} is {rel.kind!r}. Use prefetch_related() instead.",
-                        model=metadata.model_name,
-                        field=name,
-                    )
-        qs._select_related = qs._select_related + relations
-        return qs
-
-    def prefetch_related(self, *relations: str) -> QuerySet[_M]:
-        """Eager-load to-many / M2M / reverse FK via batched queries."""
-        qs = self._clone()
-        metadata = self._get_metadata()
-        if metadata is not None:
-            from ferrum.relations import resolve_prefetch_name
-
-            for name in relations:
-                resolve_prefetch_name(metadata, name)
-        qs._prefetch_related = qs._prefetch_related + relations
-        return qs
-
-    def __getitem__(self, key: slice | int) -> QuerySet[_M]:
+    def __getitem__(self, key: slice | int) -> Self:
         """Return a sliced QuerySet using offset/limit shorthand.
 
         ``qs[10:20]`` is equivalent to ``qs.offset(10).limit(10)`` and remains
@@ -555,7 +518,7 @@ class QuerySet(Generic[_M]):
         msg = "QuerySet indices must be slices."
         raise TypeError(msg)
 
-    def order_by(self, *fields: str) -> QuerySet[_M]:
+    def order_by(self, *fields: str) -> Self:
         """Set ORDER BY. Prefix field with '-' for DESC. Returns a new QuerySet."""
         qs = self._clone()
         for f in fields:
@@ -565,120 +528,17 @@ class QuerySet(Generic[_M]):
                 qs._order_by.append({"field": f, "direction": "asc"})
         return qs
 
-    def limit(self, count: int) -> QuerySet[_M]:
+    def limit(self, count: int) -> Self:
         """Set LIMIT. Returns a new QuerySet."""
         qs = self._clone()
         qs._limit = count
         return qs
 
-    def offset(self, count: int) -> QuerySet[_M]:
+    def offset(self, count: int) -> Self:
         """Set OFFSET. Returns a new QuerySet."""
         qs = self._clone()
         qs._offset = count
         return qs
-
-    def nearest_to(
-        self,
-        field: str,
-        vector: list[float],
-        *,
-        metric: Literal["l2", "cosine", "inner_product"] = "l2",
-    ) -> QuerySet[_M]:
-        """Order results by vector distance (pgvector KNN).
-
-        Appends a ``vector_order_by`` node to the IR, compiled to
-        ``ORDER BY col <-> $n`` (or ``<=>`` / ``<#>`` for other metrics).
-        """
-        metadata = self._get_metadata()
-        if metadata is None:
-            raise FerrumCompileError(
-                f"Model {self._model.__name__!r} has no metadata.",
-                model=self._model.__name__,
-            )
-        field_index = {f.name: i for i, f in enumerate(metadata.fields)}
-        if field not in field_index:
-            raise FerrumCompileError(
-                f"Unknown field {field!r} on model {metadata.model_name!r}.",
-                model=metadata.model_name,
-                field=field,
-            )
-        field_meta = metadata.fields[field_index[field]]
-        if field_meta.field_type != "vector":
-            raise FerrumCompileError(
-                f"nearest_to() requires a vector field; {field!r} is {field_meta.field_type!r}.",
-                model=metadata.model_name,
-                field=field,
-            )
-        qs = self._clone()
-        qs._vector_order_by = {
-            "field": {"index": field_index[field], "name": field},
-            "metric": metric,
-            "value": _encode_bind_value(vector),
-        }
-        return qs
-
-    def rank_by(
-        self,
-        field: str,
-        query: str,
-        *,
-        mode: Literal["plain", "phrase", "websearch", "boolean"] = "plain",
-    ) -> QuerySet[_M]:
-        """Order results by full-text relevance (``text_rank_by`` IR node)."""
-        if mode not in _TEXT_SEARCH_MODES:
-            raise FerrumCompileError(
-                f"Invalid text search mode {mode!r}.",
-                model=self._model.__name__,
-            )
-        metadata = self._get_metadata()
-        if metadata is None:
-            raise FerrumCompileError(
-                f"Model {self._model.__name__!r} has no metadata.",
-                model=self._model.__name__,
-            )
-        field_index = {f.name: i for i, f in enumerate(metadata.fields)}
-        if field not in field_index:
-            raise FerrumCompileError(
-                f"Unknown field {field!r} on model {metadata.model_name!r}.",
-                model=metadata.model_name,
-                field=field,
-            )
-        field_meta = metadata.fields[field_index[field]]
-        if field_meta.field_type not in ("tsvector", "text"):
-            raise FerrumCompileError(
-                f"rank_by() requires a full-text field; {field!r} is {field_meta.field_type!r}.",
-                model=metadata.model_name,
-                field=field,
-            )
-        if self._vector_order_by is not None:
-            raise FerrumCompileError(
-                "Cannot combine nearest_to() and rank_by() on the same QuerySet.",
-                model=metadata.model_name,
-            )
-        _, ir_mode = _TEXT_SEARCH_MODES[mode]
-        qs = self._clone()
-        qs._text_rank_by = {
-            "field": {"index": field_index[field], "name": field},
-            "query": _encode_bind_value(query),
-            "mode": ir_mode,
-        }
-        return qs
-
-    def search(
-        self,
-        query: str,
-        *,
-        field: str,
-        mode: Literal["plain", "phrase", "websearch", "boolean"] = "plain",
-    ) -> QuerySet[_M]:
-        """Filter and rank by full-text relevance on ``field``."""
-        if mode not in _TEXT_SEARCH_MODES:
-            raise FerrumCompileError(
-                f"Invalid text search mode {mode!r}.",
-                model=self._model.__name__,
-            )
-        operator, _ = _TEXT_SEARCH_MODES[mode]
-        return self.filter(**{f"{field}__{operator}": query}).rank_by(field, query, mode=mode)
 
     # ------------------------------------------------------------------
     # IR builder (no I/O, no SQL — QUERY_ENGINE.md §6 Stage 0)
@@ -872,6 +732,477 @@ class QuerySet(Generic[_M]):
         compiled["bound_params"] = msgpack.unpackb(compiled["bound_params"], raw=False)
         return compiled
 
+    def to_ir_json(self) -> str:
+        """Serialize the current QuerySet state to the ADR-002 v1 IR JSON string.
+
+        This is the ``ir_json`` argument for ``ferrum._native.compile_query``.
+        Calls ``_build_ir()`` internally, so all Python-side allowlist checks
+        fire before serialization.
+        """
+        return json.dumps(self._build_ir())
+
+    # ------------------------------------------------------------------
+    # Terminal coroutines (async) — require open Connection
+    # ------------------------------------------------------------------
+
+    async def all(self, conn: ConnectionLike) -> list[_R]:
+        """Fetch all matching rows and return them shaped for this queryset.
+
+        Compiles the QuerySet IR via the Rust extension, executes the
+        parameterized SQL against the pool, and delegates row shaping to
+        :meth:`_materialize` (model hydration for ``QuerySet`` — the ADR-003
+        trusted ``model_construct`` path — or dict/tuple/scalar shaping for the
+        value querysets).
+
+        Dispatches Tier A ``query_start`` / ``query_success`` / ``query_failure``
+        hook payloads (non-bypassable redaction via ``hooks.dispatch``).
+
+        Args:
+            conn: An open ``Connection`` (obtained from ``ferrum.connect()``).
+
+        Raises:
+            FerrumConfigError: if the native extension is not built.
+        """
+        if _native_ext is None:
+            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
+        metadata = self._get_metadata()
+        compiled = self._compile(dialect=conn.dialect)
+        sql_text: str = compiled["sql_text"]
+        bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
+        fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
+        driver = conn._require_driver()
+        model_name = self._model.__name__
+        table = metadata.table_name if metadata is not None else model_name
+        _hooks.query_start(
+            fingerprint=fingerprint,
+            model=model_name,
+            operation="select",
+            table=table,
+        )
+        t0 = time.monotonic()
+        try:
+            rows = await driver.fetch(sql_text, *bound_params)
+        except Exception as exc:
+            duration_ms = (time.monotonic() - t0) * 1000
+            mapped = map_db_error(exc, context={"model": model_name, "operation": "select"})
+            _hooks.query_failure(
+                fingerprint=fingerprint,
+                duration_ms=duration_ms,
+                failure_category=type(mapped).__name__,
+            )
+            raise mapped from None
+        duration_ms = (time.monotonic() - t0) * 1000
+        _hooks.query_success(
+            fingerprint=fingerprint,
+            duration_ms=duration_ms,
+            row_count=len(rows),
+        )
+        return await self._materialize(rows, metadata, conn, fingerprint)
+
+    async def _materialize(
+        self,
+        rows: list[Any],
+        metadata: ModelMetadata | None,
+        conn: ConnectionLike,
+        fingerprint: str,
+    ) -> list[_R]:
+        """Shape raw driver rows into this queryset's concrete result type.
+
+        Overridden by each concrete subclass. Never called on ``_QuerySetBase``
+        itself (it is abstract in practice — no public constructor path yields a
+        bare base instance).
+        """
+        raise NotImplementedError  # pragma: no cover — concrete subclasses override
+
+    async def first(self, conn: ConnectionLike) -> _R | None:
+        """Fetch the first matching row, or ``None`` if no rows match.
+
+        Applies ``LIMIT 1`` to avoid fetching unnecessary rows.
+
+        Args:
+            conn: An open ``Connection`` (obtained from ``ferrum.connect()``).
+
+        Raises:
+            FerrumConfigError: if the native extension is not built.
+        """
+        if _native_ext is None:
+            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
+        results = await self.limit(1).all(conn)
+        return results[0] if results else None
+
+    async def get(self, conn: ConnectionLike, **kwargs: Any) -> _R:  # noqa: ANN401
+        """Fetch exactly one matching row, applying optional extra filters.
+
+        Returns the single matching model instance.
+
+        Args:
+            conn: An open ``Connection`` (obtained from ``ferrum.connect()``).
+            **kwargs: Additional filter lookups (same syntax as ``filter()``).
+
+        Raises:
+            FerrumConfigError: if the native extension is not built.
+            FerrumNotFoundError: if no rows match.
+            FerrumMultipleObjectsError: if more than one row matches.
+        """
+        if _native_ext is None:
+            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
+        qs: Self = self.filter(**kwargs) if kwargs else self
+        # Fetch at most 2 rows: enough to detect "multiple objects" without
+        # pulling the full result set.
+        results = await qs.limit(2).all(conn)
+        model_name = self._model.__name__
+        if len(results) == 0:
+            raise FerrumNotFoundError(f"{model_name} matching query does not exist. [FERR-Q404]")
+        if len(results) > 1:
+            raise FerrumMultipleObjectsError(
+                f"get() returned more than one {model_name}. "
+                "Use filter() to narrow the query. [FERR-Q405]"
+            )
+        return results[0]
+
+    async def count(self, conn: ConnectionLike) -> int:
+        """Return the count of rows matching the current filters.
+
+        Rewrites the compiled SELECT to ``SELECT COUNT(*) FROM ...`` so that
+        LIMIT/OFFSET are not applied and no row hydration is needed.
+
+        Dispatches Tier A ``query_start`` / ``query_success`` / ``query_failure``
+        hook payloads (non-bypassable redaction via ``hooks.dispatch``).
+
+        Args:
+            conn: An open ``Connection`` (obtained from ``ferrum.connect()``).
+
+        Raises:
+            FerrumConfigError: if the native extension is not built.
+            FerrumInternalError: if the compiler emits an unexpected SQL shape
+                that prevents the COUNT(*) rewrite (W-1 guard).
+        """
+        if _native_ext is None:
+            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
+        # Compile without LIMIT/OFFSET — count operates on the full filter set.
+        count_qs = self._clone()
+        count_qs._limit = None
+        count_qs._offset = None
+        compiled = count_qs._compile(dialect=conn.dialect)
+        sql_text: str = compiled["sql_text"]
+        # Rewrite the SELECT projection to COUNT(*).  The emitter always emits
+        # ``SELECT {cols} FROM {table} ...``; the first " FROM " token separates
+        # the projection from the rest of the statement.  Column/table names from
+        # ModelMetadata cannot contain " FROM " so this split is safe (SQL-1).
+        # W-1: wrap ValueError to surface compiler shape changes as FerrumInternalError.
+        try:
+            from_idx = sql_text.index(" FROM ")
+        except ValueError as exc:
+            raise FerrumInternalError(
+                "Internal error: SQL compiler emitted an unexpected shape for "
+                "count() rewrite (no ' FROM ' token found). [FERR-E500]"
+            ) from exc
+        count_sql = "SELECT COUNT(*)" + sql_text[from_idx:]
+        bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
+        fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
+        driver = conn._require_driver()
+        metadata = self._get_metadata()
+        model_name = self._model.__name__
+        table = metadata.table_name if metadata is not None else model_name
+        _hooks.query_start(
+            fingerprint=fingerprint,
+            model=model_name,
+            operation="count",
+            table=table,
+        )
+        t0 = time.monotonic()
+        try:
+            result = await driver.fetchval(count_sql, *bound_params)
+        except Exception as exc:
+            duration_ms = (time.monotonic() - t0) * 1000
+            mapped = map_db_error(exc, context={"model": model_name, "operation": "count"})
+            _hooks.query_failure(
+                fingerprint=fingerprint,
+                duration_ms=duration_ms,
+                failure_category=type(mapped).__name__,
+            )
+            raise mapped from None
+        duration_ms = (time.monotonic() - t0) * 1000
+        count_val = int(result or 0)
+        _hooks.query_success(
+            fingerprint=fingerprint,
+            duration_ms=duration_ms,
+            row_count=count_val,
+        )
+        return count_val
+
+    async def exists(self, conn: ConnectionLike) -> bool:
+        """Return whether any row matches without hydrating rows.
+
+        The compiler emits an ``EXISTS`` operation rather than fetching a row and
+        discarding it, so this terminal is the cheapest presence check and still
+        emits Tier A hook payloads only.
+        """
+        if _native_ext is None:
+            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
+        metadata = self._get_metadata()
+        compiled = self._compile_ir(self._build_exists_ir(), dialect=conn.dialect)
+        sql_text: str = compiled["sql_text"]
+        bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
+        fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
+        driver = conn._require_driver()
+        model_name = self._model.__name__
+        table = metadata.table_name if metadata is not None else model_name
+        _hooks.query_start(
+            fingerprint=fingerprint,
+            model=model_name,
+            operation="exists",
+            table=table,
+        )
+        t0 = time.monotonic()
+        try:
+            result = await driver.fetchval(sql_text, *bound_params)
+        except Exception as exc:
+            duration_ms = (time.monotonic() - t0) * 1000
+            mapped = map_db_error(exc, context={"model": model_name, "operation": "exists"})
+            _hooks.query_failure(
+                fingerprint=fingerprint,
+                duration_ms=duration_ms,
+                failure_category=type(mapped).__name__,
+            )
+            raise mapped from None
+        duration_ms = (time.monotonic() - t0) * 1000
+        _hooks.query_success(
+            fingerprint=fingerprint,
+            duration_ms=duration_ms,
+            row_count=1 if result else 0,
+        )
+        return bool(result)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _clone(self) -> Self:
+        """Copy accumulated query state for immutable chaining.
+
+        Uses ``type(self)`` so the concrete subclass (model / values / values-list
+        / flat) is preserved across a chain, then copies shared state via
+        :meth:`_copy_state_into`.
+        """
+        qs = type(self)(self._model)
+        self._copy_state_into(qs)
+        return qs
+
+    def _copy_state_into(self, qs: _QuerySetBase[Any]) -> None:
+        """Copy accumulated shared query state into another queryset instance.
+
+        Used by :meth:`_clone` and by ``QuerySet.values()`` / ``values_list()``
+        when transferring state to a sibling result-type queryset.
+        """
+        qs._filters = list(self._filters)
+        qs._order_by = list(self._order_by)
+        qs._limit = self._limit
+        qs._offset = self._offset
+        qs._is_filtered = self._is_filtered
+        qs._vector_order_by = (
+            dict(self._vector_order_by) if self._vector_order_by is not None else None
+        )
+        qs._text_rank_by = dict(self._text_rank_by) if self._text_rank_by is not None else None
+        qs._predicate_q = self._predicate_q
+        qs._distinct = self._distinct
+        qs._only_fields = self._only_fields
+        qs._defer_fields = self._defer_fields
+        qs._select_related = self._select_related
+        qs._prefetch_related = self._prefetch_related
+
+    def _get_metadata(self) -> ModelMetadata | None:
+        """Return the model's ``ModelMetadata`` if available, else ``None``."""
+        return getattr(self._model, "__ferrum_metadata__", None)
+
+
+class QuerySet(_QuerySetBase[_M], Generic[_M]):
+    """Lazy, chainable query builder for a Ferrum model.
+
+    The model-facing queryset. Terminals return model instances
+    (``all -> list[_M]``, ``first -> _M | None``, ``get -> _M``); ``values()`` /
+    ``values_list()`` switch to the value-shaped sibling querysets. All
+    chaining methods return a new instance (immutable chaining).
+    """
+
+    # Narrow the base ``_model`` (``type[Model]``) to the concrete model type so
+    # ``create``/``bulk_*`` return precise ``_M`` instances.
+    _model: type[_M]
+
+    def __init__(self, model: type[_M]) -> None:
+        super().__init__(model)
+
+    # ------------------------------------------------------------------
+    # Model-only chaining (return QuerySet[_M])
+    # ------------------------------------------------------------------
+
+    def select_related(self, *relations: str) -> QuerySet[_M]:
+        """Eager-load to-one relations via JOIN (ForeignKey / OneToOne)."""
+        qs = self._clone()
+        metadata = self._get_metadata()
+        if metadata is not None:
+            for name in relations:
+                from ferrum.relations import resolve_relation
+
+                rel = resolve_relation(metadata, name)
+                if rel.kind not in ("fk", "one_to_one"):
+                    raise FerrumCompileError(
+                        f"select_related() only supports ForeignKey and OneToOne; "
+                        f"{name!r} is {rel.kind!r}. Use prefetch_related() instead.",
+                        model=metadata.model_name,
+                        field=name,
+                    )
+        qs._select_related = qs._select_related + relations
+        return qs
+
+    def prefetch_related(self, *relations: str) -> QuerySet[_M]:
+        """Eager-load to-many / M2M / reverse FK via batched queries."""
+        qs = self._clone()
+        metadata = self._get_metadata()
+        if metadata is not None:
+            from ferrum.relations import resolve_prefetch_name
+
+            for name in relations:
+                resolve_prefetch_name(metadata, name)
+        qs._prefetch_related = qs._prefetch_related + relations
+        return qs
+
+    def nearest_to(
+        self,
+        field: str,
+        vector: list[float],
+        *,
+        metric: Literal["l2", "cosine", "inner_product"] = "l2",
+    ) -> QuerySet[_M]:
+        """Order results by vector distance (pgvector KNN).
+
+        Appends a ``vector_order_by`` node to the IR, compiled to
+        ``ORDER BY col <-> $n`` (or ``<=>`` / ``<#>`` for other metrics).
+        """
+        metadata = self._get_metadata()
+        if metadata is None:
+            raise FerrumCompileError(
+                f"Model {self._model.__name__!r} has no metadata.",
+                model=self._model.__name__,
+            )
+        field_index = {f.name: i for i, f in enumerate(metadata.fields)}
+        if field not in field_index:
+            raise FerrumCompileError(
+                f"Unknown field {field!r} on model {metadata.model_name!r}.",
+                model=metadata.model_name,
+                field=field,
+            )
+        field_meta = metadata.fields[field_index[field]]
+        if field_meta.field_type != "vector":
+            raise FerrumCompileError(
+                f"nearest_to() requires a vector field; {field!r} is {field_meta.field_type!r}.",
+                model=metadata.model_name,
+                field=field,
+            )
+        qs = self._clone()
+        qs._vector_order_by = {
+            "field": {"index": field_index[field], "name": field},
+            "metric": metric,
+            "value": _encode_bind_value(vector),
+        }
+        return qs
+
+    def rank_by(
+        self,
+        field: str,
+        query: str,
+        *,
+        mode: Literal["plain", "phrase", "websearch", "boolean"] = "plain",
+    ) -> QuerySet[_M]:
+        """Order results by full-text relevance (``text_rank_by`` IR node)."""
+        if mode not in _TEXT_SEARCH_MODES:
+            raise FerrumCompileError(
+                f"Invalid text search mode {mode!r}.",
+                model=self._model.__name__,
+            )
+        metadata = self._get_metadata()
+        if metadata is None:
+            raise FerrumCompileError(
+                f"Model {self._model.__name__!r} has no metadata.",
+                model=self._model.__name__,
+            )
+        field_index = {f.name: i for i, f in enumerate(metadata.fields)}
+        if field not in field_index:
+            raise FerrumCompileError(
+                f"Unknown field {field!r} on model {metadata.model_name!r}.",
+                model=metadata.model_name,
+                field=field,
+            )
+        field_meta = metadata.fields[field_index[field]]
+        if field_meta.field_type not in ("tsvector", "text"):
+            raise FerrumCompileError(
+                f"rank_by() requires a full-text field; {field!r} is {field_meta.field_type!r}.",
+                model=metadata.model_name,
+                field=field,
+            )
+        if self._vector_order_by is not None:
+            raise FerrumCompileError(
+                "Cannot combine nearest_to() and rank_by() on the same QuerySet.",
+                model=metadata.model_name,
+            )
+        _, ir_mode = _TEXT_SEARCH_MODES[mode]
+        qs = self._clone()
+        qs._text_rank_by = {
+            "field": {"index": field_index[field], "name": field},
+            "query": _encode_bind_value(query),
+            "mode": ir_mode,
+        }
+        return qs
+
+    def search(
+        self,
+        query: str,
+        *,
+        field: str,
+        mode: Literal["plain", "phrase", "websearch", "boolean"] = "plain",
+    ) -> QuerySet[_M]:
+        """Filter and rank by full-text relevance on ``field``."""
+        if mode not in _TEXT_SEARCH_MODES:
+            raise FerrumCompileError(
+                f"Invalid text search mode {mode!r}.",
+                model=self._model.__name__,
+            )
+        operator, _ = _TEXT_SEARCH_MODES[mode]
+        return self.filter(**{f"{field}__{operator}": query}).rank_by(field, query, mode=mode)
+
+    # ------------------------------------------------------------------
+    # Result-shape switches (return value-typed sibling querysets)
+    # ------------------------------------------------------------------
+
+    def values(self, *fields: str) -> ValuesQuerySet:
+        """Return rows as dicts instead of model instances."""
+        qs = ValuesQuerySet(self._model)
+        self._copy_state_into(qs)
+        if fields:
+            qs._only_fields = fields
+        return qs
+
+    @overload
+    def values_list(self, *fields: str, flat: Literal[True]) -> FlatValuesListQuerySet: ...
+    @overload
+    def values_list(self, *fields: str, flat: Literal[False] = False) -> ValuesListQuerySet: ...
+
+    def values_list(
+        self, *fields: str, flat: bool = False
+    ) -> ValuesListQuerySet | FlatValuesListQuerySet:
+        """Return rows as tuples (or flat scalars when ``flat=True``)."""
+        target: ValuesListQuerySet | FlatValuesListQuerySet = (
+            FlatValuesListQuerySet(self._model) if flat else ValuesListQuerySet(self._model)
+        )
+        self._copy_state_into(target)
+        if fields:
+            target._only_fields = fields
+        return target
+
+    # ------------------------------------------------------------------
+    # Write IR builders (model-only)
+    # ------------------------------------------------------------------
+
     def _build_insert_ir(self, values: dict[str, Any]) -> dict[str, Any]:
         """Build an INSERT IR dict from the provided field values.
 
@@ -959,15 +1290,6 @@ class QuerySet(Generic[_M]):
         select_ir["limit"] = None
         select_ir["offset"] = None
         return select_ir
-
-    def to_ir_json(self) -> str:
-        """Serialize the current QuerySet state to the ADR-002 v1 IR JSON string.
-
-        This is the ``ir_json`` argument for ``ferrum._native.compile_query``.
-        Calls ``_build_ir()`` internally, so all Python-side allowlist checks
-        fire before serialization.
-        """
-        return json.dumps(self._build_ir())
 
     # ------------------------------------------------------------------
     # Danger API guards (AGENTS.md §3 / ARCHITECTURE.md §3.9)
@@ -2082,72 +2404,18 @@ class QuerySet(Generic[_M]):
         _hooks.query_success(fingerprint=fingerprint, duration_ms=duration_ms, row_count=row_count)
         return row_count
 
-    # ------------------------------------------------------------------
-    # Terminal coroutines (async) — require open Connection
-    # ------------------------------------------------------------------
+    async def _materialize(
+        self,
+        rows: list[Any],
+        metadata: ModelMetadata | None,
+        conn: ConnectionLike,
+        fingerprint: str,
+    ) -> list[_M]:
+        """Hydrate rows into model instances (ADR-003 trusted path).
 
-    async def all(self, conn: ConnectionLike) -> list[_M] | list[dict[str, Any]] | list[Any]:
-        """Fetch all matching rows and return model instances.
-
-        Compiles the QuerySet IR via the Rust extension, executes the
-        parameterized SQL against the pool, and constructs model instances via
-        the ADR-003 trusted hydration path (``model_construct``).
-
-        Dispatches Tier A ``query_start`` / ``query_success`` / ``query_failure``
-        hook payloads (non-bypassable redaction via ``hooks.dispatch``).
-
-        Args:
-            conn: An open ``Connection`` (obtained from ``ferrum.connect()``).
-
-        Raises:
-            FerrumConfigError: if the native extension is not built.
+        Applies ``select_related`` JOIN splitting and ``prefetch_related``
+        batched loading — the model-only tail of the previous ``all()``.
         """
-        if _native_ext is None:
-            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
-        metadata = self._get_metadata()
-        compiled = self._compile(dialect=conn.dialect)
-        sql_text: str = compiled["sql_text"]
-        bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
-        fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
-        driver = conn._require_driver()
-        model_name = self._model.__name__
-        table = metadata.table_name if metadata is not None else model_name
-        _hooks.query_start(
-            fingerprint=fingerprint,
-            model=model_name,
-            operation="select",
-            table=table,
-        )
-        t0 = time.monotonic()
-        try:
-            rows = await driver.fetch(sql_text, *bound_params)
-        except Exception as exc:
-            duration_ms = (time.monotonic() - t0) * 1000
-            mapped = map_db_error(exc, context={"model": model_name, "operation": "select"})
-            _hooks.query_failure(
-                fingerprint=fingerprint,
-                duration_ms=duration_ms,
-                failure_category=type(mapped).__name__,
-            )
-            raise mapped from None
-        duration_ms = (time.monotonic() - t0) * 1000
-        _hooks.query_success(
-            fingerprint=fingerprint,
-            duration_ms=duration_ms,
-            row_count=len(rows),
-        )
-        if self._result_type == "values":
-            return [_row_to_dict(row) for row in rows]
-        if self._result_type == "values_list":
-            names = self._resolve_select_field_names(metadata) if metadata is not None else []
-            values_out: list[Any] = []
-            for row in rows:
-                row_dict = _row_to_dict(row)
-                if self._values_flat and len(names) == 1:
-                    values_out.append(row_dict[names[0]])
-                else:
-                    values_out.append(tuple(row_dict.get(name) for name in names))
-            return values_out
         deferred = self._deferred_field_names(metadata) if metadata is not None else None
         instances = _hydrate_rows(
             self._model,
@@ -2178,192 +2446,66 @@ class QuerySet(Generic[_M]):
             await prefetch_related_objects(instances, self._model, self._prefetch_related, conn)
         return instances
 
-    async def first(self, conn: ConnectionLike) -> _M | None:
-        """Fetch the first matching row, or ``None`` if no rows match.
 
-        Applies ``LIMIT 1`` to avoid fetching unnecessary rows.
+class ValuesQuerySet(_QuerySetBase[dict[str, Any]]):
+    """QuerySet variant whose terminals return plain ``dict`` rows.
 
-        Args:
-            conn: An open ``Connection`` (obtained from ``ferrum.connect()``).
+    Produced by ``QuerySet.values(...)``. Each row is the driver row converted to
+    a ``dict[str, Any]`` (only the selected columns when ``values(*fields)`` was
+    given). ``all()`` returns ``list[dict[str, Any]]``.
+    """
 
-        Raises:
-            FerrumConfigError: if the native extension is not built.
-        """
-        if _native_ext is None:
-            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
-        results = await self.limit(1).all(conn)
-        return cast(_M, results[0]) if results else None
+    async def _materialize(
+        self,
+        rows: list[Any],
+        metadata: ModelMetadata | None,
+        conn: ConnectionLike,
+        fingerprint: str,
+    ) -> list[dict[str, Any]]:
+        return [_row_to_dict(row) for row in rows]
 
-    async def get(self, conn: ConnectionLike, **kwargs: Any) -> _M:  # noqa: ANN401
-        """Fetch exactly one matching row, applying optional extra filters.
 
-        Returns the single matching model instance.
+class ValuesListQuerySet(_QuerySetBase[tuple[Any, ...]]):
+    """QuerySet variant whose terminals return ``tuple`` rows.
 
-        Args:
-            conn: An open ``Connection`` (obtained from ``ferrum.connect()``).
-            **kwargs: Additional filter lookups (same syntax as ``filter()``).
+    Produced by ``QuerySet.values_list(...)`` (without ``flat=True``). Tuple
+    element order follows the resolved SELECT field order. ``all()`` returns
+    ``list[tuple[Any, ...]]``.
+    """
 
-        Raises:
-            FerrumConfigError: if the native extension is not built.
-            FerrumNotFoundError: if no rows match.
-            FerrumMultipleObjectsError: if more than one row matches.
-        """
-        if _native_ext is None:
-            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
-        qs: QuerySet[_M] = self.filter(**kwargs) if kwargs else self
-        # Fetch at most 2 rows: enough to detect "multiple objects" without
-        # pulling the full result set.
-        results = await qs.limit(2).all(conn)
-        model_name = self._model.__name__
-        if len(results) == 0:
-            raise FerrumNotFoundError(f"{model_name} matching query does not exist. [FERR-Q404]")
-        if len(results) > 1:
-            raise FerrumMultipleObjectsError(
-                f"get() returned more than one {model_name}. "
-                "Use filter() to narrow the query. [FERR-Q405]"
-            )
-        return cast(_M, results[0])
+    async def _materialize(
+        self,
+        rows: list[Any],
+        metadata: ModelMetadata | None,
+        conn: ConnectionLike,
+        fingerprint: str,
+    ) -> list[tuple[Any, ...]]:
+        names = self._resolve_select_field_names(metadata) if metadata is not None else []
+        return [tuple(_row_to_dict(row).get(name) for name in names) for row in rows]
 
-    async def count(self, conn: ConnectionLike) -> int:
-        """Return the count of rows matching the current filters.
 
-        Rewrites the compiled SELECT to ``SELECT COUNT(*) FROM ...`` so that
-        LIMIT/OFFSET are not applied and no row hydration is needed.
+class FlatValuesListQuerySet(_QuerySetBase[Any]):
+    """QuerySet variant whose terminals return flat scalars.
 
-        Dispatches Tier A ``query_start`` / ``query_success`` / ``query_failure``
-        hook payloads (non-bypassable redaction via ``hooks.dispatch``).
+    Produced by ``QuerySet.values_list(..., flat=True)``. When exactly one field
+    is selected each row is the bare scalar value; if more than one field is
+    present the row falls back to a tuple (preserving the pre-split behavior).
+    ``all()`` returns ``list[Any]``.
+    """
 
-        Args:
-            conn: An open ``Connection`` (obtained from ``ferrum.connect()``).
-
-        Raises:
-            FerrumConfigError: if the native extension is not built.
-            FerrumInternalError: if the compiler emits an unexpected SQL shape
-                that prevents the COUNT(*) rewrite (W-1 guard).
-        """
-        if _native_ext is None:
-            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
-        # Compile without LIMIT/OFFSET — count operates on the full filter set.
-        count_qs = self._clone()
-        count_qs._limit = None
-        count_qs._offset = None
-        compiled = count_qs._compile(dialect=conn.dialect)
-        sql_text: str = compiled["sql_text"]
-        # Rewrite the SELECT projection to COUNT(*).  The emitter always emits
-        # ``SELECT {cols} FROM {table} ...``; the first " FROM " token separates
-        # the projection from the rest of the statement.  Column/table names from
-        # ModelMetadata cannot contain " FROM " so this split is safe (SQL-1).
-        # W-1: wrap ValueError to surface compiler shape changes as FerrumInternalError.
-        try:
-            from_idx = sql_text.index(" FROM ")
-        except ValueError as exc:
-            raise FerrumInternalError(
-                "Internal error: SQL compiler emitted an unexpected shape for "
-                "count() rewrite (no ' FROM ' token found). [FERR-E500]"
-            ) from exc
-        count_sql = "SELECT COUNT(*)" + sql_text[from_idx:]
-        bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
-        fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
-        driver = conn._require_driver()
-        metadata = self._get_metadata()
-        model_name = self._model.__name__
-        table = metadata.table_name if metadata is not None else model_name
-        _hooks.query_start(
-            fingerprint=fingerprint,
-            model=model_name,
-            operation="count",
-            table=table,
-        )
-        t0 = time.monotonic()
-        try:
-            result = await driver.fetchval(count_sql, *bound_params)
-        except Exception as exc:
-            duration_ms = (time.monotonic() - t0) * 1000
-            mapped = map_db_error(exc, context={"model": model_name, "operation": "count"})
-            _hooks.query_failure(
-                fingerprint=fingerprint,
-                duration_ms=duration_ms,
-                failure_category=type(mapped).__name__,
-            )
-            raise mapped from None
-        duration_ms = (time.monotonic() - t0) * 1000
-        count_val = int(result or 0)
-        _hooks.query_success(
-            fingerprint=fingerprint,
-            duration_ms=duration_ms,
-            row_count=count_val,
-        )
-        return count_val
-
-    async def exists(self, conn: ConnectionLike) -> bool:
-        """Return whether any row matches without hydrating rows.
-
-        The compiler emits an ``EXISTS`` operation rather than fetching a row and
-        discarding it, so this terminal is the cheapest presence check and still
-        emits Tier A hook payloads only.
-        """
-        if _native_ext is None:
-            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
-        metadata = self._get_metadata()
-        compiled = self._compile_ir(self._build_exists_ir(), dialect=conn.dialect)
-        sql_text: str = compiled["sql_text"]
-        bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
-        fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
-        driver = conn._require_driver()
-        model_name = self._model.__name__
-        table = metadata.table_name if metadata is not None else model_name
-        _hooks.query_start(
-            fingerprint=fingerprint,
-            model=model_name,
-            operation="exists",
-            table=table,
-        )
-        t0 = time.monotonic()
-        try:
-            result = await driver.fetchval(sql_text, *bound_params)
-        except Exception as exc:
-            duration_ms = (time.monotonic() - t0) * 1000
-            mapped = map_db_error(exc, context={"model": model_name, "operation": "exists"})
-            _hooks.query_failure(
-                fingerprint=fingerprint,
-                duration_ms=duration_ms,
-                failure_category=type(mapped).__name__,
-            )
-            raise mapped from None
-        duration_ms = (time.monotonic() - t0) * 1000
-        _hooks.query_success(
-            fingerprint=fingerprint,
-            duration_ms=duration_ms,
-            row_count=1 if result else 0,
-        )
-        return bool(result)
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _clone(self) -> QuerySet[_M]:
-        """Copy accumulated query state for immutable chaining."""
-        qs: QuerySet[_M] = QuerySet(self._model)
-        qs._filters = list(self._filters)
-        qs._order_by = list(self._order_by)
-        qs._limit = self._limit
-        qs._offset = self._offset
-        qs._is_filtered = self._is_filtered
-        qs._vector_order_by = (
-            dict(self._vector_order_by) if self._vector_order_by is not None else None
-        )
-        qs._text_rank_by = dict(self._text_rank_by) if self._text_rank_by is not None else None
-        qs._predicate_q = self._predicate_q
-        qs._distinct = self._distinct
-        qs._only_fields = self._only_fields
-        qs._defer_fields = self._defer_fields
-        qs._result_type = self._result_type
-        qs._values_flat = self._values_flat
-        qs._select_related = self._select_related
-        qs._prefetch_related = self._prefetch_related
-        return qs
-
-    def _get_metadata(self) -> ModelMetadata | None:
-        """Return the model's ``ModelMetadata`` if available, else ``None``."""
-        return getattr(self._model, "__ferrum_metadata__", None)
+    async def _materialize(
+        self,
+        rows: list[Any],
+        metadata: ModelMetadata | None,
+        conn: ConnectionLike,
+        fingerprint: str,
+    ) -> list[Any]:
+        names = self._resolve_select_field_names(metadata) if metadata is not None else []
+        out: list[Any] = []
+        for row in rows:
+            row_dict = _row_to_dict(row)
+            if len(names) == 1:
+                out.append(row_dict[names[0]])
+            else:
+                out.append(tuple(row_dict.get(name) for name in names))
+        return out

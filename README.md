@@ -101,6 +101,24 @@ users = await (
 )
 ```
 
+### First-Class IDE Support
+
+Ferrum ships a PEP 561 `py.typed` marker, so editors and type checkers (`mypy`, `pyright`,
+`ty`) resolve its inline hints out of the box. `Model.objects` is typed as
+`QuerySet[YourModel]`, chaining preserves the model type, and terminals infer precise results —
+no casts:
+
+```python
+users: list[User] = await User.objects.filter(is_active=True).all(conn)   # list[User]
+user: User | None = await User.objects.first(conn)                        # User | None
+rows: list[dict[str, Any]] = await User.objects.values("id", "email").all(conn)
+ids: list[Any] = await User.objects.values_list("id", flat=True).all(conn)
+```
+
+`values()` / `values_list()` return dedicated `ValuesQuerySet`, `ValuesListQuerySet`, and
+`FlatValuesListQuerySet` variants (all exported from `ferrum`) so `all()` returns
+`list[dict[str, Any]]`, `list[tuple[Any, ...]]`, or `list[Any]` respectively.
+
 ### Rust-Powered Core
 
 Performance-critical components are implemented in Rust:

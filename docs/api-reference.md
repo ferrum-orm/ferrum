@@ -147,8 +147,8 @@ Lazy, chainable, async query builder. Chaining methods return a **new** `QuerySe
 | `defer(*fields) -> QuerySet[M]`                            | Omit fields from SELECT; deferred fields raise on access.                               |
 | `select_related(*relations) -> QuerySet[M]`                | FK / O2O forward relations via `LEFT JOIN` (one query).                                 |
 | `prefetch_related(*relations) -> QuerySet[M]`              | Reverse FK / M2M via batched follow-up queries (N+1 → 2).                               |
-| `values(*fields) -> QuerySet[M]`                           | Return dict rows from `all()` instead of model instances.                               |
-| `values_list(*fields, flat=False) -> QuerySet[M]`          | Return tuple rows (or a flat list when `flat=True` and one field).                      |
+| `values(*fields) -> ValuesQuerySet`                        | Switch to a dict-returning queryset (`all() -> list[dict[str, Any]]`).                   |
+| `values_list(*fields, flat=False) -> ValuesListQuerySet \| FlatValuesListQuerySet` | Switch to a tuple-returning queryset; `flat=True` returns a flat scalar queryset (`FlatValuesListQuerySet`). |
 | `order_by(*fields) -> QuerySet[M]`                         | `ORDER BY`; prefix a field with `-` for DESC.                                           |
 | `limit(count) -> QuerySet[M]`                              | Set `LIMIT`.                                                                            |
 | `offset(count) -> QuerySet[M]`                             | Set `OFFSET`.                                                                           |
@@ -196,6 +196,27 @@ and `text_rank_by` are bound parameters — never interpolated into SQL.
 
 `update()` / `delete()` without any filter raise **`FerrumDangerApiError`** before touching
 the connection.
+
+#### Value querysets
+
+`values()` / `values_list()` return dedicated queryset subclasses so IDEs and static type
+checkers infer the exact terminal result type. They share the full chaining/terminal surface
+of `QuerySet` (filter, order_by, all, first, get, count, exists) but re-shape rows:
+
+| Class                    | Produced by                      | `all()` returns          |
+| ------------------------ | -------------------------------- | ------------------------ |
+| `ValuesQuerySet`         | `values(*fields)`                | `list[dict[str, Any]]`   |
+| `ValuesListQuerySet`     | `values_list(*fields)`           | `list[tuple[Any, ...]]`  |
+| `FlatValuesListQuerySet` | `values_list(*fields, flat=True)`| `list[Any]` (bare scalars when exactly one field is selected) |
+
+All three are exported from the top-level `ferrum` package.
+
+#### IDE / type-checker support
+
+Ferrum ships a PEP 561 `py.typed` marker, so editors and `mypy` / `pyright` / `ty` pick up its
+inline type hints. `Model.objects` resolves to `QuerySet[YourModel]`, chained calls preserve the
+concrete model type, and `all()` / `first()` / `get()` infer `list[YourModel]` / `YourModel | None`
+/ `YourModel` (or the value-queryset shapes above) with no casts required.
 
 #### Operators by field type
 

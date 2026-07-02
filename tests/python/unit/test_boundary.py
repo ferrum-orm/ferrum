@@ -433,3 +433,35 @@ class TestHydrateRowsPythonWiring:
             "model_construct must receive native datetime, not a JSON string"
         )
         assert result[0].created_at == ts
+
+    def test_hydrate_rows_preserves_decimal_date_time_types(self) -> None:
+        """Non-JSON-native scalars serialize for Rust but model_construct keeps native types."""
+        from datetime import date, time
+        from decimal import Decimal
+
+        from ferrum.queryset import _hydrate_rows
+
+        class Probe(ferrum.Model):
+            id: int = 0
+            ai_confidence: Decimal = Decimal("0")
+            maturity_days: date = date(2024, 1, 1)
+            opened_at: time = time(9, 0)
+
+        confidence = Decimal("0.87")
+        maturity = date(2024, 6, 15)
+        opened = time(14, 30, 0)
+        rows = [
+            {
+                "id": 1,
+                "ai_confidence": confidence,
+                "maturity_days": maturity,
+                "opened_at": opened,
+            }
+        ]
+        result = _hydrate_rows(Probe, rows)
+        assert isinstance(result[0].ai_confidence, Decimal)
+        assert result[0].ai_confidence == confidence
+        assert isinstance(result[0].maturity_days, date)
+        assert result[0].maturity_days == maturity
+        assert isinstance(result[0].opened_at, time)
+        assert result[0].opened_at == opened

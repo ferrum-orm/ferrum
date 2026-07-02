@@ -15,7 +15,7 @@ import pytest
 import ferrum
 from ferrum.config import DEFAULT_WIRE_FORMAT, WIRE_FORMAT_ENV, resolve_wire_format
 from ferrum.errors import FerrumConfigError
-from ferrum.queryset import QuerySet, _decode_bound_param
+from ferrum.queryset import QuerySet, _decode_bound_param, _msgpack_row_default
 
 msgpack = pytest.importorskip("msgpack")
 _native = pytest.importorskip("ferrum._native")
@@ -137,3 +137,11 @@ def test_hydrate_json_matches_msgpack() -> None:
     mp_hydrated = _native.hydrate_rows_msgpack(meta_mp, rows_mp)
 
     assert json_hydrated == mp_hydrated
+
+
+def test_msgpack_row_default_serializes_decimal_and_bytearray() -> None:
+    from decimal import Decimal
+
+    assert _msgpack_row_default(Decimal("0.87")) == "0.87"
+    assert _msgpack_row_default(bytearray(b"\x01\x02")) == b"\x01\x02"
+    assert _msgpack_row_default(memoryview(b"\x03\x04")) == b"\x03\x04"

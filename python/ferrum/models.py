@@ -19,7 +19,20 @@ import re
 import types as _types
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Annotated, Any, ClassVar, Literal, Union, cast, get_args, get_origin
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    ClassVar,
+    Literal,
+    NoReturn,
+    TypeVar,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+    overload,
+)
 from uuid import UUID
 
 from pydantic import BaseModel as _PydanticBaseModel
@@ -950,6 +963,13 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
 # Manager descriptor
 # ---------------------------------------------------------------------------
 
+if TYPE_CHECKING:
+    from ferrum.queryset import QuerySet
+
+# Bound to the accessing model type via ``owner`` so ``User.objects`` infers
+# ``QuerySet[User]`` in IDEs / type checkers (PEP 561 descriptor idiom).
+_M = TypeVar("_M", bound="Model")
+
 
 class _Manager:
     """Descriptor that vends a fresh ``QuerySet`` bound to the model class.
@@ -962,7 +982,12 @@ class _Manager:
     ``ferrum.queryset`` (models is the lower layer; queryset depends on it).
     """
 
-    def __get__(self, obj: object, owner: type | None = None) -> Any:  # noqa: ANN401
+    @overload
+    def __get__(self, obj: None, owner: type[_M]) -> QuerySet[_M]: ...
+    @overload
+    def __get__(self, obj: Model, owner: type[_M]) -> NoReturn: ...
+
+    def __get__(self, obj: object, owner: type | None = None) -> Any:
         if obj is not None:
             raise AttributeError(
                 "'objects' is a class-level manager and cannot be accessed on a model instance."
