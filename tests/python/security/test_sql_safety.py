@@ -291,3 +291,79 @@ class TestWritePathSQLSafety:
         qs = QuerySet(_User)
         with pytest.raises(FerrumDangerApiError):
             await qs.delete()
+
+
+# ---------------------------------------------------------------------------
+# SQL-1 / LOG-1 for the instance-write forms (create(obj), update_instance)
+# ---------------------------------------------------------------------------
+
+
+class TestInstanceWriteFormsSafety:
+    @pytest.mark.asyncio
+    async def test_create_dict_form_unknown_key_fails_before_sql(self) -> None:
+        """SQL-1: injection-shaped dict keys are rejected before SQL emission."""
+        mock_ext = mock.MagicMock()
+        qs = QuerySet(_User)
+
+        with (
+            mock.patch("ferrum.queryset._native_ext", mock_ext),
+            pytest.raises(FerrumCompileError) as exc_info,
+        ):
+            await qs.create(mock.MagicMock(), {"email; DROP TABLE users--": "x", "id": 1})
+
+        assert exc_info.value.model == "_User"
+        mock_ext.compile_query.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_instance_unknown_field_fails_before_sql(self) -> None:
+        """SQL-1: update_instance() fields are allowlist-validated before SQL."""
+        mock_ext = mock.MagicMock()
+        qs = QuerySet(_User)
+
+        with (
+            mock.patch("ferrum.queryset._native_ext", mock_ext),
+            pytest.raises(FerrumCompileError) as exc_info,
+        ):
+            await qs.update_instance(
+                mock.MagicMock(),
+                _User(id=1),
+                fields=["email; DROP TABLE users--"],
+            )
+
+        assert exc_info.value.field == "email; DROP TABLE users--"
+        mock_ext.compile_query.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_instance_write_hook_payloads_carry_no_values(self) -> None:
+        """LOG-1: Tier A hook payloads for instance writes never contain field values."""
+        import json as _json
+
+        from ferrum.hooks import clear_hooks, register_hook
+
+        canary = "supersecret-instance-value"
+        mock_ext = mock.MagicMock()
+        mock_ext.compile_query.return_value = {
+            "sql_text": "UPDATE users SET email = $1 WHERE id = $2",
+            "bound_params": [_json.dumps({"type": "text", "value": canary})],
+            "fingerprint": "fp-instance",
+            "operation": "update",
+        }
+        mock_conn = mock.MagicMock()
+        mock_conn.dialect = "postgres"
+        mock_driver = mock.MagicMock()
+        mock_driver.execute = mock.AsyncMock(return_value="UPDATE 1")
+        mock_conn._require_driver.return_value = mock_driver
+
+        dispatched: list[dict] = []
+        register_hook("*", dispatched.append)
+        try:
+            with mock.patch("ferrum.queryset._native_ext", mock_ext):
+                await QuerySet(_User).update_instance(
+                    mock_conn, _User(id=1, email=canary), fields=["email"]
+                )
+        finally:
+            clear_hooks()
+
+        assert dispatched, "instance write must dispatch Tier A hook payloads"
+        for payload in dispatched:
+            assert canary not in str(payload)

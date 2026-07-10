@@ -231,9 +231,17 @@ from ferrum import connect
 
 async def main() -> None:
     async with connect() as conn:
-        # CREATE
+        # CREATE — keyword values
         note = await Note.objects.create(conn, body="Hello from Ferrum")
         print(note.id, note.body)
+
+        # CREATE — from an instance (values via model_dump(); a sentinel
+        # primary key of 0/None/"" is dropped so the DB default runs).
+        # The passed instance is not mutated — read the generated PK from
+        # the returned instance.
+        draft = Note(body="From an instance")
+        created = await Note.objects.create(conn, draft)
+        print(created.id)
 
         # READ — exactly one row
         fetched = await Note.objects.filter(id=note.id).get(conn)
@@ -250,12 +258,29 @@ async def main() -> None:
         # UPDATE (scoped — requires a filter)
         changed = await Note.objects.filter(id=note.id).update(conn, body="Updated")
 
+        # UPDATE — persist one instance by primary key
+        created.body = "Edited in Python"
+        count = await Note.objects.update_instance(conn, created, fields=["body"])
+        if count == 0:
+            ...  # row was deleted concurrently (stale instance)
+
         # DELETE (scoped — requires a filter)
         deleted = await Note.objects.filter(id=note.id).delete(conn)
 
 
 asyncio.run(main())
 ```
+
+Filtered `update()` / `delete()` are the preferred shape for set-based writes — for example
+a retention cleanup job deletes matching rows in one statement instead of fetching ids first:
+
+```python
+cutoff = datetime.now(UTC) - timedelta(days=3)
+await Log.objects.filter(last_fetched_at__lte=cutoff).delete(conn)
+```
+
+For `update_instance()`, prefer an explicit `fields=[...]` subset: without it every non-PK
+column is written, which is last-writer-wins against concurrent updates.
 
 ### Filter syntax
 
@@ -296,6 +321,10 @@ To delete or update every row, you must opt in explicitly with a deliberately ve
 await Note.objects.danger_delete_all(conn)
 await Note.objects.danger_update_all(conn, body="reset")
 ```
+
+Relatedly, `update()` / `delete()` reject a sliced queryset (`qs[:10]`) or one carrying
+`select_related()` state with `FerrumCompileError`: `LIMIT`/`OFFSET` and joins do not apply
+to `UPDATE`/`DELETE`, and silently dropping them would change which rows are affected.
 
 ---
 

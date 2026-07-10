@@ -49,6 +49,14 @@ user = await User.objects.create(
     email="john@example.com",
 )
 
+# Insert from an instance (sentinel PK is dropped so the DB default runs)
+draft = User(id=0, email="dana@example.com")
+created = await User.objects.create(conn, draft)
+
+# Persist one instance's changes by primary key
+created.is_active = False
+await User.objects.update_instance(conn, created, fields=["is_active"])
+
 users = await (
     User.objects
     .filter(is_active=True)

@@ -1295,10 +1295,29 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
     # Danger API guards (AGENTS.md §3 / ARCHITECTURE.md §3.9)
     # ------------------------------------------------------------------
 
-    async def create(self, conn: ConnectionLike, **values: Any) -> _M:  # noqa: ANN401
+    async def create(
+        self,
+        conn: ConnectionLike,
+        _obj: _M | dict[str, Any] | None = None,
+        **values: Any,  # noqa: ANN401
+    ) -> _M:
         """Insert a single row. Returns the hydrated model instance.
 
-        Builds an INSERT IR from ``values``, compiles it through the Rust
+        Accepts either a model instance / dict positionally, or keyword field
+        values — not both::
+
+            await User.objects.create(conn, user)               # instance form
+            await User.objects.create(conn, {"email": email})   # dict form
+            await User.objects.create(conn, email=email)        # kwargs form
+
+        The instance/dict form mirrors ``bulk_create()`` semantics: values come
+        from ``model_dump()`` and an auto-generated primary key carrying a
+        sentinel value (``0`` / ``None`` / ``""``) is omitted so the database
+        default runs. The kwargs form inserts exactly the given values (no
+        sentinel dropping). The passed instance is never mutated — the return
+        value is a new instance hydrated from ``RETURNING *``.
+
+        Builds an INSERT IR from the values, compiles it through the Rust
         extension, executes ``INSERT … RETURNING *`` via asyncpg ``fetchrow``,
         and constructs the model instance via the ADR-003 trusted hydration path.
 
@@ -1307,15 +1326,31 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
 
         Args:
             conn: An open ``Connection`` (obtained from ``ferrum.connect()``).
+            _obj: A model instance or dict of field values. Named with a leading
+                underscore so it can never collide with a model field passed via
+                ``**values`` (Pydantic forbids underscore-prefixed field names).
             **values: Field names and their values to insert. Field names are
                 validated against the model's allowlist before compilation.
 
         Raises:
             FerrumConfigError: if the native extension is not built.
-            FerrumCompileError: if a field name is not in the model's allowlist.
+            FerrumCompileError: if a field name is not in the model's allowlist,
+                if both an instance/dict and keyword values are given, or if the
+                instance carries deferred fields.
             FerrumInternalError: if the INSERT returned no row (should not occur
                 when the DB is healthy and the table exists).
         """
+        if _obj is not None:
+            if values:
+                raise FerrumCompileError(
+                    "create() accepts either a model instance/dict or keyword values, not both.",
+                    model=self._model.__name__,
+                )
+            row = self._object_to_row_dict(_obj)
+            row_metadata = self._get_metadata()
+            if row_metadata is not None:
+                row = self._drop_auto_pk_sentinel(row, row_metadata)
+            values = row
         if _native_ext is None:
             raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
         if conn is None:
@@ -1374,13 +1409,46 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         return pk_names if pk_names else [metadata.fields[0].name] if metadata.fields else ["id"]
 
     def _object_to_row_dict(self, obj: _M | dict[str, Any]) -> dict[str, Any]:
-        """Normalize a bulk-write input object to a mutable field-value dict."""
+        """Normalize a write-input object to a mutable field-value dict.
+
+        Rejects instances carrying deferred fields: ``model_dump()`` bypasses
+        the deferred-field access guard and would silently write class defaults
+        for columns that were never loaded.
+        """
         if isinstance(obj, dict):
             return dict(obj)
         if hasattr(obj, "model_dump"):
+            deferred = getattr(obj, "__ferrum_deferred__", None)
+            if deferred:
+                raise FerrumCompileError(
+                    f"Cannot write an instance of model {type(obj).__name__!r} with "
+                    f"deferred fields {sorted(deferred)!r}; load the full row first.",
+                    model=type(obj).__name__,
+                )
             return obj.model_dump()
-        msg = f"bulk_create() expected model instances or dicts, got {type(obj)!r}."
+        msg = f"Expected a model instance or dict, got {type(obj)!r}."
         raise TypeError(msg)
+
+    def _drop_auto_pk_sentinel(
+        self, values: dict[str, Any], metadata: ModelMetadata
+    ) -> dict[str, Any]:
+        """Drop the auto-generated PK column when it carries a sentinel value.
+
+        A sentinel value (``0`` / ``None`` / ``""``) on the first PK field means
+        "let the database default generate this". Raises a structured error when
+        nothing is left to insert, so an empty INSERT never reaches SQL emission.
+        """
+        out = dict(values)
+        pk_name = self._pk_field_name(metadata)
+        if pk_name in out and out[pk_name] in (0, None, ""):
+            out.pop(pk_name, None)
+        if not out:
+            raise FerrumCompileError(
+                f"Insert on model {metadata.model_name!r} requires at least one field "
+                "value after dropping auto-generated primary-key sentinel values.",
+                model=metadata.model_name,
+            )
+        return out
 
     def _build_bulk_insert_ir(
         self,
@@ -1407,14 +1475,10 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 model=metadata.model_name,
             )
         field_index: dict[str, int] = {f.name: i for i, f in enumerate(metadata.fields)}
-        pk_name = self._pk_field_name(metadata)
         ir_rows: list[list[Any]] = []
         column_order: list[str] | None = None
         for row in rows:
-            values = dict(row)
-            # Drop auto-generated PK columns with sentinel zero/null values.
-            if pk_name in values and values[pk_name] in (0, None, ""):
-                values.pop(pk_name, None)
+            values = self._drop_auto_pk_sentinel(row, metadata)
             if column_order is None:
                 column_order = sorted(values.keys())
             elif sorted(values.keys()) != column_order:
@@ -1715,7 +1779,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         field_list = list(fields)
         rows: list[tuple[Any, dict[str, Any]]] = []
         for obj in objects:
-            data = obj.model_dump()
+            data = self._object_to_row_dict(obj)
             for pk_name in pk_names:
                 if pk_name not in data:
                     raise FerrumCompileError(
@@ -2146,6 +2210,32 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
 
         return upserted if returning else total
 
+    def _check_write_scope(self, api: str) -> None:
+        """Reject queryset state that UPDATE/DELETE cannot honor.
+
+        ``limit``/``offset`` and join/ranking state are silently absent from the
+        write IR; letting them through would change which rows are affected
+        (e.g. ``filter(...)[:10].delete()`` deleting every matching row). Fail
+        loudly before compilation instead.
+        """
+        if self._limit is not None or self._offset is not None:
+            raise FerrumCompileError(
+                f"{api} cannot be used on a sliced QuerySet; "
+                "LIMIT/OFFSET do not apply to UPDATE/DELETE.",
+                model=self._model.__name__,
+            )
+        if self._select_related:
+            raise FerrumCompileError(
+                f"{api} cannot be used with select_related(); joins do not apply to UPDATE/DELETE.",
+                model=self._model.__name__,
+            )
+        if self._vector_order_by is not None or self._text_rank_by is not None:
+            raise FerrumCompileError(
+                f"{api} cannot be used with nearest_to()/rank_by()/search(); "
+                "ranking does not apply to UPDATE/DELETE.",
+                model=self._model.__name__,
+            )
+
     async def delete(self, conn: ConnectionLike | None = None) -> int:
         """Delete filtered rows. Returns the row count.
 
@@ -2171,6 +2261,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 "Refusing unscoped delete(). Use QuerySet.danger_delete_all() "
                 "to explicitly delete all rows in the table."
             )
+        self._check_write_scope("delete()")
         if _native_ext is None:
             raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
         if conn is None:
@@ -2301,6 +2392,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 "Refusing unscoped update(). Use QuerySet.danger_update_all() "
                 "to explicitly update all rows in the table."
             )
+        self._check_write_scope("update()")
         if _native_ext is None:
             raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
         if conn is None:
@@ -2347,6 +2439,123 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             row_count=row_count,
         )
         return row_count
+
+    async def update_instance(
+        self,
+        conn: ConnectionLike,
+        obj: _M,
+        *,
+        fields: Sequence[str] | None = None,
+    ) -> int:
+        """Persist one instance's field values to its row, targeted by primary key.
+
+        The singular counterpart of ``bulk_update()``::
+
+            user = await User.objects.filter(email=email).first(conn)
+            user.active = False
+            count = await User.objects.update_instance(conn, user, fields=["active"])
+            if count == 0:
+                ...  # row was deleted concurrently (stale instance)
+
+        Values come from ``model_dump()`` (same as the bulk paths), the WHERE
+        clause is the instance's primary key (composite PKs supported), and the
+        call delegates to ``filter(pk=...).update(conn, ...)`` — inheriting the
+        allowlist validation, bound parameters, Tier A hooks, and error mapping.
+
+        Prefer an explicit ``fields=[...]`` subset: ``fields=None`` writes every
+        non-PK column and is last-writer-wins against concurrent updates.
+
+        Args:
+            conn: An open ``Connection`` (obtained from ``ferrum.connect()``).
+            obj: The model instance to persist. Never mutated.
+            fields: Field names to update. ``None`` updates all non-PK fields.
+
+        Returns:
+            The number of rows updated: ``1``, or ``0`` when no row matches the
+            primary key (missing or concurrently deleted — caller decides).
+
+        Raises:
+            FerrumCompileError: if called on a filtered QuerySet, if a primary
+                key value is missing or a sentinel (``0``/``None``/``""``), if
+                ``fields`` is empty, unknown, contains a PK field, or overlaps
+                the instance's deferred fields.
+        """
+        model_name = self._model.__name__
+        if self._is_filtered:
+            raise FerrumCompileError(
+                "update_instance() must be called on an unfiltered QuerySet — it "
+                "targets the row by primary key. Use filter(...).update(conn, ...) "
+                "for filtered updates.",
+                model=model_name,
+            )
+        metadata = self._get_metadata()
+        if metadata is None:
+            raise FerrumCompileError(
+                f"Model {model_name!r} has no metadata.",
+                model=model_name,
+            )
+        field_index = {f.name: i for i, f in enumerate(metadata.fields)}
+        pk_names = self._pk_field_names(metadata)
+        deferred = frozenset(getattr(obj, "__ferrum_deferred__", None) or ())
+        deferred_pks = sorted(set(pk_names) & deferred)
+        if deferred_pks:
+            raise FerrumCompileError(
+                f"update_instance() requires loaded primary-key fields; "
+                f"{deferred_pks!r} are deferred on model {metadata.model_name!r}.",
+                model=metadata.model_name,
+            )
+        if fields is None:
+            if deferred:
+                raise FerrumCompileError(
+                    "update_instance() without fields=[...] cannot be used on an "
+                    f"instance with deferred fields {sorted(deferred)!r}; pass an "
+                    "explicit fields subset.",
+                    model=metadata.model_name,
+                )
+            field_list = [f.name for f in metadata.fields if f.name not in pk_names]
+        else:
+            field_list = list(dict.fromkeys(fields))
+            if not field_list:
+                raise FerrumCompileError(
+                    "update_instance() requires at least one field.",
+                    model=metadata.model_name,
+                )
+            for name in field_list:
+                if name not in field_index:
+                    raise FerrumCompileError(
+                        f"Unknown field {name!r} on model {metadata.model_name!r}.",
+                        model=metadata.model_name,
+                        field=name,
+                    )
+                if name in pk_names:
+                    raise FerrumCompileError(
+                        f"update_instance() cannot assign primary-key field {name!r}; "
+                        "primary keys identify the target row.",
+                        model=metadata.model_name,
+                        field=name,
+                    )
+                if name in deferred:
+                    raise FerrumCompileError(
+                        f"update_instance() cannot write deferred field {name!r}; "
+                        "it was never loaded on this instance.",
+                        model=metadata.model_name,
+                        field=name,
+                    )
+        row = obj.model_dump(include=set(field_list) | set(pk_names))
+        pk_map: dict[str, Any] = {}
+        for pk_name in pk_names:
+            pk_value = row.get(pk_name)
+            if pk_value in (0, None, ""):
+                raise FerrumCompileError(
+                    f"update_instance() requires a primary-key value for field "
+                    f"{pk_name!r} on model {metadata.model_name!r}.",
+                    model=metadata.model_name,
+                    field=pk_name,
+                )
+            pk_map[pk_name] = pk_value
+        assignments = {name: row[name] for name in field_list}
+        target: QuerySet[_M] = QuerySet(self._model).filter(**pk_map)
+        return await target.update(conn, **assignments)
 
     async def danger_update_all(self, conn: ConnectionLike, **assignments: Any) -> int:  # noqa: ANN401
         """Update ALL rows in the table without a filter.

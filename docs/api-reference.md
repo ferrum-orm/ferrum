@@ -180,6 +180,7 @@ and `text_rank_by` are bound parameters — never interpolated into SQL.
 
 | Method                                                                 | Returns            | Notes                                                                         |
 | ---------------------------------------------------------------------- | ------------------ | ----------------------------------------------------------------------------- |
+| `await create(conn, obj_or_dict)`                                      | `M`                | `INSERT … RETURNING *` from a model instance or dict, hydrates the row.      |
 | `await create(conn, **values)`                                         | `M`                | `INSERT … RETURNING *`, hydrates the row.                                     |
 | `await bulk_create(conn, objects, *, batch_size=1000, returning=True)` | `list[M]` or `int` | Multi-row `INSERT`; `returning=False` returns inserted count.                 |
 | `await bulk_update(conn, objects, fields, *, batch_size=1000)`         | `int`              | PK-keyed batched `UPDATE … FROM (VALUES …)`.                                  |
@@ -191,11 +192,51 @@ and `text_rank_by` are bound parameters — never interpolated into SQL.
 | `await exists(conn)`                                                   | `bool`             | `SELECT EXISTS(subquery)`; no row hydration.                                  |
 | `await update(conn, **assignments)`                                    | `int`              | **Requires a filter.** Returns affected rows.                                 |
 | `await delete(conn)`                                                   | `int`              | **Requires a filter.** Returns affected rows.                                 |
+| `await update_instance(conn, obj, *, fields=None)`                     | `int`              | Persists one instance by primary key. `0` = row missing/stale.                |
 | `await danger_update_all(conn, **assignments)`                         | `int`              | Unscoped update — explicit opt-in.                                            |
 | `await danger_delete_all(conn)`                                        | `int`              | Unscoped delete — explicit opt-in.                                            |
 
 `update()` / `delete()` without any filter raise **`FerrumDangerApiError`** before touching
-the connection.
+the connection. They also reject a sliced (`qs[:10]`) or `select_related()` queryset with
+`FerrumCompileError` — `LIMIT`/`OFFSET` and joins do not apply to `UPDATE`/`DELETE`, and
+silently ignoring them would change which rows are affected.
+
+##### Instance input for `create()`
+
+`create()` accepts a model instance or dict positionally as an alternative to keyword values:
+
+```python
+note = Note(body="hello")
+created = await Note.objects.create(conn, note)          # instance form
+created = await Note.objects.create(conn, {"body": "x"}) # dict form
+created = await Note.objects.create(conn, body="x")      # kwargs form
+```
+
+The instance/dict form mirrors `bulk_create()` semantics: values come from `model_dump()`
+and an auto-generated primary key carrying a sentinel value (`0` / `None` / `""`) is dropped
+so the database default runs. The kwargs form inserts exactly the given values (no sentinel
+dropping — `create(conn, id=0)` inserts a literal `0`). The passed instance is never mutated;
+the return value is a **new** instance hydrated from `RETURNING *` — read DB-generated values
+(PK, server defaults) from the returned object. Mixing both forms in one call, or passing an
+instance with deferred (`only()`/`defer()`) fields, raises `FerrumCompileError`.
+
+##### `update_instance()`
+
+Persists a single instance's field values to its row, targeted by primary key (composite
+primary keys supported). The singular counterpart of `bulk_update()`:
+
+```python
+task = await Task.objects.filter(id=task_id).first(conn)
+task.done = True
+count = await Task.objects.update_instance(conn, task, fields=["done"])
+if count == 0:
+    ...  # row was deleted concurrently (stale instance)
+```
+
+Prefer an explicit `fields=[...]` subset. `fields=None` writes **every** non-PK column and is
+last-writer-wins against concurrent updates. `update_instance()` must be called on an
+unfiltered queryset (it builds its own PK filter), requires loaded, non-sentinel PK values,
+and rejects `fields` entries that are unknown, primary keys, or deferred on the instance.
 
 #### Value querysets
 

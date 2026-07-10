@@ -160,6 +160,58 @@ class TestDangerApiGuards:
         except Exception:  # noqa: S110
             pass  # Expected: native extension not built or connection layer not wired
 
+    # ------------------------------------------------------------------
+    # Write-scope guards — state UPDATE/DELETE cannot honor must fail loudly
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_sliced_delete_raises(self) -> None:
+        """A sliced queryset must not silently delete every matching row."""
+        from ferrum.errors import FerrumCompileError
+
+        qs = QuerySet(FakeUser).filter(id=1)[:10]
+        with pytest.raises(FerrumCompileError, match="sliced"):
+            await qs.delete(None)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_sliced_update_raises(self) -> None:
+        from ferrum.errors import FerrumCompileError
+
+        qs = QuerySet(FakeUser).filter(id=1).offset(5)
+        with pytest.raises(FerrumCompileError, match="sliced"):
+            await qs.update(None, email="x@example.com")  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_select_related_delete_raises(self) -> None:
+        """Join state must not silently leak into (or vanish from) a DELETE."""
+        from typing import ClassVar
+
+        from ferrum.errors import FerrumCompileError
+
+        class GuardAuthor(Model):
+            id: int = 0
+
+        class GuardPost(Model):
+            id: int = 0
+            author_id: int = 0
+            author: ClassVar[ferrum.ForeignKey] = ferrum.ForeignKey(to="GuardAuthor")
+
+        qs = QuerySet(GuardPost).select_related("author").filter(id=1)
+        with pytest.raises(FerrumCompileError, match="select_related"):
+            await qs.delete(None)  # type: ignore[arg-type]
+
+    def test_values_querysets_have_no_write_terminals(self) -> None:
+        """Value-shaped querysets must not expose write terminals (pin)."""
+        from ferrum.queryset import (
+            FlatValuesListQuerySet,
+            ValuesListQuerySet,
+            ValuesQuerySet,
+        )
+
+        for qs_cls in (ValuesQuerySet, ValuesListQuerySet, FlatValuesListQuerySet):
+            for terminal in ("create", "update", "delete", "update_instance"):
+                assert not hasattr(qs_cls, terminal), f"{qs_cls.__name__}.{terminal} must not exist"
+
     @pytest.mark.asyncio
     async def test_danger_update_all_with_assignments_does_not_raise(self) -> None:
         """MIG-5: danger_update_all() with kwargs must not raise FerrumDangerApiError.

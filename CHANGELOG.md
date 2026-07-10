@@ -9,6 +9,52 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+### Changed
+
+### Fixed
+
+---
+
+## [0.1.8] - 2026-07-10
+
+
+### Added
+
+### Changed
+
+### Fixed
+---
+
+## [0.2.0] - 2026-07-10
+
+
+### Added
+
+- **Instance input for `create()`**: `Model.objects.create(conn, instance_or_dict)`
+  inserts a model instance (or dict) directly, mirroring `bulk_create()` semantics —
+  values from `model_dump()`, auto-PK sentinel (`0`/`None`/`""`) dropped so the DB
+  default runs. The kwargs form is unchanged. Mixing both forms raises
+  `FerrumCompileError`.
+- **`QuerySet.update_instance(conn, obj, *, fields=None)`**: persist one instance's
+  field values to its row by primary key (composite PKs supported). Returns the
+  affected row count; `0` signals a missing/stale row.
+
+### Fixed
+
+- `update()` / `delete()` now raise `FerrumCompileError` on a sliced queryset
+  (`qs[:10]`) or one carrying `select_related()`/`nearest_to()`/`rank_by()` state.
+  Previously `LIMIT`/`OFFSET` and join state were silently dropped from the write
+  IR — `filter(...)[:10].delete()` deleted **all** matching rows.
+- An insert whose row is empty after auto-PK sentinel dropping now fails with a
+  structured `FerrumCompileError` before SQL emission instead of surfacing a raw
+  PostgreSQL syntax error (`INSERT INTO t () VALUES ()`), for both `create()` and
+  `bulk_create()`.
+- Instance write paths (`create(conn, obj)`, `bulk_create`, `bulk_update`,
+  `update_instance`) reject instances carrying deferred (`only()`/`defer()`)
+  fields — `model_dump()` bypasses the deferred-field guard and would silently
+  write class defaults for columns that were never loaded.
 ---
 
 ## [0.1.6] - 2026-07-01
