@@ -13,12 +13,12 @@ access-method-specific, and full-text — across supported drivers.
 
 ## 1. Ways to declare an index
 
-| Mechanism | When to use | Migration op |
-|-----------|-------------|--------------|
-| `Field(db_index=True)` | Single-column btree | `AddIndex` (auto name) |
-| `Field(unique=True)` | Unique constraint / unique index | Unique column + optional `AddIndex` |
-| `Meta.indexes = [Index(...)]` | Composite, partial, GIN/HNSW/etc. | `AddIndex` |
-| `Meta.full_text_indexes = [FullTextIndex(...)]` | Cross-dialect FTS | `CreateFullTextIndex` (+ catalog on MSSQL) |
+| Mechanism                                       | When to use                       | Migration op                               |
+| ----------------------------------------------- | --------------------------------- | ------------------------------------------ |
+| `Field(db_index=True)`                          | Single-column btree               | `AddIndex` (auto name)                     |
+| `Field(unique=True)`                            | Unique constraint / unique index  | Unique column + optional `AddIndex`        |
+| `Meta.indexes = [Index(...)]`                   | Composite, partial, GIN/HNSW/etc. | `AddIndex`                                 |
+| `Meta.full_text_indexes = [FullTextIndex(...)]` | Cross-dialect FTS                 | `CreateFullTextIndex` (+ catalog on MSSQL) |
 
 `compute_plan` / `makemigrations` emit index ops **after** `create_table` (and after
 new columns on alter paths).
@@ -75,13 +75,13 @@ class Post(Model):
 
 ### `Index` fields
 
-| Field | Type | Default | Notes |
-|-------|------|---------|--------|
-| `fields` | `tuple[str, ...]` | required | Model field names (allowlisted at class definition). Unknown fields raise `ValueError`. |
-| `name` | `str \| None` | auto | Auto: `idx_{table}_{field1}_{field2}_…` |
-| `unique` | `bool` | `False` | Emits `CREATE UNIQUE INDEX` |
-| `using` | `str` | `"btree"` | Must be in the access-method allowlist |
-| `where` | `str \| None` | `None` | Partial index predicate (PostgreSQL-style `WHERE`) |
+| Field    | Type              | Default   | Notes                                                                                   |
+| -------- | ----------------- | --------- | --------------------------------------------------------------------------------------- |
+| `fields` | `tuple[str, ...]` | required  | Model field names (allowlisted at class definition). Unknown fields raise `ValueError`. |
+| `name`   | `str \| None`     | auto      | Auto: `idx_{table}_{field1}_{field2}_…`                                                 |
+| `unique` | `bool`            | `False`   | Emits `CREATE UNIQUE INDEX`                                                             |
+| `using`  | `str`             | `"btree"` | Must be in the access-method allowlist                                                  |
+| `where`  | `str \| None`     | `None`    | Partial index predicate (PostgreSQL-style `WHERE`)                                      |
 
 ### Access methods
 
@@ -91,15 +91,15 @@ Allowlisted values (case-sensitive as stored):
 btree | gin | gist | hash | brin | hnsw | ivfflat
 ```
 
-| Method | Typical use |
-|--------|-------------|
-| `btree` | Equality / range / sort keys (default) |
-| `hash` | Equality-only lookups |
-| `gin` | Arrays, JSONB, `tsvector`, trigram text (`pg_trgm`) |
-| `gist` | Geometric / exclusion / some FTS patterns |
-| `brin` | Large append-only / time-series columns |
-| `hnsw` | pgvector approximate nearest neighbor |
-| `ivfflat` | pgvector IVF ANN |
+| Method    | Typical use                                         |
+| --------- | --------------------------------------------------- |
+| `btree`   | Equality / range / sort keys (default)              |
+| `hash`    | Equality-only lookups                               |
+| `gin`     | Arrays, JSONB, `tsvector`, trigram text (`pg_trgm`) |
+| `gist`    | Geometric / exclusion / some FTS patterns           |
+| `brin`    | Large append-only / time-series columns             |
+| `hnsw`    | pgvector approximate nearest neighbor               |
+| `ivfflat` | pgvector IVF ANN                                    |
 
 ---
 
@@ -156,11 +156,11 @@ class Article(Model):
         ]
 ```
 
-| Field | Purpose |
-|-------|---------|
-| `fields` | Base-table columns to index |
-| `name` | Index / virtual-table name (auto when omitted) |
-| `config` | PostgreSQL `regconfig` / language hint |
+| Field                  | Purpose                                                |
+| ---------------------- | ------------------------------------------------------ |
+| `fields`               | Base-table columns to index                            |
+| `name`                 | Index / virtual-table name (auto when omitted)         |
+| `config`               | PostgreSQL `regconfig` / language hint                 |
 | `sqlite_content_table` | SQLite FTS5 external-content source when ≠ model table |
 
 On PostgreSQL, prefer a `TSVector` column + `Index(..., using="gin")` for stored
@@ -223,7 +223,7 @@ Invalid `using` / types fail before apply with `[FERR-M001]`.
 
 ### MySQL (`ferrum-orm[mysql]`, asyncmy)
 
-- Emits `CREATE [UNIQUE] INDEX IF NOT EXISTS … ON \`table\` (cols)` — **no `USING`**
+- Emits `CREATE [UNIQUE] INDEX IF NOT EXISTS … ON \`table\` (cols)`— **no`USING`\*\*
   clause in the current emitter (access method is effectively InnoDB btree).
 - `DROP INDEX \`name\` ON \`table\``.
 - Full-text: `FullTextIndex` → `ALTER TABLE … ADD FULLTEXT INDEX …`.

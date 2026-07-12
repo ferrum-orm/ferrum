@@ -39,9 +39,9 @@ On entry the CLI:
 
 **Discovery order for settings:**
 
-1. `FERRUM_SETTINGS` env var  
-2. `[ferrum].settings` in `ferrum.toml` / `pyproject.toml`  
-3. Autodiscover `ferrum_conf.py` in the project root  
+1. `FERRUM_SETTINGS` env var
+2. `[ferrum].settings` in `ferrum.toml` / `pyproject.toml`
+3. Autodiscover `ferrum_conf.py` in the project root
 
 If (1) or (2) is set and import fails → `FerrumConfigError` `[FERR-C001]`. Missing
 autodiscovery is silent (back-compat).
@@ -61,13 +61,13 @@ empty model registry.
 
 ### Config keys (`[ferrum]`)
 
-| Key | Default | Role |
-|-----|---------|------|
-| `settings` | unset | Module imported at CLI bootstrap |
-| `migrations_dir` | `migrations` | Migration file directory |
-| `default_env` | `development` | Default `--env` for migrate-style commands |
-| `env_file` | `.env` | Dotenv path relative to project root |
-| `database_url_env` | `FERRUM_DATABASE_URL` then `DATABASE_URL` | Env var name for the DSN |
+| Key                | Default                                   | Role                                       |
+| ------------------ | ----------------------------------------- | ------------------------------------------ |
+| `settings`         | unset                                     | Module imported at CLI bootstrap           |
+| `migrations_dir`   | `migrations`                              | Migration file directory                   |
+| `default_env`      | `development`                             | Default `--env` for migrate-style commands |
+| `env_file`         | `.env`                                    | Dotenv path relative to project root       |
+| `database_url_env` | `FERRUM_DATABASE_URL` then `DATABASE_URL` | Env var name for the DSN                   |
 
 Secrets stay in `.env`, never in TOML.
 
@@ -123,11 +123,11 @@ ferrum migrate --env production --confirm
 ferrum migrate --migrations-dir ./migrations
 ```
 
-| Flag | Effect |
-|------|--------|
-| `--dry-run` | Print ops; apply nothing |
+| Flag        | Effect                                                    |
+| ----------- | --------------------------------------------------------- |
+| `--dry-run` | Print ops; apply nothing                                  |
 | `--confirm` | Required for destructive ops and for `env != development` |
-| `--env` | Environment label (default `development`) |
+| `--env`     | Environment label (default `development`)                 |
 
 Behavior:
 
@@ -142,12 +142,12 @@ sanitized messages (no passwords / row DETAIL).
 
 #### Per-driver apply notes
 
-| Dialect | Notes |
-|---------|--------|
-| **postgres** | Full op set: extensions, RLS, functions, `USING` indexes, `VECTOR`, etc. Non-transactional kinds (e.g. some extension paths) follow ADR-004 classification. |
-| **mysql** | Thin parity: btree indexes, tables, FTS `FULLTEXT`; no PG extensions/RLS. |
-| **sqlite** | File DSN; FTS5 virtual tables via FTS ops; limited alter surface. |
-| **mssql** | Thin parity: rejects `create_extension`, RLS, `alter_column`, `rename_column`, function DDL. Index create has no `IF NOT EXISTS` (ledger provides once-only). FTS needs catalog + async population lag. |
+| Dialect      | Notes                                                                                                                                                                                                   |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **postgres** | Full op set: extensions, RLS, functions, `USING` indexes, `VECTOR`, etc. Non-transactional kinds (e.g. some extension paths) follow ADR-004 classification.                                             |
+| **mysql**    | Thin parity: btree indexes, tables, FTS `FULLTEXT`; no PG extensions/RLS.                                                                                                                               |
+| **sqlite**   | File DSN; FTS5 virtual tables via FTS ops; limited alter surface.                                                                                                                                       |
+| **mssql**    | Thin parity: rejects `create_extension`, RLS, `alter_column`, `rename_column`, function DDL. Index create has no `IF NOT EXISTS` (ledger provides once-only). FTS needs catalog + async population lag. |
 
 DSN schemes: `postgresql://`, `mysql://`, `sqlite:///…`, `mssql://` / `sqlserver://`.
 
@@ -190,8 +190,8 @@ ferrum sqlmigrate 0001_create_note
 ferrum sqlmigrate 0002_add_vector --dialect mssql
 ```
 
-| Flag | Default | Values |
-|------|---------|--------|
+| Flag        | Default    | Values                                 |
+| ----------- | ---------- | -------------------------------------- |
 | `--dialect` | `postgres` | `postgres`, `mysql`, `sqlite`, `mssql` |
 
 Use this to preview how the same ops render on each backend before applying.
@@ -208,10 +208,10 @@ ferrum inspectdb -o models_generated.py
 ferrum inspectdb --schema public -o ./generated/
 ```
 
-| Flag | Default | Notes |
-|------|---------|--------|
-| `-o` / `--output` | stdout | File or directory |
-| `--schema` | `public` | Schema to scan |
+| Flag              | Default  | Notes             |
+| ----------------- | -------- | ----------------- |
+| `-o` / `--output` | stdout   | File or directory |
+| `--schema`        | `public` | Schema to scan    |
 
 **PostgreSQL only.** Other dialects print `inspectdb currently supports PostgreSQL only.`
 and exit. Introspection uses `information_schema` via `driver.fetch()` (parameterized
@@ -247,11 +247,11 @@ ferrum migrations apply plan.json --confirm --environment production
 ferrum migrations apply plan.json --token <digest-token>
 ```
 
-| Flag | Role |
-|------|------|
-| `--confirm` | Destructive + non-dev gate |
+| Flag                                 | Role                                                                                            |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `--confirm`                          | Destructive + non-dev gate                                                                      |
 | `--token` / `FERRUM_MIGRATION_TOKEN` | Plan-digest verification; supplying a token implies confirm semantics for the legacy apply path |
-| `--environment` | Target env label |
+| `--environment`                      | Target env label                                                                                |
 
 Prefer file-based `makemigrations` / `migrate` for application projects.
 
@@ -304,20 +304,20 @@ ferrum inspectdb -o models_from_db.py
 
 ## 6. Troubleshooting
 
-| Symptom | Likely cause |
-|---------|----------------|
-| `makemigrations` writes empty / no files | Models not imported — fix `ferrum_conf.py` / `FERRUM_SETTINGS` |
-| `FerrumConfigError` on migrate | Missing `FERRUM_DATABASE_URL` / driver extra / native build |
-| `inspectdb` refuses | Non-Postgres DSN — use PG or write models by hand |
-| `[FERR-M001]` on MSSQL apply | PG-only op (`create_extension`, RLS, `VECTOR`, …) in the migration |
-| Checksum `[FERR-M005]` | Applied migration file edited — revert the file or follow a deliberate repair process |
-| Dotenv not loaded | Install `ferrum-orm[dotenv]` or export vars in the shell |
+| Symptom                                  | Likely cause                                                                          |
+| ---------------------------------------- | ------------------------------------------------------------------------------------- |
+| `makemigrations` writes empty / no files | Models not imported — fix `ferrum_conf.py` / `FERRUM_SETTINGS`                        |
+| `FerrumConfigError` on migrate           | Missing `FERRUM_DATABASE_URL` / driver extra / native build                           |
+| `inspectdb` refuses                      | Non-Postgres DSN — use PG or write models by hand                                     |
+| `[FERR-M001]` on MSSQL apply             | PG-only op (`create_extension`, RLS, `VECTOR`, …) in the migration                    |
+| Checksum `[FERR-M005]`                   | Applied migration file edited — revert the file or follow a deliberate repair process |
+| Dotenv not loaded                        | Install `ferrum-orm[dotenv]` or export vars in the shell                              |
 
 ---
 
 ## 7. Related docs
 
-- [Getting Started](./getting-started.md) — config, CRUD, first migration  
-- [Indexes Guide](./indexes.md) — `AddIndex` / FTS DDL per driver  
-- [Vector Guide](./vector.md) — pgvector + CLI `sqlmigrate` previews  
-- [API Reference](./api-reference.md) — migration ops and errors  
+- [Getting Started](./getting-started.md) — config, CRUD, first migration
+- [Indexes Guide](./indexes.md) — `AddIndex` / FTS DDL per driver
+- [Vector Guide](./vector.md) — pgvector + CLI `sqlmigrate` previews
+- [API Reference](./api-reference.md) — migration ops and errors

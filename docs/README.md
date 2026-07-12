@@ -8,15 +8,15 @@ async PostgreSQL services (FastAPI / Starlette).
 
 ## Contents
 
-| Document | What it covers |
-|----------|----------------|
-| [Getting Started](./getting-started.md) | Install, define a model, connect, run CRUD, apply a migration. |
-| [Indexes Guide](./indexes.md) | Declarative indexes, GIN/HNSW, FTS indexes, and per-driver DDL. |
-| [Vector Guide](./vector.md) | pgvector fields, codecs, `nearest_to` / `vector_search`, ANN indexes. |
-| [CLI Guide](./cli.md) | `ferrum` CLI: init, migrations, inspectdb, safety gates, dialect notes. |
-| [API Reference](./api-reference.md) | The public `ferrum` package surface — `Model`, `QuerySet`, `connect`, errors, hooks, migrations. |
-| [Architecture](./architecture.md) | The Python ↔ Rust boundary, IR flow, compile/hydrate path, security model — with diagrams. |
-| [Docstring Coverage](./docstring-coverage.md) | Audit of public-symbol documentation across `python/ferrum`. |
+| Document                                      | What it covers                                                                                   |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| [Getting Started](./getting-started.md)       | Install, define a model, connect, run CRUD, apply a migration.                                   |
+| [Indexes Guide](./indexes.md)                 | Declarative indexes, GIN/HNSW, FTS indexes, and per-driver DDL.                                  |
+| [Vector Guide](./vector.md)                   | pgvector fields, codecs, `nearest_to` / `vector_search`, ANN indexes.                            |
+| [CLI Guide](./cli.md)                         | `ferrum` CLI: init, migrations, inspectdb, safety gates, dialect notes.                          |
+| [API Reference](./api-reference.md)           | The public `ferrum` package surface — `Model`, `QuerySet`, `connect`, errors, hooks, migrations. |
+| [Architecture](./architecture.md)             | The Python ↔ Rust boundary, IR flow, compile/hydrate path, security model — with diagrams.       |
+| [Docstring Coverage](./docstring-coverage.md) | Audit of public-symbol documentation across `python/ferrum`.                                     |
 
 ## Design pillars (one line each)
 

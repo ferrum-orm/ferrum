@@ -118,9 +118,9 @@ hits = (
 )
 ```
 
-| Argument | Description |
-|----------|-------------|
-| `field` | Name of a `Vector` field on the model |
+| Argument | Description                                        |
+| -------- | -------------------------------------------------- |
+| `field`  | Name of a `Vector` field on the model              |
 | `vector` | Query embedding as `list[float]` (bound parameter) |
 | `metric` | `"l2"` (default), `"cosine"`, or `"inner_product"` |
 
@@ -135,11 +135,11 @@ IR node: `vector_order_by` → compiled to `ORDER BY col <-> $n` / `<=>` / `<#>`
 
 ### Metric operators (PostgreSQL)
 
-| Metric | Operator | Typical index opclass |
-|--------|----------|------------------------|
-| `l2` | `<->` | `vector_l2_ops` |
-| `cosine` | `<=>` | `vector_cosine_ops` |
-| `inner_product` | `<#>` | `vector_ip_ops` |
+| Metric          | Operator | Typical index opclass |
+| --------------- | -------- | --------------------- |
+| `l2`            | `<->`    | `vector_l2_ops`       |
+| `cosine`        | `<=>`    | `vector_cosine_ops`   |
+| `inner_product` | `<#>`    | `vector_ip_ops`       |
 
 ---
 
@@ -165,11 +165,11 @@ rows = await vector_search(
 
 Score expressions (bound query vector as `$1`):
 
-| Metric | Score formula (higher ≈ more similar) |
-|--------|----------------------------------------|
-| `cosine` | `1 - (col <=> $1::vector)` |
-| `l2` | `1 / (1 + (col <-> $1::vector))` |
-| `inner_product` | `-(col <#> $1::vector)` |
+| Metric          | Score formula (higher ≈ more similar) |
+| --------------- | ------------------------------------- |
+| `cosine`        | `1 - (col <=> $1::vector)`            |
+| `l2`            | `1 / (1 + (col <-> $1::vector))`      |
+| `inner_product` | `-(col <#> $1::vector)`               |
 
 Identifiers come from metadata; the query vector and filters are bound parameters.
 Unknown metrics / fields → `FerrumCompileError` (`[FERR-C102]`). Non-Postgres →
@@ -219,23 +219,23 @@ See [Indexes Guide](./indexes.md) for access-method allowlists and per-driver DD
 
 ## 8. Per-driver matrix
 
-| Capability | PostgreSQL + pgvector | MySQL | SQLite | MSSQL |
-|------------|----------------------|-------|--------|-------|
-| `Vector` / `VECTOR(n)` DDL | Yes | No (not in thin parity) | No | Rejected `[FERR-M001]` |
-| `CreateExtension("vector")` | Yes | N/A | N/A | Unsupported op kind |
-| `register_vector_codecs` | Yes (asyncpg) | Raises | Raises | Raises |
-| `nearest_to` / IR KNN | Yes | Not supported | Not supported | Not supported |
-| `vector_search` | Yes | Raises | Raises | Raises |
-| HNSW / IVFFlat indexes | Yes | No | No | No |
+| Capability                  | PostgreSQL + pgvector | MySQL                   | SQLite        | MSSQL                  |
+| --------------------------- | --------------------- | ----------------------- | ------------- | ---------------------- |
+| `Vector` / `VECTOR(n)` DDL  | Yes                   | No (not in thin parity) | No            | Rejected `[FERR-M001]` |
+| `CreateExtension("vector")` | Yes                   | N/A                     | N/A           | Unsupported op kind    |
+| `register_vector_codecs`    | Yes (asyncpg)         | Raises                  | Raises        | Raises                 |
+| `nearest_to` / IR KNN       | Yes                   | Not supported           | Not supported | Not supported          |
+| `vector_search`             | Yes                   | Raises                  | Raises        | Raises                 |
+| HNSW / IVFFlat indexes      | Yes                   | No                      | No            | No                     |
 
 Install extras:
 
-| Driver | Extra | Typical DSN scheme |
-|--------|-------|--------------------|
-| PostgreSQL | `ferrum-orm[pg]` | `postgresql://…` |
-| MySQL | `ferrum-orm[mysql]` | `mysql://…` |
-| SQLite | `ferrum-orm[sqlite]` | `sqlite:///…` |
-| SQL Server | `ferrum-orm[mssql]` | `mssql://…` / `sqlserver://…` |
+| Driver     | Extra                | Typical DSN scheme            |
+| ---------- | -------------------- | ----------------------------- |
+| PostgreSQL | `ferrum-orm[pg]`     | `postgresql://…`              |
+| MySQL      | `ferrum-orm[mysql]`  | `mysql://…`                   |
+| SQLite     | `ferrum-orm[sqlite]` | `sqlite:///…`                 |
+| SQL Server | `ferrum-orm[mssql]`  | `mssql://…` / `sqlserver://…` |
 
 ---
 
