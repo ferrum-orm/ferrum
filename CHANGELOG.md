@@ -17,6 +17,16 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.9] - 2026-07-12
+
+
+### Added
+
+### Changed
+
+### Fixed
+---
+
 ## [0.1.8] - 2026-07-10
 
 

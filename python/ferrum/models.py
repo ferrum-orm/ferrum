@@ -570,6 +570,20 @@ def _is_db_default_expression(value: str) -> bool:
     return "(" in value and ")" in value
 
 
+def _normalize_db_default(value: str) -> str:
+    """Normalize a DB default token to its canonical uppercase form.
+
+    Maps well-known SQL function tokens to their uppercase canonical form
+    (``now()`` → ``NOW()``, ``gen_random_uuid()`` → ``GEN_RANDOM_UUID()``) so
+    that the default allowlist check and equality comparisons in ``compute_plan``
+    are case-insensitive.  Unknown expressions pass through unchanged.
+    """
+    upper = value.upper()
+    if upper in _DB_DEFAULT_STRINGS:
+        return upper
+    return value
+
+
 def Field(  # noqa: N802
     *,
     max_length: int | None = None,
@@ -579,6 +593,8 @@ def Field(  # noqa: N802
     unique: bool = False,
     db_index: bool = False,
     default: Any = ...,  # noqa: ANN401
+    db_default: str | None = None,
+    nullable: bool | None = None,
     primary_key: bool = False,
     uuid_generate: Literal["v4", "v7"] | None = None,
     vector_dimensions: int | None = None,
@@ -599,6 +615,16 @@ def Field(  # noqa: N802
     - Plain ``str`` literals (including ``""``): Python-side default; migrations may
       emit a matching SQL default for ``NOT NULL`` text columns.
     - Any other value: passed to Pydantic as ``default``.
+
+    ``db_default`` (explicit):
+    - Accepts a SQL default expression string directly (e.g. ``"now()"``, ``"NOW()"``).
+    - Normalized to canonical uppercase form before storage.
+    - Takes precedence over the ``default=`` string-expression path.
+
+    ``nullable``:
+    - When provided, overrides the annotation-derived nullability in
+      ``_build_metadata``.  Use to mark a ``T | None``-annotated field as
+      ``NOT NULL`` (e.g. ``Field(nullable=False)``).
     """
     ferrum_extras: dict[str, Any] = {
         "max_length": max_length,
@@ -613,16 +639,24 @@ def Field(  # noqa: N802
         "fts_source_columns": fts_source_columns,
     }
 
+    # Store explicit nullable override for _build_metadata to consume.
+    if nullable is not None:
+        ferrum_extras["nullable"] = nullable
+
     if uuid_generate == "v4":
-        ferrum_extras["db_default"] = "gen_random_uuid()"
+        ferrum_extras["db_default"] = "GEN_RANDOM_UUID()"
     elif uuid_generate == "v7":
-        ferrum_extras["db_default"] = "uuidv7()"
+        ferrum_extras["db_default"] = "UUIDV7()"
 
     if isinstance(default, str) and _is_db_default_expression(default):
-        ferrum_extras["db_default"] = default
+        ferrum_extras["db_default"] = _normalize_db_default(default)
         kwargs["default"] = None
     elif default is not ...:
         kwargs["default"] = default
+
+    # Explicit db_default= param takes highest priority over all other paths.
+    if db_default is not None:
+        ferrum_extras["db_default"] = _normalize_db_default(db_default)
 
     if max_length is not None:
         kwargs["max_length"] = max_length
@@ -712,6 +746,11 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
         if isinstance(finfo_jse, dict) and "__ferrum__" in finfo_jse:
             ferrum_extras = finfo_jse["__ferrum__"]
 
+        # Honor explicit nullable= override from Field() — wins over annotation-derived value.
+        nullable_override = ferrum_extras.get("nullable")
+        if nullable_override is not None:
+            nullable = bool(nullable_override)
+
         is_pk = bool(ferrum_extras.get("primary_key", False))
 
         # Implicit PK: first int field named "id" when no explicit PK is declared.
@@ -743,8 +782,10 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
         column_name = ferrum_extras.get("db_column") or name
 
         db_default = ferrum_extras.get("db_default")
+        if db_default is not None and isinstance(db_default, str):
+            db_default = _normalize_db_default(db_default)
         if is_pk and db_type == "uuid" and db_default is None:
-            db_default = "gen_random_uuid()"
+            db_default = "GEN_RANDOM_UUID()"
 
         python_default: Any | None = None
         if field_info.default is not ...:

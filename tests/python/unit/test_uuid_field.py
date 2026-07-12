@@ -20,7 +20,7 @@ class TestUuidPkMetadata:
         assert id_field.field_type == "uuid"
         assert id_field.pk is True
         assert id_field.sql_type == "UUID"
-        assert id_field.db_default == "gen_random_uuid()"
+        assert id_field.db_default == "GEN_RANDOM_UUID()"
 
     def test_uuid_generate_v4_sets_db_default(self) -> None:
         class UuidV4(ferrum.Model):
@@ -28,7 +28,7 @@ class TestUuidPkMetadata:
             name: str
 
         id_field = next(f for f in UuidV4.get_metadata().fields if f.name == "id")
-        assert id_field.db_default == "gen_random_uuid()"
+        assert id_field.db_default == "GEN_RANDOM_UUID()"
 
     def test_uuid_generate_v7_sets_db_default(self) -> None:
         class UuidV7(ferrum.Model):
@@ -36,7 +36,7 @@ class TestUuidPkMetadata:
             name: str
 
         id_field = next(f for f in UuidV7.get_metadata().fields if f.name == "id")
-        assert id_field.db_default == "uuidv7()"
+        assert id_field.db_default == "UUIDV7()"
 
     def test_explicit_db_default_overrides_auto_injection(self) -> None:
         class UuidExplicit(ferrum.Model):
@@ -44,7 +44,7 @@ class TestUuidPkMetadata:
             name: str
 
         id_field = next(f for f in UuidExplicit.get_metadata().fields if f.name == "id")
-        assert id_field.db_default == "gen_random_uuid()"
+        assert id_field.db_default == "GEN_RANDOM_UUID()"
 
 
 class TestUuidMigrationPlan:
@@ -56,7 +56,7 @@ class TestUuidMigrationPlan:
         plan = compute_plan([UuidPlan], existing_tables={})
         create_op = next(op for op in plan["ops"] if op["kind"] == "create_table")
         id_col = next(c for c in create_op["columns"] if c["name"] == "id")
-        assert id_col["default"] == "gen_random_uuid()"
+        assert id_col["default"] == "GEN_RANDOM_UUID()"
         assert id_col["sql_type"] == "UUID"
 
     def test_col_def_accepts_gen_random_uuid(self) -> None:

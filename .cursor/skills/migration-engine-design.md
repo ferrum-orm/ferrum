@@ -9,6 +9,30 @@
 - Designing migration generation from model/metadata diffs.
 - Implementing dry-run, apply, and confirmation gates.
 - Designing transactionality and the non-transactional exception list (ADR-004).
+- Implementing `SchemaState` and index/default autodiff for `makemigrations`.
+
+## SchemaState and autodiff
+
+`makemigrations` projects the current schema state by replaying prior migration files into a
+`SchemaState` dataclass (a dict of tables → `ColumnState` / `IndexState`). On each run it:
+
+1. Builds `SchemaState` via `_build_existing_state` (replays `create_table`, `add_column`,
+   `drop_table`, `drop_column`, `add_index`, `drop_index`, `alter_column` ops).
+2. Passes the `SchemaState` to `compute_plan`; for **existing** tables the plan calls
+   `_autodiff_existing_table` which compares model metadata against `SchemaState` to emit:
+   - `AddIndex` when `db_index=True` or `Meta.indexes` is new.
+   - `DropIndex` when an existing index is no longer declared.
+   - `AlterColumn(…, default=…)` / `AlterColumn(…, not_null=…)` for `db_default` / `nullable`
+     changes. `SET NOT NULL` is classified as destructive and requires `--confirm`.
+3. Backward compat: if callers pass the old `dict[str, list[str]]` format as `existing_tables`,
+   `compute_plan` wraps it in a `SchemaState` but sets `has_rich_state=False`, which skips
+   index/default autodiff and preserves previous behaviour.
+
+### DB-default token normalisation
+
+All `db_default` values flowing through `Field()`, `_build_metadata`, or `_build_existing_state`
+are upper-cased via `_normalize_db_default` so comparisons in `_autodiff_existing_table` are
+case-insensitive (e.g. `now()` stored in a migration file equals `NOW()` in model metadata).
 
 ## Expert behaviors
 

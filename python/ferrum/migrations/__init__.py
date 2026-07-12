@@ -36,9 +36,18 @@ from ferrum.migrations.operations import (
     DropPolicy,
     EnableRLS,
 )
-from ferrum.migrations.orchestrator import MigrationResult, _op_to_sql, apply, compute_plan
+from ferrum.migrations.orchestrator import (
+    ColumnState,
+    IndexState,
+    MigrationResult,
+    SchemaState,
+    _op_to_sql,
+    apply,
+    compute_plan,
+)
 
 __all__ = [
+    "ColumnState",
     "CreateExtension",
     "CreateFullTextCatalog",
     "CreateFullTextIndex",
@@ -50,8 +59,10 @@ __all__ = [
     "DropFunction",
     "DropPolicy",
     "EnableRLS",
+    "IndexState",
     "Migration",
     "MigrationResult",
+    "SchemaState",
     "_op_to_sql",
     "apply",
     "compute_plan",

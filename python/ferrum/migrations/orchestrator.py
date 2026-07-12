@@ -20,6 +20,7 @@ Security invariants:
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import hashlib
 import json
@@ -34,6 +35,43 @@ from ferrum.migrations.tokens import verify_token
 if TYPE_CHECKING:
     from ferrum.connection import Connection
     from ferrum.models import FieldMeta, Model, ModelMetadata
+
+
+# ---------------------------------------------------------------------------
+# Schema state dataclasses — projected migration state used by makemigrations
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class ColumnState:
+    """Projected state of a single table column after replaying migration ops."""
+
+    sql_type: str
+    not_null: bool = False
+    default: str | None = None
+
+
+@dataclasses.dataclass
+class IndexState:
+    """Projected state of a single index after replaying migration ops."""
+
+    table: str
+    columns: list[str] = dataclasses.field(default_factory=list)
+    unique: bool = False
+    using: str = "btree"
+    where: str | None = None
+
+
+@dataclasses.dataclass
+class SchemaState:
+    """Full projected schema state derived by replaying prior migration files.
+
+    ``tables`` maps table name → column name → ``ColumnState``.
+    ``indexes`` maps index name → ``IndexState``.
+    """
+
+    tables: dict[str, dict[str, ColumnState]] = dataclasses.field(default_factory=dict)
+    indexes: dict[str, IndexState] = dataclasses.field(default_factory=dict)
 
 
 class OperationClass(Enum):
@@ -744,28 +782,139 @@ def _field_to_col_def(field_meta: FieldMeta, *, is_pk: bool) -> dict[str, Any]:
     }
 
 
+def _autodiff_existing_table(
+    ops: list[dict[str, Any]],
+    metadata: ModelMetadata,
+    table: str,
+    existing_col_names: set[str],
+    existing_col_attrs: dict[str, ColumnState],
+    existing_indexes: dict[str, IndexState],
+) -> None:
+    """Emit index and column-attribute diff ops for an existing table.
+
+    Called from ``compute_plan`` only when a rich ``SchemaState`` is available.
+    Appends ``add_index``, ``drop_index``, and ``alter_column`` ops to *ops*.
+
+    Security: all identifiers come from model metadata allowlists or
+    ``SchemaState`` that was itself built from prior migration ops — never user
+    input.  Default values are checked against ``_DEFAULT_VALUE_ALLOWLIST`` by
+    ``_op_to_sql`` when the plan is applied.
+
+    Out of scope: sql_type changes, renames, drops (unchanged v0.1 rule).
+    ``SET NOT NULL`` is emitted but classified destructive by ``AlterColumn``.
+    """
+    # Build the set of desired indexes for this table.
+    # Key: index name → op dict for add_index.
+    desired_indexes: dict[str, dict[str, Any]] = {}
+
+    # db_index=True fields on *existing* columns (new columns are handled above).
+    for f in metadata.fields:
+        if f.column_name in existing_col_names and f.db_index:
+            idx_name = f"idx_{table}_{f.name}"
+            desired_indexes[idx_name] = {
+                "kind": "add_index",
+                "table": table,
+                "name": idx_name,
+                "columns": [f.column_name],
+                "unique": False,
+                "using": "btree",
+            }
+
+    # Meta.indexes entries.
+    for index in metadata.indexes:
+        # Only consider indexes whose columns all exist already.
+        column_names = [
+            next((f.column_name for f in metadata.fields if f.name == fn), fn)
+            for fn in index.fields
+        ]
+        idx_op: dict[str, Any] = {
+            "kind": "add_index",
+            "table": table,
+            "name": index.name,
+            "columns": column_names,
+            "unique": index.unique,
+            "using": index.using,
+        }
+        if index.where is not None:
+            idx_op["where"] = index.where
+        opclasses = _resolve_gin_opclasses(metadata, index.fields, using=index.using)
+        if opclasses is not None:
+            idx_op["opclasses"] = opclasses
+        desired_indexes[index.name] = idx_op
+
+    # Emit add_index for desired indexes not yet in state.
+    for idx_name, idx_op in desired_indexes.items():
+        if idx_name not in existing_indexes:
+            ops.append(idx_op)
+
+    # Emit drop_index for Ferrum-tracked indexes that are no longer desired.
+    for idx_name, idx_state in existing_indexes.items():
+        if idx_state.table == table and idx_name not in desired_indexes:
+            ops.append({"kind": "drop_index", "name": idx_name, "table": table})
+
+    # Column default / nullability autodiff.
+    for f in metadata.fields:
+        if f.column_name not in existing_col_attrs:
+            continue  # New column — already emitted as add_column above.
+        col_state = existing_col_attrs[f.column_name]
+
+        desired_not_null = not f.nullable
+        desired_default = f.db_default  # already normalized in FieldMeta
+
+        # Compare case-insensitively to handle legacy lowercase defaults in state.
+        state_default_upper = col_state.default.upper() if col_state.default else None
+        desired_default_upper = desired_default.upper() if desired_default else None
+
+        alter_kwargs: dict[str, Any] = {}
+
+        if desired_not_null != col_state.not_null:
+            alter_kwargs["not_null"] = desired_not_null
+
+        if desired_default_upper != state_default_upper:
+            if desired_default is not None:
+                alter_kwargs["default"] = desired_default
+            elif col_state.default is not None:
+                alter_kwargs["drop_default"] = True
+
+        if alter_kwargs:
+            ops.append(
+                {
+                    "kind": "alter_column",
+                    "table": table,
+                    "column": f.column_name,
+                    **alter_kwargs,
+                }
+            )
+
+
 def compute_plan(
     model_classes: list[type[Model]] | None = None,
-    existing_tables: dict[str, list[str]] | None = None,
+    existing_tables: dict[str, list[str]] | SchemaState | None = None,
     *,
     conn: Connection | None = None,
     models: list[type[Model]] | None = None,
 ) -> dict[str, Any]:
     """Compute a migration plan from model classes against the current DB schema.
 
-    Compares ``model_classes`` against ``existing_tables`` (table → column names)
-    and emits ``create_table`` ops for absent tables and ``add_column`` ops for
-    columns present in the model but absent from the DB.
+    Compares ``model_classes`` against ``existing_tables`` and emits:
+    - ``create_table`` ops for absent tables (with ``add_index`` for ``db_index`` fields
+      and ``Meta.indexes`` entries).
+    - ``add_column`` ops for columns present in the model but absent from the DB.
+    - When ``existing_tables`` is a :class:`SchemaState` (returned by
+      ``_build_existing_state``): also emits ``add_index`` / ``drop_index`` for
+      index changes on existing columns, and ``alter_column`` for default /
+      nullability changes.
 
-    This is a v0.1 additive-only schema diff.  Column type changes, renames,
-    and drops are out of scope and will be addressed in a future release.
+    This is a v0.1 additive schema diff.  Column type changes, renames, and
+    drops are out of scope.
 
     Args:
         model_classes: Ferrum ``Model`` subclasses to inspect.  Their
             ``ModelMetadata`` (built at class-definition time) is the sole source
             of table/column names; no user input reaches SQL identifiers.
-        existing_tables: Mapping of table name → list of existing column names,
-            as returned by DB introspection.  Pass ``{}`` for a fresh database.
+        existing_tables: Either a ``dict[str, list[str]]`` (table → column names,
+            legacy/backward-compat), a :class:`SchemaState` (richer projected
+            state from ``_build_existing_state``), or ``None`` for a fresh database.
         conn: Reserved for a future DB-introspection path.  ``None`` means use
             the supplied/static ``existing_tables`` mapping.
         models: Keyword alias for ``model_classes`` used by CLI/tests.
@@ -781,8 +930,28 @@ def compute_plan(
         model_classes = models
     if model_classes is None:
         raise TypeError("compute_plan() requires model_classes or models.")
+
+    # Normalize existing_tables to SchemaState for uniform handling.
+    # When the caller passes a legacy dict[str, list[str]], we build a SchemaState
+    # with column-name-only entries (no default/not_null/index info) and suppress
+    # the index/default autodiff so existing callers are unaffected.
+    has_rich_state: bool
+    schema_state: SchemaState
     if existing_tables is None:
-        existing_tables = {}
+        schema_state = SchemaState()
+        has_rich_state = True
+    elif isinstance(existing_tables, SchemaState):
+        schema_state = existing_tables
+        has_rich_state = True
+    else:
+        # Legacy dict[str, list[str]] — columns only, no index/default state.
+        schema_state = SchemaState(
+            tables={
+                tbl: {col: ColumnState(sql_type="") for col in cols}
+                for tbl, cols in existing_tables.items()
+            }
+        )
+        has_rich_state = False
 
     ops: list[dict[str, Any]] = []
     timestamp = datetime.datetime.now(tz=datetime.UTC).strftime("%Y%m%d_%H%M%S")
@@ -800,7 +969,7 @@ def compute_plan(
         metadata = cls.get_metadata()
         table = metadata.table_name
 
-        if table not in existing_tables:
+        if table not in schema_state.tables:
             # Detect composite PK: more than one field has pk=True.
             pk_fields_list = [f for f in metadata.fields if f.pk]
             is_composite_pk = len(pk_fields_list) > 1
@@ -892,7 +1061,7 @@ def compute_plan(
                     owner_col = f"{table}_id"
                     target_col = f"{target_table}_id"
 
-                    if through not in existing_tables:
+                    if through not in schema_state.tables:
                         ops.append(
                             {
                                 "kind": "create_table",
@@ -940,9 +1109,13 @@ def compute_plan(
                             }
                         )
         else:
-            existing_cols = set(existing_tables[table])
+            # Table already exists — add new columns and (when rich state is
+            # available) diff indexes and column default/nullability.
+            existing_col_attrs = schema_state.tables.get(table, {})
+            existing_col_names: set[str] = set(existing_col_attrs.keys())
+
             for f in metadata.fields:
-                if f.column_name not in existing_cols:
+                if f.column_name not in existing_col_names:
                     col_def = _field_to_col_def(f, is_pk=False)
                     ops.append(
                         {
@@ -963,6 +1136,16 @@ def compute_plan(
                                 "using": "btree",
                             }
                         )
+
+            if has_rich_state:
+                _autodiff_existing_table(
+                    ops,
+                    metadata,
+                    table,
+                    existing_col_names,
+                    existing_col_attrs,
+                    schema_state.indexes,
+                )
 
     return {
         "version": 1,

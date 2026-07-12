@@ -96,6 +96,49 @@ class User(Model):
 
 No duplicate schema definitions.
 
+### Field Options
+
+`ferrum.Field()` accepts column-level constraints that are carried through to DDL:
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `db_default` | `str \| None` | DB-side `DEFAULT` expression (e.g. `"NOW()"`, `"''"`, `"GEN_RANDOM_UUID()"`). Token casing is normalised (`now()` → `NOW()`). |
+| `nullable` | `bool \| None` | Override annotation-derived nullability. Use `nullable=False` to force `NOT NULL` even on a `T \| None`-annotated field. |
+| `db_index` | `bool` | Emit a `CREATE INDEX` on this column (auto-named `idx_{table}_{field}`). |
+| `unique` | `bool` | Emit a `UNIQUE` constraint. |
+| `db_column` | `str \| None` | Override the database column name. |
+| `primary_key` | `bool` | Declare this field as the primary key. |
+| `uuid_generate` | `"v4" \| "v7" \| None` | Set `GEN_RANDOM_UUID()` / `UUIDV7()` as the DB default for UUID PK columns. |
+| `max_length` | `int \| None` | Emit `VARCHAR(n)` instead of `TEXT`. |
+| `max_digits` / `decimal_places` | `int \| None` | Emit `NUMERIC(p,s)`. |
+| `vector_dimensions` | `int \| None` | Required for `Vector` columns; emits `VECTOR(n)`. |
+
+```python
+from datetime import datetime
+from typing import Annotated
+from ferrum import Model, Field
+
+class Event(Model):
+    id: int
+    # DB-side timestamp default; Python annotation allows None but column is NOT NULL
+    created_at: Annotated[datetime | None, Field(db_default="now()", nullable=False)]
+    # Indexed text column
+    kind: Annotated[str, Field(db_index=True, max_length=64)]
+```
+
+`makemigrations` honours these field attributes:
+- `db_default` / `nullable` are written into `CREATE TABLE` and `ADD COLUMN` DDL.
+- `db_index=True` emits `CREATE INDEX` after the table op.
+- For **already-existing tables**, `makemigrations` now **autodiffs** index and column
+  attribute changes against the state projected from prior migration files:
+  - Adding `db_index=True` to an existing field → `AddIndex` op.
+  - Removing `db_index=True` → `DropIndex` op.
+  - Adding or changing `db_default` → `AlterColumn … SET DEFAULT …` op.
+  - Removing `db_default` → `AlterColumn … DROP DEFAULT` op.
+  - Changing nullability → `AlterColumn … SET / DROP NOT NULL` op (SET NOT NULL is
+    classified destructive and requires `--confirm`).
+  - Column type changes, renames, and drops remain manual (out of scope for v0.1).
+
 ### Django-Inspired API
 
 Familiar query interface.
@@ -237,6 +280,8 @@ and [API Reference](docs/api-reference.md) for per-dialect DDL and operator mapp
 - [x] `call_function` for allowlisted stored-procedure calls
 - [x] Migration ops for extensions, RLS policies, and function DDL
 - [x] pgvector similarity score projection (`vector_search` helper)
+- [x] `Field(db_default=..., nullable=...)` — first-class DB-side defaults and nullability override
+- [x] `makemigrations` autodiff for index / default / nullability changes on existing tables
 - [ ] Query optimization (deferred fields, prefetch tuning)
 - [ ] Advanced relationship loading
 
