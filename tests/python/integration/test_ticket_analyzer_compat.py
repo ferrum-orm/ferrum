@@ -418,7 +418,5 @@ async def test_alert_uuid_array_and_jsonb_round_trip(
         )
     fetched = await Alert.objects.filter(id=alert_id).get(pg_conn)
     assert list(fetched.ticket_ids) == [tid]
-    delivery = fetched.slack_delivery
-    if isinstance(delivery, str):
-        delivery = json.loads(delivery)
-    assert delivery == payload
+    assert fetched.slack_delivery == payload
+    assert isinstance(fetched.slack_delivery, dict)

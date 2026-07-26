@@ -3,12 +3,48 @@
 from __future__ import annotations
 
 import contextlib
+import json
 from collections.abc import AsyncGenerator
 from typing import Any
 
 from ferrum.drivers.protocol import ChunkStreamProtocol, CompiledQuery
 from ferrum.drivers.streaming import AsyncpgChunkStream
 from ferrum.errors import FerrumConfigError, FerrumConnectionError, map_db_error
+
+
+def _encode_json_param(value: Any) -> str:
+    """Encode a Python value for asyncpg ``json`` / ``jsonb`` text codecs.
+
+    Ferrum's bind path already ``json.dumps`` JSON fields to text before the
+    driver (with SQL ``::jsonb`` casts). Accept pre-serialized strings so a
+    codec encoder never double-encodes those binds if a future path sends the
+    parameter as a native json/jsonb OID.
+    """
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, default=str, separators=(",", ":"))
+
+
+def _decode_json_param(value: str) -> Any:
+    """Decode asyncpg ``json`` / ``jsonb`` text into native Python objects."""
+    return json.loads(value)
+
+
+async def _register_json_codecs(conn: Any) -> None:
+    """Make JSONB/JSON columns hydrate as ``dict`` / ``list``, not ``str``.
+
+    asyncpg's default is to return ``json``/``jsonb`` as text. Without this,
+    ``model_construct`` leaves JSON fields as strings and Pydantic consumers
+    that expect ``dict`` fail at the agent/MCP boundary.
+    """
+    for type_name in ("jsonb", "json"):
+        await conn.set_type_codec(
+            type_name,
+            schema="pg_catalog",
+            encoder=_encode_json_param,
+            decoder=_decode_json_param,
+            format="text",
+        )
 
 
 class _BoundConnection:
@@ -139,13 +175,15 @@ class AsyncpgDriver:
         }
         if self._max_lifetime is not None:
             pool_kwargs["max_inactive_connection_lifetime"] = self._max_lifetime
-        if self._statement_timeout_ms is not None:
-            timeout_ms = self._statement_timeout_ms
 
-            async def _init_conn(conn: Any) -> None:
-                await conn.execute(f"SET statement_timeout = {timeout_ms}")
+        statement_timeout_ms = self._statement_timeout_ms
 
-            pool_kwargs["init"] = _init_conn
+        async def _init_conn(conn: Any) -> None:
+            await _register_json_codecs(conn)
+            if statement_timeout_ms is not None:
+                await conn.execute(f"SET statement_timeout = {statement_timeout_ms}")
+
+        pool_kwargs["init"] = _init_conn
         try:
             self._pool = await asyncpg.create_pool(self._dsn, **pool_kwargs)
         except Exception as exc:
