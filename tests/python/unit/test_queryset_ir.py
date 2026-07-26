@@ -177,6 +177,40 @@ class TestBuildIrStructure:
 
 
 class TestBuildIrFilters:
+    def test_json_contains_filter_encodes_valid_json_text(self) -> None:
+        ir = QuerySet(JsonArticle).filter(payload__contains={"ok": False})._build_ir()
+        flt = ir["predicate"]["filter"]
+        assert flt["operator"] == "contains"
+        assert flt["value"] == {"type": "text", "value": '{"ok":false}'}
+
+    def test_json_key_filters_keep_key_bind_types(self) -> None:
+        has_key = QuerySet(JsonArticle).filter(payload__has_key="ok")._build_ir()
+        has_any = QuerySet(JsonArticle).filter(payload__has_any_keys=["ok", "state"])._build_ir()
+        assert has_key["predicate"]["filter"]["value"] == {
+            "type": "text",
+            "value": "ok",
+        }
+        assert has_any["predicate"]["filter"]["value"] == {
+            "type": "text_array",
+            "value": ["ok", "state"],
+        }
+
+    def test_postgres_json_operators_compile_with_native_types(self) -> None:
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        contains_sql = (
+            QuerySet(JsonArticle).filter(payload__contains={"ok": False})._compile()["sql_text"]
+        )
+        has_key_sql = QuerySet(JsonArticle).filter(payload__has_key="ok")._compile()["sql_text"]
+        has_any_sql = (
+            QuerySet(JsonArticle)
+            .filter(payload__has_any_keys=["ok", "state"])
+            ._compile()["sql_text"]
+        )
+
+        assert '"payload" @> $1::jsonb' in contains_sql
+        assert '"payload" ? $1' in has_key_sql
+        assert '"payload" ?| $1' in has_any_sql
+
     def test_single_eq_filter(self) -> None:
         qs = QuerySet(Article).filter(title="hello")
         ir = qs._build_ir()

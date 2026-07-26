@@ -43,7 +43,7 @@ from ferrum.expressions import Q, args_to_q
 
 if TYPE_CHECKING:
     from ferrum.connection import Connection, Transaction
-    from ferrum.models import Model, ModelMetadata
+    from ferrum.models import FieldMeta, Model, ModelMetadata
 
     # Terminals accept an open Connection or an active Transaction interchangeably:
     # both expose the ``dialect`` / ``_require_driver()`` surface the terminals use.
@@ -225,6 +225,17 @@ def _encode_field_bind_value(field: Any, value: object) -> dict[str, object]:  #
     return _encode_bind_value(_prepare_field_value(field, value))
 
 
+def _encode_filter_bind_value(
+    field: FieldMeta,
+    operator: str,
+    value: object,
+) -> dict[str, object]:
+    """Encode a lookup value according to its field and operator."""
+    if field.field_type == "json" and operator not in {"has_key", "has_any_keys"}:
+        return _encode_field_bind_value(field, value)
+    return _encode_bind_value(value)
+
+
 def _decode_bound_param(param: str | dict[str, Any]) -> object:
     """Decode one compiled BindValue to a Python value for the driver.
 
@@ -337,6 +348,24 @@ def _parse_lookup(lookup: str) -> tuple[str, str]:
     return lookup, "eq"
 
 
+def _normalize_null_lookup(operator: str, value: object) -> tuple[str, object]:
+    """Map Django-style ``__is_null=True/False`` onto ``is_null`` / ``is_not_null``.
+
+    The SQL emitter treats ``is_null`` / ``is_not_null`` as nullary operators and
+    ignores the bound value. Without this rewrite, ``field__is_null=False`` would
+    still emit ``IS NULL``.
+    """
+    if operator == "is_null":
+        if value is False:
+            return "is_not_null", None
+        return "is_null", None
+    if operator == "is_not_null":
+        if value is False:
+            return "is_null", None
+        return "is_not_null", None
+    return operator, value
+
+
 def _fk_oto_relations(metadata: ModelMetadata) -> dict[str, Any]:
     """Return ``{relation_name: RelationMeta}`` for forward FK / OneToOne only."""
     return {r.field_name: r for r in metadata.relations if r.kind in ("fk", "one_to_one")}
@@ -444,12 +473,16 @@ def _filter_dict_to_ir(
 ) -> dict[str, Any]:
     """Convert one normalized filter dict to a compiler-ready IR leaf."""
     field_name: str = flt["field"]
-    operator: str = flt["operator"]
+    operator, value = _normalize_null_lookup(flt["operator"], flt["value"])
     _validate_lookup(field_name, operator, metadata, field_index=field_index)
     return {
         "field": {"index": field_index[field_name], "name": field_name},
         "operator": operator,
-        "value": _encode_bind_value(flt["value"]),
+        "value": _encode_filter_bind_value(
+            metadata.fields[field_index[field_name]],
+            operator,
+            value,
+        ),
     }
 
 
@@ -466,13 +499,20 @@ def _kwargs_to_ir_filters(
     leaves: list[dict[str, Any]] = []
     filter_joins: dict[str, set[str]] = {}
     for lookup, value in kwargs.items():
-        field_name, operator, join_alias, target_index, _target_meta = _resolve_lookup(
+        field_name, operator, join_alias, target_index, target_meta = _resolve_lookup(
             lookup, metadata, field_index
         )
+        # Validate against the caller's operator (``is_null``), then rewrite
+        # ``is_null=False`` → ``is_not_null`` for the SQL emitter.
+        operator, value = _normalize_null_lookup(operator, value)
         filt: dict[str, Any] = {
             "field": {"index": target_index[field_name], "name": field_name},
             "operator": operator,
-            "value": _encode_bind_value(value),
+            "value": _encode_filter_bind_value(
+                target_meta.fields[target_index[field_name]],
+                operator,
+                value,
+            ),
         }
         if join_alias is not None:
             filt["join_alias"] = join_alias

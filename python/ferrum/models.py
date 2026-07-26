@@ -97,8 +97,8 @@ _SUPPORTED_TYPES[TSVector] = "tsvector"
 # Operator allowlists per Ferrum field type (QUERY_ENGINE.md §4.2)
 # ---------------------------------------------------------------------------
 _ALLOWED_OPERATORS: dict[str, tuple[str, ...]] = {
-    "int": ("eq", "gt", "gte", "lt", "lte", "in", "is_null", "ne", "range"),
-    "big_int": ("eq", "gt", "gte", "lt", "lte", "in", "is_null", "ne", "range"),
+    "int": ("eq", "gt", "gte", "lt", "lte", "in", "is_null", "is_not_null", "ne", "range"),
+    "big_int": ("eq", "gt", "gte", "lt", "lte", "in", "is_null", "is_not_null", "ne", "range"),
     "text": (
         "eq",
         "iexact",
@@ -110,27 +110,35 @@ _ALLOWED_OPERATORS: dict[str, tuple[str, ...]] = {
         "iendswith",
         "in",
         "is_null",
+        "is_not_null",
         "ne",
     ),
-    "bool": ("eq", "is_null", "ne"),
-    "float": ("eq", "gt", "gte", "lt", "lte", "in", "is_null", "ne", "range"),
-    "decimal": ("eq", "gt", "gte", "lt", "lte", "in", "is_null", "ne", "range"),
-    "datetime": ("eq", "gt", "gte", "lt", "lte", "is_null", "ne", "range"),
-    "date": ("eq", "gt", "gte", "lt", "lte", "is_null", "ne", "range"),
-    "time": ("eq", "gt", "gte", "lt", "lte", "is_null", "ne", "range"),
-    "uuid": ("eq", "in", "is_null", "ne"),
-    "bytes": ("eq", "in", "is_null", "ne"),
+    "bool": ("eq", "is_null", "is_not_null", "ne"),
+    "float": ("eq", "gt", "gte", "lt", "lte", "in", "is_null", "is_not_null", "ne", "range"),
+    "decimal": ("eq", "gt", "gte", "lt", "lte", "in", "is_null", "is_not_null", "ne", "range"),
+    "datetime": ("eq", "gt", "gte", "lt", "lte", "is_null", "is_not_null", "ne", "range"),
+    "date": ("eq", "gt", "gte", "lt", "lte", "is_null", "is_not_null", "ne", "range"),
+    "time": ("eq", "gt", "gte", "lt", "lte", "is_null", "is_not_null", "ne", "range"),
+    "uuid": ("eq", "in", "is_null", "is_not_null", "ne"),
+    "bytes": ("eq", "in", "is_null", "is_not_null", "ne"),
     # JSONB: containment + key existence operators (PostgreSQL @>, ?, ?|)
-    "json": ("eq", "is_null", "contains", "has_key", "has_any_keys"),
-    "vector": ("is_null",),
-    "tsvector": ("match", "match_phrase", "match_websearch", "match_boolean", "is_null"),
+    "json": ("eq", "is_null", "is_not_null", "contains", "has_key", "has_any_keys"),
+    "vector": ("is_null", "is_not_null"),
+    "tsvector": (
+        "match",
+        "match_phrase",
+        "match_websearch",
+        "match_boolean",
+        "is_null",
+        "is_not_null",
+    ),
     # PostgreSQL array types — array containment and overlap operators
-    "array_text": ("eq", "is_null", "contains", "contained_by", "overlap"),
-    "array_int": ("eq", "is_null", "contains", "contained_by", "overlap"),
-    "array_uuid": ("eq", "is_null", "contains", "contained_by", "overlap"),
-    "array_float": ("eq", "is_null", "contains", "contained_by", "overlap"),
+    "array_text": ("eq", "is_null", "is_not_null", "contains", "contained_by", "overlap"),
+    "array_int": ("eq", "is_null", "is_not_null", "contains", "contained_by", "overlap"),
+    "array_uuid": ("eq", "is_null", "is_not_null", "contains", "contained_by", "overlap"),
+    "array_float": ("eq", "is_null", "is_not_null", "contains", "contained_by", "overlap"),
     # Enum (TEXT + CHECK constraint) — equality and membership operators
-    "enum": ("eq", "is_null", "ne", "in"),
+    "enum": ("eq", "is_null", "is_not_null", "ne", "in"),
 }
 
 # Allowlist for ON DELETE actions in FK constraints (SQL injection guard).
@@ -907,7 +915,9 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                 column_name=column_name,
                 python_type_name=python_type_name,
                 field_type=db_type,
-                allowed_operators=_ALLOWED_OPERATORS.get(db_type, ("eq", "is_null", "ne")),
+                allowed_operators=_ALLOWED_OPERATORS.get(
+                    db_type, ("eq", "is_null", "is_not_null", "ne")
+                ),
                 nullable=nullable,
                 pk=is_pk,
                 max_length=ferrum_extras.get("max_length"),

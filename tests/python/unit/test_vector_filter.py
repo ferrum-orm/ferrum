@@ -51,6 +51,33 @@ class TestNearestToIr:
             Doc.objects.nearest_to("missing", [1.0])
 
 
+class TestIsNullLookup:
+    def test_is_null_true_emits_is_null(self) -> None:
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        qs = Doc.objects.filter(embedding__is_null=True)
+        ir = json.loads(qs.to_ir_json())
+        assert ir["predicate"]["filter"]["operator"] == "is_null"
+        assert "IS NULL" in qs._compile()["sql_text"]
+        assert "IS NOT NULL" not in qs._compile()["sql_text"]
+
+    def test_is_null_false_emits_is_not_null(self) -> None:
+        """``__is_null=False`` must become ``IS NOT NULL``, not ``IS NULL``."""
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        qs = Doc.objects.filter(embedding__is_null=False)
+        ir = json.loads(qs.to_ir_json())
+        assert ir["predicate"]["filter"]["operator"] == "is_not_null"
+        sql = qs._compile()["sql_text"]
+        assert "IS NOT NULL" in sql
+        # Bare ``IS NULL`` must not appear (IS NOT NULL contains the substring).
+        assert " IS NULL" not in sql.replace("IS NOT NULL", "")
+
+    def test_explicit_is_not_null(self) -> None:
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        qs = Doc.objects.filter(embedding__is_not_null=True)
+        assert json.loads(qs.to_ir_json())["predicate"]["filter"]["operator"] == "is_not_null"
+        assert "IS NOT NULL" in qs._compile()["sql_text"]
+
+
 class TestTsvectorFilterIr:
     def test_match_operator_in_ir(self) -> None:
         qs: QuerySet[Doc] = Doc.objects.filter(search_vector__match="python orm")

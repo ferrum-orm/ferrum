@@ -17,6 +17,7 @@ class RelTeam(ferrum.Model):
     id: int = 0
     slug: str = ""
     name: str = ""
+    metadata_: dict = ferrum.Field(default_factory=dict, db_column="metadata")
 
 
 class RelTicket(ferrum.Model):
@@ -80,6 +81,12 @@ class TestRelationFilterIr:
         assert filt["field"]["name"] == "name"
         assert filt["operator"] == "icontains"
 
+    def test_relation_json_lookup_carries_remote_field_type(self) -> None:
+        ir = RelTicket.objects.filter(team__metadata___has_key="region")._build_ir()
+        remote_field = ir["joins"][0]["remote_fields"][0]
+        assert remote_field["name"] == "metadata_"
+        assert remote_field["field_type"] == "json"
+
     def test_q_or_relation_lookups(self) -> None:
         qs = RelTicket.objects.filter(Q(team__slug="dice") | Q(team__id=1))
         ir = qs._build_ir()
@@ -116,6 +123,24 @@ class TestRelationFilterIr:
 
 
 class TestRelationFilterCompile:
+    def test_compiles_relation_json_operators(self) -> None:
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        payload = {"unsafe": "'; DROP TABLE teams; --"}
+        contains_sql = RelTicket.objects.filter(team__metadata___contains=payload)._compile()[
+            "sql_text"
+        ]
+        has_key_sql = RelTicket.objects.filter(team__metadata___has_key="region")._compile()[
+            "sql_text"
+        ]
+        has_any_sql = RelTicket.objects.filter(
+            team__metadata___has_any_keys=["region", "tier"]
+        )._compile()["sql_text"]
+
+        assert '"team"."metadata" @> $1::jsonb' in contains_sql
+        assert '"team"."metadata" ? $1' in has_key_sql
+        assert '"team"."metadata" ?| $1' in has_any_sql
+        assert "DROP TABLE" not in contains_sql
+
     def test_compiles_inner_join_and_qualified_where(self) -> None:
         pytest.importorskip("ferrum._native", reason="Rust extension not built")
         qs = RelTicket.objects.filter(team__slug="dice").limit(5)

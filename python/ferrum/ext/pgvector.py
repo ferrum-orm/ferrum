@@ -31,7 +31,19 @@ _METRIC_OPS: dict[str, tuple[str, str]] = {
 _VALID_METRICS: frozenset[str] = frozenset(_METRIC_OPS)
 
 
-def _encode_vector(value: list[float]) -> str:
+def _encode_vector(value: list[float] | str) -> str:
+    """Encode a float list as a pgvector text literal.
+
+    Idempotent for an already-encoded ``"[f,f,...]"`` string. Ferrum's
+    ``nearest_to()`` / ``vector_search()`` bind a text literal plus
+    ``$N::vector``; when this codec is registered, asyncpg still runs the
+    encoder on that string — re-iterating characters would produce garbage
+    like ``"[[,-,0,.,1,...]]"`` and Postgres raises
+    ``InvalidTextRepresentationError``.
+    """
+    if isinstance(value, str):
+        # Already a pgvector text literal (or opaque text the server will cast).
+        return value
     return "[" + ",".join(str(v) for v in value) + "]"
 
 

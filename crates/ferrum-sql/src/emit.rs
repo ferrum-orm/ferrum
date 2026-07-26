@@ -976,7 +976,7 @@ fn resolve_filter_column(
     joins: &[JoinSpec],
     table: &str,
     qualify_columns: bool,
-) -> Result<String, CompileError> {
+) -> Result<(String, ferrum_core::ir::metadata::FieldType), CompileError> {
     if let Some(alias) = &filter.join_alias {
         let join =
             joins
@@ -995,13 +995,17 @@ fn resolve_filter_column(
             })?;
         let alias_q = dialect.quote_ident(&join.alias);
         let col_q = dialect.quote_ident(&remote.column);
-        Ok(format!("{alias_q}.{col_q}"))
+        Ok((
+            format!("{alias_q}.{col_q}"),
+            remote
+                .field_type
+                .unwrap_or(ferrum_core::ir::metadata::FieldType::Text),
+        ))
     } else {
-        Ok(qualify_base_column(
-            dialect,
-            table,
-            &metadata.fields[filter.field.index].column_name,
-            qualify_columns,
+        let field = &metadata.fields[filter.field.index];
+        Ok((
+            qualify_base_column(dialect, table, &field.column_name, qualify_columns),
+            field.field_type,
         ))
     }
 }
@@ -1018,12 +1022,15 @@ fn build_where_sql(
     let mut parts: Vec<String> = Vec::new();
 
     for filter in &ir.filters {
-        let col =
+        let (col, field_type) =
             resolve_filter_column(dialect, metadata, filter, &ir.joins, table, qualify_columns)?;
         let (clause, param) = filter_clause(
             dialect,
-            metadata,
-            filter.field.index,
+            FilterFieldContext {
+                metadata,
+                index: filter.field.index,
+                field_type,
+            },
             &col,
             &filter.operator,
             bound_params.len() + 1,
@@ -1125,12 +1132,15 @@ fn emit_predicate(
             )?
         )),
         Predicate::Filter { filter } => {
-            let col =
+            let (col, field_type) =
                 resolve_filter_column(dialect, metadata, filter, joins, table, qualify_columns)?;
             let (clause, param) = filter_clause(
                 dialect,
-                metadata,
-                filter.field.index,
+                FilterFieldContext {
+                    metadata,
+                    index: filter.field.index,
+                    field_type,
+                },
                 &col,
                 &filter.operator,
                 bound_params.len() + 1,
@@ -1154,10 +1164,16 @@ fn emit_predicate(
 /// The `match` operator maps to `@@ plainto_tsquery($N)` on `PostgreSQL` and
 /// falls back to `LIKE $N` on other dialects that lack full-text search.
 /// All other operators are mapped by `operator_to_sql`.
+#[derive(Clone, Copy)]
+struct FilterFieldContext<'a> {
+    metadata: &'a ModelMetadata,
+    index: usize,
+    field_type: ferrum_core::ir::metadata::FieldType,
+}
+
 fn filter_clause(
     dialect: Dialect,
-    metadata: &ModelMetadata,
-    field_index: usize,
+    field: FilterFieldContext<'_>,
     col: &str,
     operator: &str,
     param_index: usize,
@@ -1166,8 +1182,29 @@ fn filter_clause(
     match operator {
         "is_null" => (format!("{col} IS NULL"), None),
         "is_not_null" => (format!("{col} IS NOT NULL"), None),
-        op if fts::is_fts_operator(op) => {
-            fts::emit_match(dialect, metadata, field_index, col, op, param_index, value)
+        op if fts::is_fts_operator(op) => fts::emit_match(
+            dialect,
+            field.metadata,
+            field.index,
+            col,
+            op,
+            param_index,
+            value,
+        ),
+        op if dialect == Dialect::Postgres
+            && field.field_type == ferrum_core::ir::metadata::FieldType::Json =>
+        {
+            let placeholder = dialect.placeholder(param_index);
+            let clause = match op {
+                "contains" => format!("{col} @> {placeholder}::jsonb"),
+                "has_key" => format!("{col} ? {placeholder}"),
+                "has_any_keys" => format!("{col} ?| {placeholder}"),
+                _ => {
+                    let sql_op = operator_to_sql(op, dialect);
+                    format!("{col} {sql_op} {placeholder}::jsonb")
+                }
+            };
+            (clause, Some(value))
         }
         op => {
             let placeholder = dialect.placeholder(param_index);

@@ -191,6 +191,7 @@ def build_join_ir(
             "name": f.name,
             "column": f.column_name,
             "allowed_operators": list(f.allowed_operators),
+            "field_type": f.field_type,
         }
         for i, f in enumerate(remote_meta.fields)
         if remote_field_names is None or f.name in remote_field_names

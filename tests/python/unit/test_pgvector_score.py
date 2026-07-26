@@ -58,6 +58,17 @@ class TestEncodeVector:
     def test_encodes_empty(self) -> None:
         assert _encode_vector([]) == "[]"
 
+    def test_idempotent_for_already_encoded_literal(self) -> None:
+        """Codec must not re-encode Ferrum's text+::vector bind path.
+
+        Asyncpg runs the encoder when the param is typed as ``vector``; if the
+        value is already ``"[f,f,...]"``, iterating characters would produce
+        ``"[[,-,0,.,1,...]]"`` and Postgres raises InvalidTextRepresentation.
+        """
+        literal = "[0.1,0.2,0.3]"
+        assert _encode_vector(literal) == literal
+        assert _encode_vector(_encode_vector([0.1, 0.2, 0.3])) == "[0.1,0.2,0.3]"
+
 
 # ---------------------------------------------------------------------------
 # vector_search — validation errors

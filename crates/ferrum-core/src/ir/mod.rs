@@ -208,6 +208,9 @@ pub struct JoinFieldRef {
     /// Operator allowlist copied from the remote field's ``FieldMeta`` (SQL-2).
     #[serde(default)]
     pub allowed_operators: Vec<String>,
+    /// Remote field type used for type-specific SQL operator emission.
+    #[serde(default)]
+    pub field_type: Option<metadata::FieldType>,
 }
 
 /// The SQL operation this IR node represents.
