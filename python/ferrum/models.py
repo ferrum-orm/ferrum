@@ -189,11 +189,23 @@ class FieldMeta:
     # Full-text search metadata (Wave 0 / ADR-007).
     fts_config: str | None = None
     fts_source_columns: tuple[str, ...] | None = None
+    # JSONB-backed list fields retain their list-shaped Python contract while
+    # remaining distinct from PostgreSQL ARRAY metadata.
+    jsonb_list: bool = False
+    # Database-generated and read-only columns participate in SELECT/hydration
+    # metadata but are excluded from write metadata.
+    generated: bool = False
+    read_only: bool = False
 
     @property
     def sql_type(self) -> str:
         """PostgreSQL DDL type string derived from field_type and constraints."""
         return _field_type_to_sql(self)
+
+    @property
+    def writable(self) -> bool:
+        """Whether callers may include this field in persistence writes."""
+        return not self.generated and not self.read_only
 
 
 @dataclasses.dataclass(frozen=True)
@@ -285,6 +297,16 @@ class ModelMetadata:
         """Backward-compat alias: index of the *first* PK field."""
         return self.pk_fields[0] if self.pk_fields else 0
 
+    @property
+    def writable_fields(self) -> tuple[FieldMeta, ...]:
+        """Fields accepted by create/update/upsert/bulk write paths."""
+        return tuple(field for field in self.fields if field.writable)
+
+    @property
+    def writable_field_names(self) -> frozenset[str]:
+        """Immutable field-name allowlist for persistence writes."""
+        return frozenset(field.name for field in self.writable_fields)
+
     def to_metadata_dict(self) -> dict[str, Any]:
         """Build the ``ModelMetadata`` payload dict Rust's serde deserializer expects.
 
@@ -308,6 +330,12 @@ class ModelMetadata:
                 payload["fts_config"] = f.fts_config
             if f.fts_source_columns is not None:
                 payload["fts_source_columns"] = list(f.fts_source_columns)
+            if f.jsonb_list:
+                payload["jsonb_list"] = True
+            if f.generated:
+                payload["generated"] = True
+            if f.read_only:
+                payload["read_only"] = True
             field_payloads.append(payload)
         fts_payloads = [
             {
@@ -333,6 +361,32 @@ class ModelMetadata:
         expects (ADR-002 §ModelMetadata.fields).
         """
         return json.dumps(self.to_metadata_dict())
+
+    def to_write_metadata_dict(self) -> dict[str, Any]:
+        """Build metadata restricted to fields accepted by write operations.
+
+        Primary-key indices are remapped to the filtered field tuple. A
+        generated primary key therefore has no write-side PK index, while the
+        full metadata remains available for reads and hydration.
+        """
+        payload = self.to_metadata_dict()
+        payload["fields"] = [
+            field_payload
+            for field, field_payload in zip(self.fields, payload["fields"], strict=True)
+            if field.writable
+        ]
+        writable_positions = {
+            original_index: write_index
+            for write_index, (original_index, field) in enumerate(
+                item for item in enumerate(self.fields) if item[1].writable
+            )
+        }
+        write_pk_fields = [
+            writable_positions[index] for index in self.pk_fields if index in writable_positions
+        ]
+        payload["pk_fields"] = write_pk_fields
+        payload["pk_index"] = write_pk_fields[0] if write_pk_fields else 0
+        return payload
 
 
 # ---------------------------------------------------------------------------
@@ -600,6 +654,9 @@ def Field(  # noqa: N802
     vector_dimensions: int | None = None,
     fts_config: str | None = None,
     fts_source_columns: list[str] | None = None,
+    jsonb_list: bool = False,
+    generated: bool = False,
+    read_only: bool = False,
     **kwargs: Any,  # noqa: ANN401
 ) -> Any:  # noqa: ANN401
     """Ferrum field descriptor with column-level constraints.
@@ -625,6 +682,10 @@ def Field(  # noqa: N802
     - When provided, overrides the annotation-derived nullability in
       ``_build_metadata``.  Use to mark a ``T | None``-annotated field as
       ``NOT NULL`` (e.g. ``Field(nullable=False)``).
+
+    ``jsonb_list`` explicitly stores a ``list[T]`` annotation as JSONB instead
+    of PostgreSQL ARRAY. ``generated`` and ``read_only`` fields remain available
+    to SELECT/hydration metadata but are excluded from write metadata.
     """
     ferrum_extras: dict[str, Any] = {
         "max_length": max_length,
@@ -637,6 +698,9 @@ def Field(  # noqa: N802
         "vector_dimensions": vector_dimensions,
         "fts_config": fts_config,
         "fts_source_columns": fts_source_columns,
+        "jsonb_list": jsonb_list,
+        "generated": generated,
+        "read_only": read_only,
     }
 
     # Store explicit nullable override for _build_metadata to consume.
@@ -670,18 +734,19 @@ def Field(  # noqa: N802
 # ---------------------------------------------------------------------------
 
 
-def _resolve_list_field_type(base_type: Any) -> str:  # noqa: ANN401
+def _resolve_list_field_type(base_type: Any, *, model_name: str, field_name: str) -> str:  # noqa: ANN401
     """Return the Ferrum field type for a parameterized ``list[T]`` annotation."""
     args = get_args(base_type)
     if not args:
         return "array_text"
     elem = args[0]
-    # Unwrap Optional[T] inside the element type (e.g. list[str | None] is unusual but valid).
     if get_origin(elem) is Union or (
         hasattr(_types, "UnionType") and isinstance(elem, _types.UnionType)
     ):
-        non_none = [a for a in get_args(elem) if a is not type(None)]
-        elem = non_none[0] if non_none else str
+        raise TypeError(
+            f"Model {model_name!r} field {field_name!r}: PostgreSQL ARRAY elements "
+            "must be non-nullable scalar values."
+        )
     if elem is str:
         return "array_text"
     if elem is int:
@@ -690,7 +755,11 @@ def _resolve_list_field_type(base_type: Any) -> str:  # noqa: ANN401
         return "array_uuid"
     if elem is float:
         return "array_float"
-    return "array_text"  # safe fallback
+    raise TypeError(
+        f"Model {model_name!r} field {field_name!r}: unsupported PostgreSQL ARRAY "
+        f"element type {elem!r}. Supported types: str, int, UUID, float. "
+        "Use Field(jsonb_list=True) for list-shaped JSONB."
+    )
 
 
 def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
@@ -764,12 +833,27 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
         enum_values: tuple[str, ...] | None = None
         origin = get_origin(base_type)
 
+        jsonb_list = bool(ferrum_extras.get("jsonb_list", False))
+        generated = bool(ferrum_extras.get("generated", False))
+        read_only = bool(ferrum_extras.get("read_only", False))
+        is_list_annotation = origin is list or base_type is list
+        if jsonb_list and not is_list_annotation:
+            raise TypeError(
+                f"Model {cls.__name__!r} field {name!r}: Field(jsonb_list=True) "
+                "requires a list annotation."
+            )
         if origin is Literal:
             # Literal["a", "b"] → enum field type with TEXT + CHECK constraint
             db_type = "enum"
             enum_values = tuple(str(v) for v in get_args(base_type))
+        elif jsonb_list:
+            db_type = "json"
         elif origin is list:
-            db_type = _resolve_list_field_type(base_type)
+            db_type = _resolve_list_field_type(
+                base_type,
+                model_name=cls.__name__,
+                field_name=name,
+            )
         elif base_type is list:
             db_type = "array_text"
         else:
@@ -837,6 +921,9 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                 enum_values=enum_values,
                 fts_config=str(fts_config) if fts_config is not None else None,
                 fts_source_columns=fts_source_columns,
+                jsonb_list=jsonb_list,
+                generated=generated,
+                read_only=read_only,
             )
         )
 
@@ -907,11 +994,64 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
             )
 
     # --- relationship descriptors (ClassVar-style class attributes) ---
-    # Scan cls.__dict__ directly so we pick up descriptors regardless of whether
-    # the attribute appears in model_fields (it shouldn't — ClassVar excludes it).
+    # Scan this class's __dict__ for ForeignKey/OneToOne/ManyToMany (ClassVar
+    # keeps them out of model_fields). Then inherit RelationMeta from parent
+    # Ferrum models via MRO — parent __dict__ cannot be re-scanned for the
+    # original ForeignKey because install_relation_descriptors() replaces it
+    # with a forward descriptor after the parent is finalized.
+    from ferrum.relations import ReverseRelationMeta, register_reverse
+
     relations: list[RelationMeta] = []
+    seen_rel_names: set[str] = set()
+
+    def _register_fk_oto(
+        *,
+        attr_name: str,
+        kind: str,
+        to_model: str,
+        db_column: str,
+        on_delete: str,
+        related_name: str | None,
+    ) -> None:
+        if db_column not in field_column_names:
+            # Auto-add a virtual FieldMeta so the column appears in DDL.
+            fields.append(
+                FieldMeta(
+                    name=db_column,
+                    column_name=db_column,
+                    python_type_name="int",
+                    field_type="int",
+                    allowed_operators=_ALLOWED_OPERATORS["int"],
+                    nullable=False,
+                    pk=False,
+                )
+            )
+            field_column_names.add(db_column)
+        relations.append(
+            RelationMeta(
+                field_name=attr_name,
+                kind=kind,
+                to_model=to_model,
+                db_column=db_column,
+                on_delete=on_delete,
+                related_name=related_name,
+            )
+        )
+        accessor = related_name or f"{_to_snake_case(cls.__name__)}_set"
+        register_reverse(
+            target_model=to_model,
+            meta=ReverseRelationMeta(
+                accessor=accessor,
+                related_model_name=cls.__name__,
+                fk_column=db_column,
+                fk_field_name=attr_name,
+                kind=kind,
+            ),
+        )
+
     for attr_name, attr_value in cls.__dict__.items():
         if isinstance(attr_value, (ForeignKey, OneToOne)):
+            seen_rel_names.add(attr_name)
             kind = "fk" if isinstance(attr_value, ForeignKey) else "one_to_one"
             on_delete = attr_value.on_delete.upper()
             if on_delete not in _ON_DELETE_ALLOWLIST:
@@ -921,46 +1061,16 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                     f"Allowed: {sorted(_ON_DELETE_ALLOWLIST)}."
                 )
             backing_col = attr_value.db_column or f"{attr_name}_id"
-            if backing_col not in field_column_names:
-                # Auto-add a virtual FieldMeta so the column appears in DDL.
-                # Declare the column explicitly as an int field for full Pydantic
-                # validation support.
-                fields.append(
-                    FieldMeta(
-                        name=backing_col,
-                        column_name=backing_col,
-                        python_type_name="int",
-                        field_type="int",
-                        allowed_operators=_ALLOWED_OPERATORS["int"],
-                        nullable=False,
-                        pk=False,
-                    )
-                )
-                field_column_names.add(backing_col)
-            relations.append(
-                RelationMeta(
-                    field_name=attr_name,
-                    kind=kind,
-                    to_model=attr_value.to,
-                    db_column=backing_col,
-                    on_delete=on_delete,
-                    related_name=attr_value.related_name,
-                )
-            )
-            from ferrum.relations import ReverseRelationMeta, register_reverse
-
-            accessor = attr_value.related_name or f"{_to_snake_case(cls.__name__)}_set"
-            register_reverse(
-                target_model=attr_value.to,
-                meta=ReverseRelationMeta(
-                    accessor=accessor,
-                    related_model_name=cls.__name__,
-                    fk_column=backing_col,
-                    fk_field_name=attr_name,
-                    kind=kind,
-                ),
+            _register_fk_oto(
+                attr_name=attr_name,
+                kind=kind,
+                to_model=attr_value.to,
+                db_column=backing_col,
+                on_delete=on_delete,
+                related_name=attr_value.related_name,
             )
         elif isinstance(attr_value, ManyToMany):
+            seen_rel_names.add(attr_name)
             target_table = _to_snake_case(attr_value.to)
             through_table = attr_value.through or "_".join(sorted([table_name, target_table]))
             relations.append(
@@ -971,6 +1081,28 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                     through_table=through_table,
                 )
             )
+
+    for base in cls.__mro__[1:]:
+        if base is Model or not issubclass(base, Model):
+            continue
+        parent_meta = base.__dict__.get("__ferrum_metadata__")
+        if parent_meta is None:
+            continue
+        for rel in parent_meta.relations:
+            if rel.field_name in seen_rel_names:
+                continue
+            seen_rel_names.add(rel.field_name)
+            if rel.kind in ("fk", "one_to_one"):
+                _register_fk_oto(
+                    attr_name=rel.field_name,
+                    kind=rel.kind,
+                    to_model=rel.to_model,
+                    db_column=rel.db_column or f"{rel.field_name}_id",
+                    on_delete=rel.on_delete or "CASCADE",
+                    related_name=rel.related_name,
+                )
+            elif rel.kind == "m2m":
+                relations.append(rel)
 
     # Default to field 0 as the single PK when nothing was marked as primary_key=True
     # and no implicit "id" int field was found.

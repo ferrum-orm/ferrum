@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
+from ferrum.drivers.protocol import ChunkStreamProtocol
 from ferrum.errors import (
     FerrumConnectionError,
     FerrumTimeoutError,
@@ -93,6 +94,7 @@ class _LifecycleGuard:
     def __init__(self) -> None:
         self._accepting = True
         self._inflight = 0
+        self._streams: set[ManagedChunkStream] = set()
 
     @property
     def accepting(self) -> bool:
@@ -117,6 +119,56 @@ class _LifecycleGuard:
 
     def stop_accepting(self) -> None:
         self._accepting = False
+
+    def register_stream(self, stream: ManagedChunkStream) -> None:
+        self._streams.add(stream)
+
+    def unregister_stream(self, stream: ManagedChunkStream) -> None:
+        self._streams.discard(stream)
+
+    async def close_streams(self) -> None:
+        """Force active producers to close before their driver shuts down."""
+        if self._streams:
+            await asyncio.gather(
+                *(stream.aclose() for stream in tuple(self._streams)),
+                return_exceptions=True,
+            )
+
+
+class ManagedChunkStream:
+    """Lifecycle-accounted wrapper around a driver chunk stream."""
+
+    def __init__(self, inner: ChunkStreamProtocol, lifecycle: _LifecycleGuard) -> None:
+        self._inner = inner
+        self._lifecycle = lifecycle
+        self._closed = False
+        self._lifecycle.begin()
+        self._lifecycle.register_stream(self)
+
+    def __aiter__(self) -> AsyncIterator[list[Any]]:
+        return self
+
+    async def __anext__(self) -> list[Any]:
+        if self._closed:
+            raise StopAsyncIteration
+        try:
+            return await self._inner.__anext__()
+        except StopAsyncIteration:
+            await self.aclose()
+            raise
+        except BaseException:
+            await self.aclose()
+            raise
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            await self._inner.aclose()
+        finally:
+            self._lifecycle.unregister_stream(self)
+            self._lifecycle.end()
 
 
 class TimedQueryExecutor:

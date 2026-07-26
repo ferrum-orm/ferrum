@@ -8,13 +8,15 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any, cast
+from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 import pytest
 
 import ferrum
 from ferrum.models import _to_snake_case
+from ferrum.queryset import QuerySet
 
 
 class TestSnakeCase:
@@ -250,6 +252,72 @@ class TestFieldWithExtras:
         assert field_meta.db_index is True
 
 
+class TestSchemaFidelityMetadata:
+    def test_jsonb_list_is_distinct_from_postgres_array(self) -> None:
+        class JsonListModel(ferrum.Model):
+            id: int
+            labels: list[str] = ferrum.Field(default_factory=list, jsonb_list=True)
+            tag_ids: list[UUID] = ferrum.Field(default_factory=list)
+
+        metadata = JsonListModel.get_metadata()
+        labels = next(field for field in metadata.fields if field.name == "labels")
+        tag_ids = next(field for field in metadata.fields if field.name == "tag_ids")
+
+        assert labels.field_type == "json"
+        assert labels.sql_type == "JSONB"
+        assert labels.jsonb_list is True
+        assert tag_ids.field_type == "array_uuid"
+        assert tag_ids.sql_type == "UUID[]"
+        assert tag_ids.jsonb_list is False
+
+    def test_jsonb_list_requires_list_annotation(self) -> None:
+        with pytest.raises(TypeError, match="requires a list annotation"):
+
+            class InvalidJsonList(ferrum.Model):
+                id: int
+                labels: str = ferrum.Field(jsonb_list=True)
+
+    def test_array_rejects_unsupported_element_type(self) -> None:
+        with pytest.raises(TypeError, match="unsupported PostgreSQL ARRAY element type"):
+
+            class InvalidArray(ferrum.Model):
+                id: int
+                values: list[dict[str, str]]
+
+    def test_array_rejects_nullable_elements(self) -> None:
+        with pytest.raises(TypeError, match="must be non-nullable scalar values"):
+
+            class InvalidNullableArray(ferrum.Model):
+                id: int
+                values: list[str | None]
+
+    def test_generated_and_read_only_fields_are_readable_but_not_writable(self) -> None:
+        class GeneratedModel(ferrum.Model):
+            id: UUID = ferrum.Field(primary_key=True, generated=True)
+            source: str
+            computed: str = ferrum.Field(read_only=True)
+
+        metadata = GeneratedModel.get_metadata()
+        assert [field.name for field in metadata.fields] == ["id", "source", "computed"]
+        assert metadata.writable_field_names == frozenset({"source"})
+        assert next(field for field in metadata.fields if field.name == "id").generated is True
+        computed = next(field for field in metadata.fields if field.name == "computed")
+        assert computed.read_only is True
+
+        write_payload = metadata.to_write_metadata_dict()
+        assert [field["name"] for field in write_payload["fields"]] == ["source"]
+        assert write_payload["pk_fields"] == []
+
+    def test_read_metadata_keeps_schema_fidelity_flags(self) -> None:
+        class MetadataFlags(ferrum.Model):
+            id: int
+            values: list[str] = ferrum.Field(jsonb_list=True, read_only=True)
+
+        field_payload = MetadataFlags.get_metadata().to_metadata_dict()["fields"][1]
+        assert field_payload["jsonb_list"] is True
+        assert field_payload["read_only"] is True
+
+
 class TestObjectsManager:
     """Verify the Manager descriptor on Model subclasses (DX blocker B-1)."""
 
@@ -278,3 +346,84 @@ class TestObjectsManager:
         user = SimpleUser()
         with pytest.raises(AttributeError, match="class-level manager"):
             _ = user.objects  # type: ignore[attr-defined]
+
+
+class WritableModel(ferrum.Model):
+    id: int = ferrum.Field(default=0, primary_key=True, generated=True)
+    source: str = ""
+    computed: str = ferrum.Field(default="", read_only=True)
+
+
+class TestWriteMetadataEnforcement:
+    def test_reads_keep_generated_fields_but_writes_reject_them(self) -> None:
+        queryset = QuerySet(WritableModel)
+
+        select_names = [field["name"] for field in queryset._build_ir()["operation"]["fields"]]
+        insert_names = [
+            field["name"]
+            for field, _value in queryset._build_insert_ir({"source": "input"})["operation"][
+                "values"
+            ]
+        ]
+
+        assert select_names == ["id", "source", "computed"]
+        assert insert_names == ["source"]
+        with pytest.raises(ferrum.FerrumCompileError, match="generated/read-only"):
+            queryset._build_insert_ir({"computed": "forbidden"})
+        with pytest.raises(ferrum.FerrumCompileError, match="generated/read-only"):
+            queryset._build_bulk_insert_ir(
+                [{"source": "input", "computed": "forbidden"}],
+                returning=True,
+            )
+        with pytest.raises(ferrum.FerrumCompileError, match="generated/read-only"):
+            queryset._build_upsert_sql(
+                WritableModel.get_metadata(),
+                {"source": "input", "computed": "forbidden"},
+                conflict_fields=["source"],
+                update_fields=None,
+                returning=True,
+            )
+
+    def test_model_instances_omit_generated_fields_for_insert_and_upsert(self) -> None:
+        queryset = QuerySet(WritableModel)
+        obj = WritableModel(id=9, source="input", computed="database")
+
+        row = queryset._object_to_insert_row_dict(obj, WritableModel.get_metadata())
+        sql, bound = queryset._build_upsert_sql(
+            WritableModel.get_metadata(),
+            row,
+            conflict_fields=["source"],
+            update_fields=None,
+            returning=True,
+        )
+        write_sql, returning_sql = sql.split(" RETURNING ", maxsplit=1)
+
+        assert row == {"source": "input"}
+        assert '"id"' not in write_sql
+        assert '"computed"' not in write_sql
+        assert '"id"' in returning_sql
+        assert '"computed"' in returning_sql
+        assert bound == ["input"]
+
+    def test_update_and_bulk_update_reject_read_only_fields(self) -> None:
+        queryset = QuerySet(WritableModel).filter(id=1)
+
+        with pytest.raises(ferrum.FerrumCompileError, match="generated/read-only"):
+            queryset._build_update_ir({"computed": "forbidden"})
+        with pytest.raises(ferrum.FerrumCompileError, match="generated/read-only"):
+            queryset._build_bulk_update_ir(
+                [(1, {"computed": "forbidden"})],
+                ["computed"],
+            )
+
+    @pytest.mark.asyncio
+    async def test_update_instance_default_assignments_use_writable_fields(self) -> None:
+        obj = WritableModel(id=7, source="changed", computed="database")
+        update = AsyncMock(return_value=1)
+
+        with patch.object(QuerySet, "update", update):
+            count = await QuerySet(WritableModel).update_instance(cast(Any, object()), obj)
+
+        assert count == 1
+        assert update.await_args is not None
+        assert update.await_args.kwargs == {"source": "changed"}

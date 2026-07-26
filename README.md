@@ -112,6 +112,9 @@ No duplicate schema definitions.
 | `max_length` | `int \| None` | Emit `VARCHAR(n)` instead of `TEXT`. |
 | `max_digits` / `decimal_places` | `int \| None` | Emit `NUMERIC(p,s)`. |
 | `vector_dimensions` | `int \| None` | Required for `Vector` columns; emits `VECTOR(n)`. |
+| `jsonb_list` | `bool` | Store `list[T]` as JSONB instead of a PostgreSQL ARRAY. |
+| `generated` | `bool` | Select/hydrate the DB-generated column, but exclude it from writes. |
+| `read_only` | `bool` | Select/hydrate the column, but reject explicit write assignments. |
 
 ```python
 from datetime import datetime
@@ -151,6 +154,31 @@ users = await (
     .all(conn)
 )
 ```
+
+Typed aggregates and bounded PostgreSQL streaming use the same metadata allowlists
+and bound-parameter compiler path:
+
+```python
+from ferrum.queryset import Aggregate
+
+counts = await (
+    Ticket.objects
+    .group_by("team_id")
+    .date_trunc("created_at", "day", alias="day")
+    .having(total__gte=10)
+    .aggregate(conn, total=Aggregate.count())
+)
+
+async with Ticket.objects.filter(active=True).stream(conn, chunk_size=500) as chunks:
+    async for tickets in chunks:
+        await process(tickets)
+```
+
+`stream()` preserves projection/deferred/value-queryset materialization and
+deterministically releases its cursor on exhaustion, early break, cancellation, or
+error. It rejects `prefetch_related()` because cross-chunk relationship batching is
+not safe. Filtered `update_returning()` provides atomic compare-and-set semantics:
+encode the expected state in `filter()` and treat an empty returned list as a lost race.
 
 ### First-Class IDE Support
 
@@ -282,6 +310,8 @@ and [API Reference](docs/api-reference.md) for per-dialect DDL and operator mapp
 - [x] pgvector similarity score projection (`vector_search` helper)
 - [x] `Field(db_default=..., nullable=...)` — first-class DB-side defaults and nullability override
 - [x] `makemigrations` autodiff for index / default / nullability changes on existing tables
+- [x] Typed aggregates, filtered `UPDATE … RETURNING`, and bounded QuerySet streaming
+- [x] JSONB-list/generated/read-only metadata and read-only PostgreSQL schema drift reports
 - [ ] Query optimization (deferred fields, prefetch tuning)
 - [ ] Advanced relationship loading
 

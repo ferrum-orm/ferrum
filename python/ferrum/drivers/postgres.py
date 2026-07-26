@@ -6,6 +6,8 @@ import contextlib
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from ferrum.drivers.protocol import ChunkStreamProtocol, CompiledQuery
+from ferrum.drivers.streaming import AsyncpgChunkStream
 from ferrum.errors import FerrumConfigError, FerrumConnectionError, map_db_error
 
 
@@ -49,6 +51,24 @@ class _BoundConnection:
             return await self._raw.execute(sql, *params)
         except Exception as exc:
             raise map_db_error(exc) from None
+
+    def open_stream(
+        self,
+        compiled: CompiledQuery,
+        *,
+        chunk_size: int,
+        query_timeout: float | None,
+    ) -> ChunkStreamProtocol:
+        @contextlib.asynccontextmanager
+        async def _source() -> AsyncGenerator[Any, None]:
+            yield self._raw
+
+        return AsyncpgChunkStream(
+            _source,
+            compiled,
+            chunk_size=chunk_size,
+            query_timeout=query_timeout,
+        )
 
     @contextlib.asynccontextmanager
     async def savepoint(self) -> AsyncGenerator[_BoundConnection, None]:
@@ -176,6 +196,33 @@ class AsyncpgDriver:
             return await pool.execute(sql, *params)
         except Exception as exc:
             raise map_db_error(exc) from None
+
+    def open_stream(
+        self,
+        compiled: CompiledQuery,
+        *,
+        chunk_size: int,
+        query_timeout: float | None,
+    ) -> ChunkStreamProtocol:
+        pool = self._require_driver()
+
+        @contextlib.asynccontextmanager
+        async def _source() -> AsyncGenerator[Any, None]:
+            if self._acquire_timeout is not None:
+                async with pool.acquire(timeout=self._acquire_timeout) as raw_conn:
+                    async with raw_conn.transaction():
+                        yield raw_conn
+            else:
+                async with pool.acquire() as raw_conn:
+                    async with raw_conn.transaction():
+                        yield raw_conn
+
+        return AsyncpgChunkStream(
+            _source,
+            compiled,
+            chunk_size=chunk_size,
+            query_timeout=query_timeout,
+        )
 
     @contextlib.asynccontextmanager
     async def acquire(self) -> AsyncGenerator[Any, None]:

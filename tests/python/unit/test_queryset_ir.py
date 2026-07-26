@@ -26,6 +26,12 @@ class Article(ferrum.Model):
     score: float = 0.0
 
 
+class JsonArticle(ferrum.Model):
+    id: int = 0
+    tags: list[str] = ferrum.Field(default_factory=list, jsonb_list=True)
+    payload: dict = ferrum.Field(default_factory=dict)
+
+
 # ---------------------------------------------------------------------------
 # BindValue encoding — adjacent-tag format {"type": ..., "value": ...}
 # ---------------------------------------------------------------------------
@@ -106,10 +112,16 @@ class TestEncodeBindValue:
 
 
 class TestBuildIrStructure:
+    def test_insert_encodes_json_fields_as_json_text(self) -> None:
+        ir = QuerySet(JsonArticle)._build_insert_ir({"tags": ["orm"], "payload": {"nested": True}})
+        values = {field["name"]: value for field, value in ir["operation"]["values"]}
+        assert values["tags"] == {"type": "text", "value": '["orm"]'}
+        assert values["payload"] == {"type": "text", "value": '{"nested":true}'}
+
     def test_ir_version(self) -> None:
         qs: QuerySet[Article] = QuerySet(Article)
         ir = qs._build_ir()
-        assert ir["version"] == 3
+        assert ir["version"] == 4
 
     def test_model_name(self) -> None:
         qs: QuerySet[Article] = QuerySet(Article)

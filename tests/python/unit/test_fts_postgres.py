@@ -46,6 +46,6 @@ class TestPostgresFtsCompile:
         import json
 
         parsed = json.loads(ir)
-        assert parsed["version"] == 3
+        assert parsed["version"] == 4
         assert "text_rank_by" in parsed
         assert parsed["text_rank_by"]["mode"] == "websearch"

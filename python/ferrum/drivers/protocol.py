@@ -8,7 +8,47 @@ thin parity and may intentionally omit higher-level features such as transaction
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any, Protocol, runtime_checkable
+
+_COMPILED_QUERY_TOKEN = object()
+
+
+class CompiledQuery:
+    """Opaque output of Ferrum's validated query compiler.
+
+    The constructor is intentionally unavailable to application code. QuerySet
+    creates instances through the private ``_compiled_query`` integration seam
+    after native compilation and bound-parameter decoding.
+    """
+
+    __slots__ = ("bound_params", "sql_text")
+
+    def __init__(
+        self,
+        sql_text: str,
+        bound_params: tuple[object, ...],
+        *,
+        _token: object,
+    ) -> None:
+        if _token is not _COMPILED_QUERY_TOKEN:
+            raise TypeError("CompiledQuery values are created by Ferrum's query compiler.")
+        self.sql_text = sql_text
+        self.bound_params = bound_params
+
+
+def _compiled_query(sql_text: str, bound_params: list[object]) -> CompiledQuery:
+    """Create the opaque execution value consumed by ConnectionLike streaming."""
+    return CompiledQuery(sql_text, tuple(bound_params), _token=_COMPILED_QUERY_TOKEN)
+
+
+@runtime_checkable
+class ChunkStreamProtocol(Protocol):
+    """Closeable, pull-facing stream of bounded row chunks."""
+
+    def __aiter__(self) -> AsyncIterator[list[Any]]: ...
+    async def __anext__(self) -> list[Any]: ...
+    async def aclose(self) -> None: ...
 
 
 @runtime_checkable

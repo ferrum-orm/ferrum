@@ -20,13 +20,15 @@ import importlib
 import json
 import time
 import types
-from collections.abc import Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Generic, Literal, Self, TypeVar, cast, overload
 from uuid import UUID
 
 import ferrum.hooks as _hooks
 from ferrum.config import resolve_wire_format as _resolve_wire_format
+from ferrum.drivers.protocol import _compiled_query
 from ferrum.errors import (
     FerrumCompileError,
     FerrumConfigError,
@@ -60,7 +62,47 @@ with contextlib.suppress(ImportError):
     _native_ext = importlib.import_module("ferrum._native")
 
 # IR version — must stay in sync with ferrum-core IR_VERSION (crates/ferrum-core/src/ir/mod.rs).
-_IR_VERSION: int = 3
+_IR_VERSION: int = 4
+
+AggregateFunction = Literal["count", "sum", "avg", "min", "max"]
+DateTruncGranularity = Literal["minute", "hour", "day", "week", "month", "quarter", "year"]
+HavingOperator = Literal["eq", "ne", "gt", "gte", "lt", "lte"]
+
+
+@dataclass(frozen=True, slots=True)
+class Aggregate:
+    """Typed aggregate expression used by :meth:`QuerySet.aggregate`.
+
+    Field and filter references are resolved through model metadata; this object
+    cannot carry SQL fragments or output identifiers.
+    """
+
+    function: AggregateFunction
+    field: str | None = None
+    filter: Q | dict[str, Any] | None = None
+
+    @classmethod
+    def count(
+        cls, field: str | None = None, *, filter: Q | dict[str, Any] | None = None
+    ) -> Aggregate:
+        return cls("count", field, filter)
+
+    @classmethod
+    def sum(cls, field: str, *, filter: Q | dict[str, Any] | None = None) -> Aggregate:
+        return cls("sum", field, filter)
+
+    @classmethod
+    def avg(cls, field: str, *, filter: Q | dict[str, Any] | None = None) -> Aggregate:
+        return cls("avg", field, filter)
+
+    @classmethod
+    def min(cls, field: str, *, filter: Q | dict[str, Any] | None = None) -> Aggregate:
+        return cls("min", field, filter)
+
+    @classmethod
+    def max(cls, field: str, *, filter: Q | dict[str, Any] | None = None) -> Aggregate:
+        return cls("max", field, filter)
+
 
 # Maps QuerySet ``mode=`` kwargs to filter lookup operators and IR ``TextSearchMode`` tags.
 _TEXT_SEARCH_MODES: dict[str, tuple[str, str]] = {
@@ -169,6 +211,18 @@ def _encode_bind_value(value: object) -> dict[str, object]:
         strs = [str(v) if not isinstance(v, str) else v for v in value]
         return {"type": "text_array", "value": strs}
     return {"type": "text", "value": str(value)}
+
+
+def _prepare_field_value(field: Any, value: object) -> object:  # noqa: ANN401
+    """Normalize a Python value for the field's database representation."""
+    if value is not None and field.field_type == "json":
+        return json.dumps(value, default=str, separators=(",", ":"))
+    return value
+
+
+def _encode_field_bind_value(field: Any, value: object) -> dict[str, object]:  # noqa: ANN401
+    """Encode a value after applying field-aware database normalization."""
+    return _encode_bind_value(_prepare_field_value(field, value))
 
 
 def _decode_bound_param(param: str | dict[str, Any]) -> object:
@@ -566,6 +620,8 @@ class _QuerySetBase(Generic[_R]):
         self._defer_fields: frozenset[str] = frozenset()
         self._select_related: tuple[str, ...] = ()
         self._prefetch_related: tuple[str, ...] = ()
+        self._aggregate_groups: list[dict[str, str]] = []
+        self._having: list[dict[str, Any]] = []
         # When set by ``QuerySet.project()``, rows hydrate into this model while
         # IR compilation continues against ``_model`` (source table / filters).
         self._hydrate_model: type[Model] | None = None
@@ -662,6 +718,108 @@ class _QuerySetBase(Generic[_R]):
         """Set OFFSET. Returns a new QuerySet."""
         qs = self._clone()
         qs._offset = count
+        return qs
+
+    def group_by(self, *fields: str) -> Self:
+        """Add metadata-allowlisted fields to an aggregate GROUP BY."""
+        metadata = self._get_metadata()
+        if metadata is None:
+            raise FerrumCompileError(
+                f"Model {self._model.__name__!r} has no metadata.",
+                model=self._model.__name__,
+            )
+        field_names = {field.name for field in metadata.fields}
+        qs = self._clone()
+        used_labels = {group["label"] for group in qs._aggregate_groups}
+        for field in fields:
+            if field not in field_names:
+                raise FerrumCompileError(
+                    f"Unknown field {field!r} on model {metadata.model_name!r}.",
+                    model=metadata.model_name,
+                    field=field,
+                )
+            if field in used_labels:
+                raise FerrumCompileError(
+                    f"Duplicate aggregate result key {field!r}.",
+                    model=metadata.model_name,
+                    field=field,
+                )
+            qs._aggregate_groups.append({"kind": "field", "field": field, "label": field})
+            used_labels.add(field)
+        return qs
+
+    def date_trunc(
+        self,
+        field: str,
+        granularity: DateTruncGranularity,
+        *,
+        alias: str = "bucket",
+    ) -> Self:
+        """Add a fixed DATE_TRUNC bucket to an aggregate GROUP BY."""
+        metadata = self._get_metadata()
+        if metadata is None:
+            raise FerrumCompileError(
+                f"Model {self._model.__name__!r} has no metadata.",
+                model=self._model.__name__,
+            )
+        field_index = {item.name: index for index, item in enumerate(metadata.fields)}
+        if field not in field_index:
+            raise FerrumCompileError(
+                f"Unknown field {field!r} on model {metadata.model_name!r}.",
+                model=metadata.model_name,
+                field=field,
+            )
+        if metadata.fields[field_index[field]].field_type not in ("date", "datetime"):
+            raise FerrumCompileError(
+                f"date_trunc() requires a date or datetime field; got {field!r}.",
+                model=metadata.model_name,
+                field=field,
+                operator="date_trunc",
+            )
+        allowed: tuple[DateTruncGranularity, ...] = (
+            "minute",
+            "hour",
+            "day",
+            "week",
+            "month",
+            "quarter",
+            "year",
+        )
+        if granularity not in allowed:
+            raise FerrumCompileError(
+                f"Unsupported date_trunc granularity {granularity!r}.",
+                model=metadata.model_name,
+                field=field,
+                operator="date_trunc",
+            )
+        if not alias or alias in {group["label"] for group in self._aggregate_groups}:
+            raise FerrumCompileError(
+                f"Duplicate or empty aggregate result key {alias!r}.",
+                model=metadata.model_name,
+            )
+        qs = self._clone()
+        qs._aggregate_groups.append(
+            {
+                "kind": "date_trunc",
+                "field": field,
+                "granularity": granularity,
+                "label": alias,
+            }
+        )
+        return qs
+
+    def having(self, **conditions: Any) -> Self:  # noqa: ANN401
+        """Add bound HAVING comparisons against aggregate result keys."""
+        qs = self._clone()
+        for lookup, value in conditions.items():
+            alias, operator = _parse_lookup(lookup)
+            if operator not in ("eq", "ne", "gt", "gte", "lt", "lte"):
+                raise FerrumCompileError(
+                    f"Unsupported HAVING operator {operator!r}.",
+                    model=self._model.__name__,
+                    operator=operator,
+                )
+            qs._having.append({"alias": alias, "operator": operator, "value": value})
         return qs
 
     # ------------------------------------------------------------------
@@ -968,6 +1126,104 @@ class _QuerySetBase(Generic[_R]):
         )
         return await self._materialize(rows, metadata, conn, fingerprint)
 
+    @contextlib.asynccontextmanager
+    async def stream(
+        self,
+        conn: ConnectionLike,
+        *,
+        chunk_size: int = 1000,
+    ) -> AsyncGenerator[AsyncIterator[list[_R]], None]:
+        """Stream matching rows as bounded, materialized chunks.
+
+        The context pins the underlying cursor resources until exit. Early loop
+        termination, exceptions, and cancellation deterministically close the
+        cursor. ``prefetch_related()`` is rejected because relationship batching
+        across independently consumed chunks would change its query semantics.
+        """
+        if self._prefetch_related:
+            raise FerrumCompileError(
+                "stream() cannot be combined with prefetch_related(); "
+                "consume all() or load related rows explicitly.",
+                model=self._model.__name__,
+            )
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be at least 1.")
+        if _native_ext is None:
+            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
+        metadata = self._get_metadata()
+        compiled = self._compile(dialect=conn.dialect)
+        sql_text: str = compiled["sql_text"]
+        bound_params = [_decode_bound_param(param) for param in compiled["bound_params"]]
+        fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
+        opaque = _compiled_query(sql_text, bound_params)
+        model_name = self._model.__name__
+        table = metadata.table_name if metadata is not None else model_name
+        _hooks.query_start(
+            fingerprint=fingerprint,
+            model=model_name,
+            operation="select_stream",
+            table=table,
+        )
+        started = time.monotonic()
+        row_count = 0
+
+        async with conn.stream_compiled(opaque, chunk_size=chunk_size) as raw_chunks:
+
+            async def materialized_chunks() -> AsyncGenerator[list[_R], None]:
+                nonlocal row_count
+                while True:
+                    try:
+                        rows = await anext(raw_chunks)
+                    except StopAsyncIteration:
+                        return
+                    except Exception as exc:
+                        duration_ms = (time.monotonic() - started) * 1000
+                        mapped = map_db_error(
+                            exc, context={"model": model_name, "operation": "select_stream"}
+                        )
+                        _hooks.query_failure(
+                            fingerprint=fingerprint,
+                            duration_ms=duration_ms,
+                            failure_category=type(mapped).__name__,
+                        )
+                        _echo_compiled(
+                            conn,
+                            sql=sql_text,
+                            bound_params=bound_params,
+                            compiled=compiled,
+                            model=model_name,
+                            operation="select_stream",
+                            duration_ms=duration_ms,
+                            status="error",
+                        )
+                        raise mapped from None
+                    chunk = await self._materialize(list(rows), metadata, conn, fingerprint)
+                    row_count += len(chunk)
+                    yield chunk
+
+            chunks = materialized_chunks()
+            try:
+                yield chunks
+            finally:
+                await chunks.aclose()
+
+        duration_ms = (time.monotonic() - started) * 1000
+        _hooks.query_success(
+            fingerprint=fingerprint,
+            duration_ms=duration_ms,
+            row_count=row_count,
+        )
+        _echo_compiled(
+            conn,
+            sql=sql_text,
+            bound_params=bound_params,
+            compiled=compiled,
+            model=model_name,
+            operation="select_stream",
+            duration_ms=duration_ms,
+            row_count=row_count,
+        )
+
     async def _materialize(
         self,
         rows: list[Any],
@@ -1180,6 +1436,8 @@ class _QuerySetBase(Generic[_R]):
         qs._select_related = self._select_related
         qs._prefetch_related = self._prefetch_related
         qs._hydrate_model = self._hydrate_model
+        qs._aggregate_groups = [dict(group) for group in self._aggregate_groups]
+        qs._having = [dict(condition) for condition in self._having]
 
     def _get_metadata(self) -> ModelMetadata | None:
         """Return the model's ``ModelMetadata`` if available, else ``None``."""
@@ -1420,6 +1678,205 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             target._only_fields = fields
         return target
 
+    def _build_aggregate_ir(
+        self, expressions: dict[str, Aggregate]
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Build typed aggregate IR and its user-facing result-key order."""
+        if not expressions:
+            raise FerrumCompileError(
+                "aggregate() requires at least one named expression.",
+                model=self._model.__name__,
+            )
+        metadata = self._get_metadata()
+        if metadata is None:
+            raise FerrumCompileError(
+                f"Model {self._model.__name__!r} has no metadata.",
+                model=self._model.__name__,
+            )
+        if (
+            self._select_related
+            or self._vector_order_by is not None
+            or self._text_rank_by is not None
+        ):
+            raise FerrumCompileError(
+                "aggregate() cannot be combined with joins or ranking.",
+                model=metadata.model_name,
+            )
+        if self._order_by or self._distinct:
+            raise FerrumCompileError(
+                "aggregate() cannot be combined with order_by() or distinct().",
+                model=metadata.model_name,
+            )
+        field_index = {field.name: index for index, field in enumerate(metadata.fields)}
+        result_keys = [group["label"] for group in self._aggregate_groups]
+        duplicate = set(result_keys) & set(expressions)
+        if duplicate:
+            raise FerrumCompileError(
+                f"Aggregate result keys collide with grouping keys: {sorted(duplicate)!r}.",
+                model=metadata.model_name,
+            )
+
+        groups: list[dict[str, Any]] = []
+        for group in self._aggregate_groups:
+            field = group["field"]
+            node: dict[str, Any] = {
+                "kind": group["kind"],
+                "field": {"index": field_index[field], "name": field},
+            }
+            if group["kind"] == "date_trunc":
+                node["granularity"] = group["granularity"]
+            groups.append(node)
+
+        aggregates: list[dict[str, Any]] = []
+        numeric_types = {"int", "big_int", "float", "decimal"}
+        unsupported_ordered_types = {
+            "json",
+            "bytes",
+            "vector",
+            "array_text",
+            "array_uuid",
+            "array_int",
+            "array_float",
+            "tsvector",
+        }
+        for alias, expression in expressions.items():
+            if not isinstance(expression, Aggregate):
+                raise TypeError(f"aggregate expression {alias!r} must be an Aggregate descriptor")
+            field_ref: dict[str, Any] | None = None
+            if expression.field is not None:
+                if expression.field not in field_index:
+                    raise FerrumCompileError(
+                        f"Unknown field {expression.field!r} on model {metadata.model_name!r}.",
+                        model=metadata.model_name,
+                        field=expression.field,
+                    )
+                index = field_index[expression.field]
+                field_meta = metadata.fields[index]
+                if (
+                    expression.function in ("sum", "avg")
+                    and field_meta.field_type not in numeric_types
+                ):
+                    raise FerrumCompileError(
+                        f"{expression.function}() requires a numeric field.",
+                        model=metadata.model_name,
+                        field=expression.field,
+                        operator=expression.function,
+                    )
+                if (
+                    expression.function in ("min", "max")
+                    and field_meta.field_type in unsupported_ordered_types
+                ):
+                    raise FerrumCompileError(
+                        f"{expression.function}() does not support this field type.",
+                        model=metadata.model_name,
+                        field=expression.field,
+                        operator=expression.function,
+                    )
+                field_ref = {"index": index, "name": expression.field}
+            elif expression.function != "count":
+                raise FerrumCompileError(
+                    f"{expression.function}() requires a field.",
+                    model=metadata.model_name,
+                    operator=expression.function,
+                )
+
+            aggregate_node: dict[str, Any] = {
+                "function": expression.function,
+                "field": field_ref,
+            }
+            if expression.filter is not None:
+                predicate_q = (
+                    expression.filter
+                    if isinstance(expression.filter, Q)
+                    else args_to_q(expression.filter)
+                )
+                if predicate_q is None:
+                    raise FerrumCompileError(
+                        "Filtered aggregate requires a non-empty predicate.",
+                        model=metadata.model_name,
+                    )
+                predicate, joins = _q_to_predicate(predicate_q, metadata, field_index)
+                if joins:
+                    raise FerrumCompileError(
+                        "Filtered aggregates do not support relation lookups.",
+                        model=metadata.model_name,
+                    )
+                aggregate_node["filter"] = predicate
+            aggregates.append(aggregate_node)
+
+        aggregate_indices = {alias: index for index, alias in enumerate(expressions)}
+        having: list[dict[str, Any]] = []
+        for condition in self._having:
+            alias = condition["alias"]
+            if alias not in aggregate_indices:
+                raise FerrumCompileError(
+                    f"Unknown aggregate result key {alias!r} in having().",
+                    model=metadata.model_name,
+                    field=alias,
+                )
+            having.append(
+                {
+                    "aggregate_index": aggregate_indices[alias],
+                    "operator": condition["operator"],
+                    "value": _encode_bind_value(condition["value"]),
+                }
+            )
+
+        ir = self._build_ir()
+        if ir["joins"]:
+            raise FerrumCompileError(
+                "aggregate() does not support relation-filter joins.",
+                model=metadata.model_name,
+            )
+        ir["operation"] = {"kind": "select", "fields": []}
+        ir["aggregation"] = {"groups": groups, "aggregates": aggregates, "having": having}
+        return ir, result_keys + list(expressions)
+
+    async def aggregate(
+        self, conn: ConnectionLike, **expressions: Aggregate
+    ) -> list[dict[str, Any]]:
+        """Execute a scalar or grouped aggregate and return structured dict rows."""
+        if _native_ext is None:
+            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
+        ir, result_keys = self._build_aggregate_ir(expressions)
+        compiled = self._compile_ir(ir, dialect=conn.dialect)
+        sql_text: str = compiled["sql_text"]
+        bound_params = [_decode_bound_param(param) for param in compiled["bound_params"]]
+        fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
+        metadata = self._get_metadata()
+        model_name = self._model.__name__
+        table = metadata.table_name if metadata is not None else model_name
+        _hooks.query_start(
+            fingerprint=fingerprint,
+            model=model_name,
+            operation="aggregate",
+            table=table,
+        )
+        started = time.monotonic()
+        try:
+            rows = await conn._require_driver().fetch(sql_text, *bound_params)
+        except Exception as exc:
+            duration_ms = (time.monotonic() - started) * 1000
+            mapped = map_db_error(exc, context={"model": model_name, "operation": "aggregate"})
+            _hooks.query_failure(
+                fingerprint=fingerprint,
+                duration_ms=duration_ms,
+                failure_category=type(mapped).__name__,
+            )
+            raise mapped from None
+        output: list[dict[str, Any]] = []
+        for row in rows:
+            raw = _row_to_dict(row)
+            values = [raw[f"group_{index}"] for index in range(len(self._aggregate_groups))]
+            values.extend(raw[f"agg_{index}"] for index in range(len(expressions)))
+            output.append(dict(zip(result_keys, values, strict=True)))
+        _hooks.query_success(
+            fingerprint=fingerprint,
+            duration_ms=(time.monotonic() - started) * 1000,
+            row_count=len(output),
+        )
+        return output
+
     # ------------------------------------------------------------------
     # Write IR builders (model-only)
     # ------------------------------------------------------------------
@@ -1441,16 +1898,15 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 model=self._model.__name__,
             )
         field_index: dict[str, int] = {f.name: i for i, f in enumerate(metadata.fields)}
+        field_by_name = {f.name: f for f in metadata.fields}
         ir_values: list[Any] = []
         for name, value in values.items():
-            if name not in field_index:
-                raise FerrumCompileError(
-                    f"Unknown field {name!r} on model {metadata.model_name!r}.",
-                    model=metadata.model_name,
-                    field=name,
-                )
+            self._validate_write_field(metadata, name, api="create()")
             ir_values.append(
-                [{"index": field_index[name], "name": name}, _encode_bind_value(value)]
+                [
+                    {"index": field_index[name], "name": name},
+                    _encode_field_bind_value(field_by_name[name], value),
+                ]
             )
         return {
             "version": _IR_VERSION,
@@ -1480,16 +1936,15 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 model=self._model.__name__,
             )
         field_index: dict[str, int] = {f.name: i for i, f in enumerate(metadata.fields)}
+        field_by_name = {f.name: f for f in metadata.fields}
         ir_assignments: list[Any] = []
         for name, value in assignments.items():
-            if name not in field_index:
-                raise FerrumCompileError(
-                    f"Unknown field {name!r} on model {metadata.model_name!r}.",
-                    model=metadata.model_name,
-                    field=name,
-                )
+            self._validate_write_field(metadata, name, api="update()")
             ir_assignments.append(
-                [{"index": field_index[name], "name": name}, _encode_bind_value(value)]
+                [
+                    {"index": field_index[name], "name": name},
+                    _encode_field_bind_value(field_by_name[name], value),
+                ]
             )
         select_ir["operation"] = {"kind": "update", "assignments": ir_assignments}
         select_ir["order_by"] = []
@@ -1567,10 +2022,12 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                     "create() accepts either a model instance/dict or keyword values, not both.",
                     model=self._model.__name__,
                 )
-            row = self._object_to_row_dict(_obj)
             row_metadata = self._get_metadata()
             if row_metadata is not None:
+                row = self._object_to_insert_row_dict(_obj, row_metadata)
                 row = self._drop_auto_pk_sentinel(row, row_metadata)
+            else:
+                row = self._object_to_row_dict(_obj)
             values = row
         if _native_ext is None:
             raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
@@ -1650,6 +2107,44 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         msg = f"Expected a model instance or dict, got {type(obj)!r}."
         raise TypeError(msg)
 
+    def _object_to_insert_row_dict(
+        self,
+        obj: _M | dict[str, Any],
+        metadata: ModelMetadata,
+    ) -> dict[str, Any]:
+        """Normalize insert input, omitting generated model-instance fields.
+
+        Explicit dict keys still reach the write-field validator so attempts to
+        assign a generated/read-only field fail instead of being silently lost.
+        """
+        row = self._object_to_row_dict(obj)
+        if isinstance(obj, dict):
+            return row
+        return {name: value for name, value in row.items() if name in metadata.writable_field_names}
+
+    def _validate_write_field(
+        self,
+        metadata: ModelMetadata,
+        name: str,
+        *,
+        api: str,
+    ) -> None:
+        """Require a known, writable metadata field before constructing write IR."""
+        all_field_names = {field.name for field in metadata.fields}
+        if name not in all_field_names:
+            raise FerrumCompileError(
+                f"Unknown field {name!r} on model {metadata.model_name!r}.",
+                model=metadata.model_name,
+                field=name,
+            )
+        if name not in metadata.writable_field_names:
+            raise FerrumCompileError(
+                f"{api} cannot assign generated/read-only field {name!r} "
+                f"on model {metadata.model_name!r}.",
+                model=metadata.model_name,
+                field=name,
+            )
+
     def _drop_auto_pk_sentinel(
         self, values: dict[str, Any], metadata: ModelMetadata
     ) -> dict[str, Any]:
@@ -1696,6 +2191,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 model=metadata.model_name,
             )
         field_index: dict[str, int] = {f.name: i for i, f in enumerate(metadata.fields)}
+        field_by_name = {f.name: f for f in metadata.fields}
         ir_rows: list[list[Any]] = []
         column_order: list[str] | None = None
         for row in rows:
@@ -1709,14 +2205,12 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 )
             ir_row: list[Any] = []
             for name in column_order:
-                if name not in field_index:
-                    raise FerrumCompileError(
-                        f"Unknown field {name!r} on model {metadata.model_name!r}.",
-                        model=metadata.model_name,
-                        field=name,
-                    )
+                self._validate_write_field(metadata, name, api="bulk_create()")
                 ir_row.append(
-                    [{"index": field_index[name], "name": name}, _encode_bind_value(values[name])]
+                    [
+                        {"index": field_index[name], "name": name},
+                        _encode_field_bind_value(field_by_name[name], values[name]),
+                    ]
                 )
             ir_rows.append(ir_row)
         return {
@@ -1751,6 +2245,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 model=metadata.model_name,
             )
         field_index: dict[str, int] = {f.name: i for i, f in enumerate(metadata.fields)}
+        field_by_name = {f.name: f for f in metadata.fields}
         pk_names = self._pk_field_names(metadata)
         for pk_name in pk_names:
             if pk_name not in field_index:
@@ -1765,12 +2260,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 model=metadata.model_name,
             )
         for name in field_list:
-            if name not in field_index:
-                raise FerrumCompileError(
-                    f"Unknown field {name!r} on model {metadata.model_name!r}.",
-                    model=metadata.model_name,
-                    field=name,
-                )
+            self._validate_write_field(metadata, name, api="bulk_update()")
         ir_pk_fields = [{"index": field_index[pk_name], "name": pk_name} for pk_name in pk_names]
         ir_fields = [{"index": field_index[name], "name": name} for name in field_list]
         ir_rows: list[dict[str, Any]] = []
@@ -1790,7 +2280,10 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             ir_rows.append(
                 {
                     "pk_values": pk_values_encoded,
-                    "values": [_encode_bind_value(assignments[name]) for name in field_list],
+                    "values": [
+                        _encode_field_bind_value(field_by_name[name], assignments[name])
+                        for name in field_list
+                    ],
                 }
             )
         return {
@@ -1896,7 +2389,12 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         if batch_size < 1:
             raise FerrumConfigError("batch_size must be at least 1. [FERR-C001]")
         metadata = self._get_metadata()
-        row_dicts = [self._object_to_row_dict(obj) for obj in objects]
+        if metadata is None:
+            raise FerrumCompileError(
+                f"Model {self._model.__name__!r} has no metadata.",
+                model=self._model.__name__,
+            )
+        row_dicts = [self._object_to_insert_row_dict(obj, metadata) for obj in objects]
         if not row_dicts:
             return [] if returning else 0
 
@@ -1998,6 +2496,8 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             )
         pk_names = self._pk_field_names(metadata)
         field_list = list(fields)
+        for name in field_list:
+            self._validate_write_field(metadata, name, api="bulk_update()")
         rows: list[tuple[Any, dict[str, Any]]] = []
         for obj in objects:
             data = self._object_to_row_dict(obj)
@@ -2173,6 +2673,11 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 "in this version. Use separate insert/update calls. [FERR-C001]"
             )
         field_by_name = {f.name: f for f in metadata.fields}
+        for field_name in values:
+            self._validate_write_field(metadata, field_name, api="upsert()")
+        if update_fields is not None:
+            for field_name in update_fields:
+                self._validate_write_field(metadata, field_name, api="upsert()")
         table = f'"{metadata.table_name}"'
 
         col_names: list[str] = []
@@ -2182,7 +2687,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             col = f'"{field_by_name[fname].column_name}"'
             col_names.append(col)
             placeholders.append(f"${i}")
-            bound.append(fval)
+            bound.append(_prepare_field_value(field_by_name[fname], fval))
 
         conflict_cols = ", ".join(f'"{field_by_name[cf].column_name}"' for cf in conflict_fields)
 
@@ -2195,7 +2700,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             conflict_set = set(conflict_fields)
             update_fields = [
                 f.name
-                for f in metadata.fields
+                for f in metadata.writable_fields
                 if not f.pk and f.name not in conflict_set and f.name in values
             ]
 
@@ -2258,12 +2763,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         field_names = {f.name for f in metadata.fields}
         # Validate all field names in values against the allowlist.
         for fname in values:
-            if fname not in field_names:
-                raise FerrumCompileError(
-                    f"Unknown field {fname!r} on model {metadata.model_name!r}.",
-                    model=metadata.model_name,
-                    field=fname,
-                )
+            self._validate_write_field(metadata, fname, api="upsert()")
         # Validate conflict_fields against the allowlist.
         for cf in conflict_fields:
             if cf not in field_names:
@@ -2275,12 +2775,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         # Validate update_fields if explicitly provided.
         if update_fields is not None:
             for uf in update_fields:
-                if uf not in field_names:
-                    raise FerrumCompileError(
-                        f"Unknown update field {uf!r} on model {metadata.model_name!r}.",
-                        model=metadata.model_name,
-                        field=uf,
-                    )
+                self._validate_write_field(metadata, uf, api="upsert()")
 
         sql, bound = self._build_upsert_sql(
             metadata,
@@ -2376,14 +2871,9 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 )
         if update_fields is not None:
             for uf in update_fields:
-                if uf not in field_names:
-                    raise FerrumCompileError(
-                        f"Unknown update field {uf!r} on model {metadata.model_name!r}.",
-                        model=metadata.model_name,
-                        field=uf,
-                    )
+                self._validate_write_field(metadata, uf, api="bulk_upsert()")
 
-        row_dicts = [self._object_to_row_dict(obj) for obj in objects]
+        row_dicts = [self._object_to_insert_row_dict(obj, metadata) for obj in objects]
         driver = conn._require_driver()
         model_name = self._model.__name__
         upserted: list[_M] = []
@@ -2465,6 +2955,11 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             raise FerrumCompileError(
                 f"{api} cannot be used with nearest_to()/rank_by()/search(); "
                 "ranking does not apply to UPDATE/DELETE.",
+                model=self._model.__name__,
+            )
+        if self._aggregate_groups or self._having:
+            raise FerrumCompileError(
+                f"{api} cannot be used with group_by()/date_trunc()/having().",
                 model=self._model.__name__,
             )
 
@@ -2672,6 +3167,66 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         )
         return row_count
 
+    async def update_returning(
+        self,
+        conn: ConnectionLike | None = None,
+        **assignments: Any,  # noqa: ANN401
+    ) -> list[dict[str, Any]]:
+        """Atomically update filtered rows and return their post-update values.
+
+        This is the compare-and-set primitive: encode the expected state in
+        ``filter()`` and inspect the returned list. An empty list means another
+        writer won or no row matched. The existing unscoped-update and write
+        scope gates are preserved.
+        """
+        if not self._is_filtered:
+            raise FerrumDangerApiError(
+                "Refusing unscoped update_returning(). Add a filter; "
+                "there is no unscoped returning danger API."
+            )
+        self._check_write_scope("update_returning()")
+        if _native_ext is None:
+            raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
+        if conn is None:
+            raise FerrumConfigError(
+                "update_returning() requires an active Connection. "
+                "Obtain one from ferrum.connect(). [FERR-C001]"
+            )
+        metadata = self._get_metadata()
+        compiled = self._compile_ir(self._build_update_ir(assignments), dialect=conn.dialect)
+        sql_text: str = compiled["sql_text"]
+        bound_params = [_decode_bound_param(param) for param in compiled["bound_params"]]
+        fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
+        model_name = self._model.__name__
+        table = metadata.table_name if metadata is not None else model_name
+        _hooks.query_start(
+            fingerprint=fingerprint,
+            model=model_name,
+            operation="update_returning",
+            table=table,
+        )
+        started = time.monotonic()
+        try:
+            rows = await conn._require_driver().fetch(sql_text, *bound_params)
+        except Exception as exc:
+            duration_ms = (time.monotonic() - started) * 1000
+            mapped = map_db_error(
+                exc, context={"model": model_name, "operation": "update_returning"}
+            )
+            _hooks.query_failure(
+                fingerprint=fingerprint,
+                duration_ms=duration_ms,
+                failure_category=type(mapped).__name__,
+            )
+            raise mapped from None
+        output = [_row_to_dict(row) for row in rows]
+        _hooks.query_success(
+            fingerprint=fingerprint,
+            duration_ms=(time.monotonic() - started) * 1000,
+            row_count=len(output),
+        )
+        return output
+
     async def update_instance(
         self,
         conn: ConnectionLike,
@@ -2744,7 +3299,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                     "explicit fields subset.",
                     model=metadata.model_name,
                 )
-            field_list = [f.name for f in metadata.fields if f.name not in pk_names]
+            field_list = [f.name for f in metadata.writable_fields if f.name not in pk_names]
         else:
             field_list = list(dict.fromkeys(fields))
             if not field_list:
@@ -2766,6 +3321,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                         model=metadata.model_name,
                         field=name,
                     )
+                self._validate_write_field(metadata, name, api="update_instance()")
                 if name in deferred:
                     raise FerrumCompileError(
                         f"update_instance() cannot write deferred field {name!r}; "

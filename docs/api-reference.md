@@ -59,7 +59,7 @@ early).
 | `bool`    | `bool`                 |     | `time`     | `time`                                           |
 | `float`   | `float`                |     | `UUID`     | `uuid`                                           |
 | `Decimal` | `decimal`              |     | `bytes`    | `bytes`                                          |
-| `dict`    | `json`                 |     | `Vector`   | `vector` (requires `Field(vector_dimensions=n)`) |
+| `dict`    | `json`                 |     | `list[T]`  | PostgreSQL ARRAY; `Field(jsonb_list=True)` → JSONB |
 |           |                        |     | `TSVector` | `tsvector`                                       |
 |           |                        |     | unknown    | `text` (fallback)                                |
 
@@ -85,11 +85,13 @@ planner. Never carries connection info, bound values, or row data.
 | `full_text_indexes`         | `tuple[FullTextIndexMeta, ...]` | Declarative cross-dialect FTS indexes.                    |
 | `allowed_sort_directions`   | `tuple[str, ...]`               | `("asc", "desc")`.                                        |
 | `pk_index`                  | `int`                           | Index of the PK field.                                    |
+| `writable_fields`           | `tuple[FieldMeta, ...]`         | Fields excluding `generated=True` / `read_only=True`.     |
+| `writable_field_names`      | `frozenset[str]`                | Write-path field-name allowlist.                          |
 | `to_metadata_json() -> str` | method                          | Serializes to the JSON shape the native compiler expects. |
 
 `FieldMeta` (frozen): `name`, `column_name`, `python_type_name`, `field_type`,
 `allowed_operators`, `nullable`, `pk`, plus optional `max_length`, `db_default`,
-`vector_dimensions`, `db_index`, `unique`.
+`vector_dimensions`, `db_index`, `unique`, `jsonb_list`, `generated`, and `read_only`.
 
 `IndexMeta` (frozen): `name`, `fields`, `unique`, `using`, `where`.
 
@@ -121,8 +123,12 @@ DDL (`FULLTEXT KEY`, FTS5 virtual table + triggers, or catalog + full-text index
 
 Ferrum-specific keyword arguments include `primary_key`, `db_column`, `unique`, `db_index`,
 `max_length`, `uuid_generate` (`"v4"` \| `"v7"`), `vector_dimensions` (required for
-`Vector` columns), and `fts_config` (PostgreSQL `regconfig` allowlist for `TSVector`
-columns). A string `default=` value is stored as a DB-side `db_default` expression.
+`Vector` columns), `fts_config` (PostgreSQL `regconfig` allowlist for `TSVector`
+columns), `jsonb_list`, `generated`, and `read_only`. `jsonb_list=True` stores a
+`list[T]` as JSONB instead of a PostgreSQL ARRAY. Generated/read-only fields remain
+selectable and hydratable but every create/update/upsert/bulk write path excludes
+model-instance values and rejects explicit assignments. A string `default=` value is
+stored as a DB-side `db_default` expression.
 
 UUID PK columns auto-receive `db_default = "gen_random_uuid()"` unless overridden.
 `uuid_generate="v7"` sets `db_default = "uuidv7()"`.
@@ -152,11 +158,14 @@ Lazy, chainable, async query builder. Chaining methods return a **new** `QuerySe
 | `order_by(*fields) -> QuerySet[M]`                                                 | `ORDER BY`; prefix a field with `-` for DESC.                                                                                        |
 | `limit(count) -> QuerySet[M]`                                                      | Set `LIMIT`.                                                                                                                         |
 | `offset(count) -> QuerySet[M]`                                                     | Set `OFFSET`.                                                                                                                        |
+| `group_by(*fields) -> QuerySet[M]`                                                 | Add metadata-allowlisted aggregate grouping fields.                                                                                  |
+| `date_trunc(field, granularity, *, alias="bucket") -> QuerySet[M]`                 | Add a fixed date/datetime bucket (`minute` through `year`).                                                                          |
+| `having(**conditions) -> QuerySet[M]`                                              | Add bound comparisons against named aggregate results.                                                                               |
 | `nearest_to(field, vector, *, metric="l2") -> QuerySet[M]`                         | pgvector KNN ordering (`l2`, `cosine`, `inner_product`). Combines with `order_by` as secondary keys.                                 |
 | `project(model) -> QuerySet[P]`                                                    | Hydrate into another same-table model; SELECT restricted to shared fields.                                                           |
 | `rank_by(field, query, *, mode="plain") -> QuerySet[M]`                            | Full-text relevance ordering (`plain`, `phrase`, `websearch`, `boolean`).                                                            |
 | `search(query, *, field, mode="plain") -> QuerySet[M]`                             | Filter + rank on a full-text field in one call.                                                                                      |
-| `to_ir_json() -> str`                                                              | Serialize current state to the ADR-002 v3 IR JSON string (runs allowlist checks).                                                    |
+| `to_ir_json() -> str`                                                              | Serialize current state to the ADR-002 v4 IR JSON string (runs allowlist checks).                                                    |
 
 **Full-text IR (`text_rank_by`)** — when `rank_by()` or `search()` is used, the serialized
 IR includes an optional top-level node:
@@ -191,7 +200,10 @@ and `text_rank_by` are bound parameters — never interpolated into SQL.
 | `await get(conn, **kwargs)`                                            | `M`                | Exactly one row. Raises `FerrumNotFoundError` / `FerrumMultipleObjectsError`. |
 | `await count(conn)`                                                    | `int`              | `SELECT COUNT(*)`; ignores limit/offset.                                      |
 | `await exists(conn)`                                                   | `bool`             | `SELECT EXISTS(subquery)`; no row hydration.                                  |
+| `async with stream(conn, chunk_size=1000)`                             | async chunks       | PostgreSQL cursor stream; each chunk preserves normal row materialization.    |
+| `await aggregate(conn, **expressions)`                                  | `list[dict]`       | Typed scalar/grouped aggregate rows.                                          |
 | `await update(conn, **assignments)`                                    | `int`              | **Requires a filter.** Returns affected rows.                                 |
+| `await update_returning(conn, **assignments)`                          | `list[dict]`       | Filtered atomic compare-and-set via `UPDATE … RETURNING`.                     |
 | `await delete(conn)`                                                   | `int`              | **Requires a filter.** Returns affected rows.                                 |
 | `await update_instance(conn, obj, *, fields=None)`                     | `int`              | Persists one instance by primary key. `0` = row missing/stale.                |
 | `await danger_update_all(conn, **assignments)`                         | `int`              | Unscoped update — explicit opt-in.                                            |
@@ -238,6 +250,63 @@ Prefer an explicit `fields=[...]` subset. `fields=None` writes **every** non-PK 
 last-writer-wins against concurrent updates. `update_instance()` must be called on an
 unfiltered queryset (it builds its own PK filter), requires loaded, non-sentinel PK values,
 and rejects `fields` entries that are unknown, primary keys, or deferred on the instance.
+
+#### Aggregates and compare-and-set updates
+
+`Aggregate` expressions support `count`, `sum`, `avg`, `min`, and `max`. Fields,
+groups, bucket granularities, and having operators are typed/allowlisted; filter and
+having values remain bound parameters. No arbitrary SQL expression surface is exposed.
+
+```python
+from ferrum.queryset import Aggregate
+
+rows = await (
+    Event.objects
+    .filter(active=True)
+    .group_by("team_id")
+    .date_trunc("created_at", "day", alias="day")
+    .having(total__gte=10)
+    .aggregate(
+        conn,
+        total=Aggregate.count(),
+        paid=Aggregate.count(filter={"paid": True}),
+        revenue=Aggregate.sum("amount"),
+    )
+)
+# [{"team_id": ..., "day": ..., "total": 42, "paid": 8, "revenue": ...}]
+```
+
+`update_returning()` preserves the filtered-update safety gate and is suitable for an
+atomic compare-and-set claim. An empty result means no row matched the expected state:
+
+```python
+claimed = await (
+    Job.objects
+    .filter(id=job_id, state="pending")
+    .update_returning(conn, state="running", worker_id=worker_id)
+)
+if not claimed:
+    ...  # another worker won
+```
+
+#### Bounded streaming
+
+`stream()` is an async context manager yielding an async iterator of materialized
+chunks. It compiles through the normal IR path, decodes bound parameters before opening
+the cursor, and preserves model hydration, `project()`, `only()` / `defer()`, `values()`,
+and `values_list()` result shapes.
+
+```python
+async with Ticket.objects.filter(active=True).stream(conn, chunk_size=500) as chunks:
+    async for tickets in chunks:
+        await process(tickets)
+```
+
+The context must be exited to release the server cursor and pinned pool connection;
+normal exhaustion, early break, exceptions, and cancellation all close it
+deterministically. Streaming is currently PostgreSQL-only. `prefetch_related()` is
+rejected because relationship batching across partially consumed chunks would be
+semantically unsafe; use `all()` or load related rows explicitly.
 
 #### Value querysets
 
@@ -318,7 +387,7 @@ await User.objects.filter(
 ).exclude(banned=True).all(conn)
 ```
 
-Supports `&` (AND), `|` (OR), and `~` (NOT). Lowered to IR v3 predicate trees and
+Supports `&` (AND), `|` (OR), and `~` (NOT). Lowered to IR v4 predicate trees and
 compiled in Rust.
 
 ---
@@ -451,6 +520,30 @@ Additive-only schema diff. Emits `create_table` for absent tables and `add_colum
 new columns. `existing_tables` maps table name → list of existing column names (`{}` for a
 fresh DB). Identifiers come only from model metadata. (Column type changes, renames, and
 drops are out of scope in v0.1.)
+
+### `await detect_drift(conn, models=None, *, schema="public", exclude_tables=(), auth_tables=(), langgraph_tables=(), include_unmapped_tables=False) -> DriftReport`
+
+Read-only PostgreSQL schema-fidelity comparison from
+`ferrum.migrations.drift`. It compares selected registered models with live
+`information_schema` metadata, including JSONB-vs-ARRAY shape, nullability, and
+primary-key order. It never emits or applies DDL; numbered SQL migrations remain
+authoritative.
+
+```python
+from ferrum.migrations.drift import detect_drift
+
+report = await detect_drift(
+    conn,
+    models=[Ticket],
+    auth_tables={"users", "sessions"},
+    include_unmapped_tables=True,
+)
+if report.has_drift:
+    print(report.format_summary())
+```
+
+`auth_tables` and `langgraph_tables` are explicit ownership carve-outs.
+`include_unmapped_tables=False` ignores live tables outside the selected model set.
 
 ### `await apply(conn, plan_json, *, dry_run=True, confirm=False, env="development", token=None) -> MigrationResult`
 

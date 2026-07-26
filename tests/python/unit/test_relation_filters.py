@@ -30,7 +30,35 @@ class RelTicket(ferrum.Model):
     )
 
 
+class RelTicketRead(ferrum.Model):
+    """Parent model declaring the FK — mirrors TicketRead / Ticket split."""
+
+    model_config = ferrum.ModelConfig(table="tickets")
+
+    id: int = 0
+    team_id: int = 0
+    title: str = ""
+    team: ClassVar[ferrum.ForeignKey] = ferrum.ForeignKey(
+        to="RelTeam", related_name="ticket_reads", on_delete="CASCADE"
+    )
+
+
+class RelTicketConcrete(RelTicketRead):
+    """Concrete subclass that only adds columns — FK lives on the parent."""
+
+    embedding: str = ""
+
+
 class TestRelationFilterIr:
+    def test_inherited_fk_visible_on_subclass(self) -> None:
+        rels = {r.field_name: r for r in RelTicketConcrete.get_metadata().relations}
+        assert "team" in rels
+        assert rels["team"].db_column == "team_id"
+        qs = RelTicketConcrete.objects.filter(team__slug="dice")
+        ir = qs._build_ir()
+        assert ir["joins"][0]["alias"] == "team"
+        assert ir["predicate"]["filter"]["join_alias"] == "team"
+
     def test_relation_eq_lookup_adds_inner_join(self) -> None:
         qs = RelTicket.objects.filter(team__slug="dice")
         ir = qs._build_ir()

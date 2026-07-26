@@ -16,8 +16,9 @@ use ferrum_core::{
     compile::CompiledQuery,
     error::CompileError,
     ir::{
-        BindValue, Filter, JoinKind, JoinSpec, ModelMetadata, Predicate, QuerySetIR, SortDirection,
-        VectorMetric,
+        AggregateExpression, AggregateFunction, Aggregation, BindValue, DateTruncGranularity,
+        Filter, GroupExpression, HavingOperator, JoinKind, JoinSpec, ModelMetadata, Predicate,
+        QuerySetIR, SortDirection, VectorMetric,
     },
 };
 use std::fmt::Write as _;
@@ -37,6 +38,9 @@ pub fn emit_select(
 ) -> Result<CompiledQuery, CompileError> {
     // Run all allowlist validation first — fail before any SQL exists (SQL-1).
     ferrum_core::compile::compile(metadata, ir)?;
+    if let Some(aggregation) = &ir.aggregation {
+        return emit_aggregate_select(dialect, metadata, ir, aggregation);
+    }
 
     // Build SELECT clause from validated field refs.
     let table = dialect.quote_ident(&metadata.table_name);
@@ -141,6 +145,173 @@ pub fn emit_select(
         param_type_summary,
         fingerprint,
     })
+}
+
+fn emit_aggregate_select(
+    dialect: Dialect,
+    metadata: &ModelMetadata,
+    ir: &QuerySetIR,
+    aggregation: &Aggregation,
+) -> Result<CompiledQuery, CompileError> {
+    if dialect != Dialect::Postgres {
+        return Err(CompileError::MalformedIr {
+            reason: "aggregate queries currently require the PostgreSQL dialect".into(),
+        });
+    }
+    let table = dialect.quote_ident(&metadata.table_name);
+    let mut bound_params = Vec::new();
+    let mut param_type_summary = Vec::new();
+    let where_sql = build_where_sql(
+        dialect,
+        metadata,
+        ir,
+        &table,
+        false,
+        &mut bound_params,
+        &mut param_type_summary,
+    )?;
+
+    let group_sql: Vec<String> = aggregation
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(index, group)| {
+            let expression = group_expression_sql(dialect, metadata, group);
+            format!("{expression} AS \"group_{index}\"")
+        })
+        .collect();
+    let mut aggregate_sql = Vec::with_capacity(aggregation.aggregates.len());
+    for (index, aggregate) in aggregation.aggregates.iter().enumerate() {
+        let expression = aggregate_expression_sql(
+            dialect,
+            metadata,
+            aggregate,
+            &table,
+            &mut bound_params,
+            &mut param_type_summary,
+        )?;
+        aggregate_sql.push(format!("{expression} AS \"agg_{index}\""));
+    }
+    let mut projections = group_sql;
+    projections.extend(aggregate_sql);
+    let mut sql = format!("SELECT {} FROM {table}", projections.join(", "));
+    if let Some(where_clause) = where_sql {
+        write!(sql, " WHERE {where_clause}").expect("write to String is infallible");
+    }
+    if !aggregation.groups.is_empty() {
+        let groups = aggregation
+            .groups
+            .iter()
+            .map(|group| group_expression_sql(dialect, metadata, group))
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(sql, " GROUP BY {groups}").expect("write to String is infallible");
+    }
+    if !aggregation.having.is_empty() {
+        let mut clauses = Vec::with_capacity(aggregation.having.len());
+        for having in &aggregation.having {
+            let aggregate = &aggregation.aggregates[having.aggregate_index];
+            let expression = aggregate_expression_sql(
+                dialect,
+                metadata,
+                aggregate,
+                &table,
+                &mut bound_params,
+                &mut param_type_summary,
+            )?;
+            let operator = match having.operator {
+                HavingOperator::Eq => "=",
+                HavingOperator::Ne => "<>",
+                HavingOperator::Gt => ">",
+                HavingOperator::Gte => ">=",
+                HavingOperator::Lt => "<",
+                HavingOperator::Lte => "<=",
+            };
+            let placeholder = dialect.placeholder(bound_params.len() + 1);
+            clauses.push(format!("{expression} {operator} {placeholder}"));
+            param_type_summary.push(format!("having_{}:value", having.aggregate_index));
+            bound_params.push(having.value.clone());
+        }
+        write!(sql, " HAVING {}", clauses.join(" AND ")).expect("write to String is infallible");
+    }
+    append_order_limit_offset(
+        dialect,
+        metadata,
+        ir,
+        &table,
+        false,
+        &mut sql,
+        &mut bound_params,
+        &mut param_type_summary,
+    )?;
+    let fingerprint = sql_fingerprint(&sql);
+    Ok(CompiledQuery {
+        sql_text: sql,
+        bound_params,
+        param_type_summary,
+        fingerprint,
+    })
+}
+
+fn group_expression_sql(
+    dialect: Dialect,
+    metadata: &ModelMetadata,
+    group: &GroupExpression,
+) -> String {
+    match group {
+        GroupExpression::Field { field } => {
+            dialect.quote_ident(&metadata.fields[field.index].column_name)
+        }
+        GroupExpression::DateTrunc { field, granularity } => {
+            let bucket = match granularity {
+                DateTruncGranularity::Minute => "minute",
+                DateTruncGranularity::Hour => "hour",
+                DateTruncGranularity::Day => "day",
+                DateTruncGranularity::Week => "week",
+                DateTruncGranularity::Month => "month",
+                DateTruncGranularity::Quarter => "quarter",
+                DateTruncGranularity::Year => "year",
+            };
+            let column = dialect.quote_ident(&metadata.fields[field.index].column_name);
+            format!("DATE_TRUNC('{bucket}', {column})")
+        }
+    }
+}
+
+fn aggregate_expression_sql(
+    dialect: Dialect,
+    metadata: &ModelMetadata,
+    aggregate: &AggregateExpression,
+    table: &str,
+    bound_params: &mut Vec<BindValue>,
+    param_type_summary: &mut Vec<String>,
+) -> Result<String, CompileError> {
+    let function = match aggregate.function {
+        AggregateFunction::Count => "COUNT",
+        AggregateFunction::Sum => "SUM",
+        AggregateFunction::Avg => "AVG",
+        AggregateFunction::Min => "MIN",
+        AggregateFunction::Max => "MAX",
+    };
+    let argument = aggregate.field.as_ref().map_or_else(
+        || "*".to_owned(),
+        |field| dialect.quote_ident(&metadata.fields[field.index].column_name),
+    );
+    let mut sql = format!("{function}({argument})");
+    if let Some(predicate) = &aggregate.filter {
+        let predicate_sql = emit_predicate(
+            dialect,
+            metadata,
+            predicate,
+            &[],
+            table,
+            false,
+            bound_params,
+            param_type_summary,
+        )?;
+        write!(sql, " FILTER (WHERE {predicate_sql})").expect("write to String is infallible");
+    }
+    Ok(sql)
 }
 
 /// Emit a full parameterized INSERT … RETURNING statement from a `QuerySetIR`.
@@ -1134,6 +1305,7 @@ mod tests {
             distinct: false,
             exists: false,
             joins: vec![],
+            aggregation: None,
         }
     }
 
@@ -1186,6 +1358,97 @@ mod tests {
         );
         assert_eq!(q.bound_params.len(), 1);
         assert!(q.sql_text.contains("$1"));
+    }
+
+    #[test]
+    fn emit_grouped_filtered_aggregate_with_having() {
+        let meta = make_metadata();
+        let mut ir = select_ir(vec![]);
+        ir.aggregation = Some(Aggregation {
+            groups: vec![GroupExpression::Field {
+                field: FieldRef {
+                    name: "email".into(),
+                    index: 1,
+                },
+            }],
+            aggregates: vec![AggregateExpression {
+                function: AggregateFunction::Count,
+                field: None,
+                filter: Some(Predicate::Filter {
+                    filter: Filter {
+                        field: FieldRef {
+                            name: "id".into(),
+                            index: 0,
+                        },
+                        operator: "gt".into(),
+                        value: BindValue::Int(10),
+                        join_alias: None,
+                    },
+                }),
+            }],
+            having: vec![ferrum_core::ir::Having {
+                aggregate_index: 0,
+                operator: HavingOperator::Gte,
+                value: BindValue::Int(2),
+            }],
+        });
+
+        let query = emit_select(Dialect::Postgres, &meta, &ir).unwrap();
+
+        assert_eq!(
+            query.sql_text,
+            "SELECT \"email\" AS \"group_0\", COUNT(*) FILTER (WHERE \"id\" > $1) AS \
+             \"agg_0\" FROM \"users\" GROUP BY \"email\" HAVING COUNT(*) FILTER \
+             (WHERE \"id\" > $2) >= $3"
+        );
+        assert_eq!(query.bound_params.len(), 3);
+        assert!(matches!(query.bound_params[0], BindValue::Int(10)));
+        assert!(matches!(query.bound_params[1], BindValue::Int(10)));
+        assert!(matches!(query.bound_params[2], BindValue::Int(2)));
+    }
+
+    #[test]
+    fn emit_date_trunc_aggregate_uses_fixed_bucket() {
+        let mut meta = make_metadata();
+        meta.fields.push(ferrum_core::ir::metadata::FieldMeta {
+            name: "created_at".into(),
+            column_name: "created_at".into(),
+            field_type: ferrum_core::ir::metadata::FieldType::Datetime,
+            allowed_operators: vec!["eq".into(), "gte".into()],
+            nullable: false,
+            vector_dimensions: None,
+            fts_config: None,
+            fts_source_columns: None,
+        });
+        let mut ir = select_ir(vec![]);
+        ir.aggregation = Some(Aggregation {
+            groups: vec![GroupExpression::DateTrunc {
+                field: FieldRef {
+                    name: "created_at".into(),
+                    index: 2,
+                },
+                granularity: DateTruncGranularity::Day,
+            }],
+            aggregates: vec![AggregateExpression {
+                function: AggregateFunction::Sum,
+                field: Some(FieldRef {
+                    name: "id".into(),
+                    index: 0,
+                }),
+                filter: None,
+            }],
+            having: vec![],
+        });
+
+        let query = emit_select(Dialect::Postgres, &meta, &ir).unwrap();
+
+        assert!(query
+            .sql_text
+            .contains("DATE_TRUNC('day', \"created_at\") AS \"group_0\""));
+        assert!(query
+            .sql_text
+            .contains("GROUP BY DATE_TRUNC('day', \"created_at\")"));
+        assert!(query.sql_text.contains("SUM(\"id\") AS \"agg_0\""));
     }
 
     /// LIMIT and OFFSET must be bound parameters, not SQL literals.
@@ -1372,6 +1635,7 @@ mod tests {
             distinct: false,
             exists: false,
             joins: vec![],
+            aggregation: None,
         }
     }
 
@@ -1488,6 +1752,7 @@ mod tests {
             distinct: false,
             exists: false,
             joins: vec![],
+            aggregation: None,
         };
         let q = emit_bulk_insert(Dialect::Postgres, &meta, &ir).unwrap();
         assert!(q.sql_text.contains("VALUES ($1, $2), ($3, $4)"));
@@ -1515,6 +1780,7 @@ mod tests {
             distinct: false,
             exists: false,
             joins: vec![],
+            aggregation: None,
         }
     }
 
@@ -1589,6 +1855,7 @@ mod tests {
             distinct: false,
             exists: false,
             joins: vec![],
+            aggregation: None,
         }
     }
 
@@ -1802,6 +2069,7 @@ mod tests {
             distinct: false,
             exists: false,
             joins: vec![],
+            aggregation: None,
         };
         let err = emit_bulk_update(Dialect::Mssql, &meta, &ir).unwrap_err();
         assert!(matches!(err, CompileError::MalformedIr { .. }));

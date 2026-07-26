@@ -80,7 +80,7 @@ class TestTextRankByIr:
     def test_rank_by_adds_text_rank_by(self) -> None:
         qs = Doc.objects.rank_by("search_vector", "orm", mode="phrase")
         ir = json.loads(qs.to_ir_json())
-        assert ir["version"] == 3
+        assert ir["version"] == 4
         trb = ir["text_rank_by"]
         assert trb["field"]["name"] == "search_vector"
         assert trb["mode"] == "phrase"

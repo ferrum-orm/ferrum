@@ -127,6 +127,7 @@ fn bench_select_ir() -> QuerySetIR {
         distinct: false,
         exists: false,
         joins: vec![],
+        aggregation: None,
     }
 }
 

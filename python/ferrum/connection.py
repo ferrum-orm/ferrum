@@ -16,13 +16,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any
 from urllib.parse import urlparse
 
 from ferrum.config import database_url_env_hint, resolve_database_url_for_cwd
 from ferrum.drivers import get_driver_for_dsn
-from ferrum.drivers.protocol import DriverProtocol, QueryExecutorProtocol
+from ferrum.drivers.protocol import CompiledQuery, DriverProtocol, QueryExecutorProtocol
 from ferrum.errors import (
     FerrumConfigError,
     FerrumConnectionError,
@@ -31,6 +31,7 @@ from ferrum.errors import (
     map_db_error,
 )
 from ferrum.runtime import (
+    ManagedChunkStream,
     RetryPolicy,
     RuntimeConfig,
     TimedQueryExecutor,
@@ -203,6 +204,7 @@ class Connection:
         if self._driver is None:
             return
         self._lifecycle.stop_accepting()
+        await self._lifecycle.close_streams()
         await drain_inflight(self._lifecycle, timeout=self._runtime.drain_timeout)
         try:
             await self._driver.close()
@@ -280,6 +282,34 @@ class Connection:
                 raise
             except Exception as exc:
                 raise map_db_error(exc) from None
+
+    @contextlib.asynccontextmanager
+    async def stream_compiled(
+        self,
+        compiled: CompiledQuery,
+        *,
+        chunk_size: int = 1000,
+    ) -> AsyncGenerator[AsyncIterator[list[Any]], None]:
+        """Stream compiler-produced rows in bounded chunks.
+
+        The context manager pins one pooled connection and transaction for the
+        server cursor's lifetime. It must be used with ``async with`` so early
+        loop exit deterministically closes the cursor and releases the pool
+        connection. Application-provided SQL strings are intentionally not
+        accepted; ``compiled`` is an opaque value created by Ferrum's compiler.
+        """
+        stream = _open_compiled_stream(
+            self._driver,
+            self._lifecycle,
+            self._runtime,
+            self.dialect,
+            compiled,
+            chunk_size=chunk_size,
+        )
+        try:
+            yield stream
+        finally:
+            await stream.aclose()
 
     @contextlib.asynccontextmanager
     async def transaction(
@@ -461,6 +491,27 @@ class Transaction:
         )
 
     @contextlib.asynccontextmanager
+    async def stream_compiled(
+        self,
+        compiled: CompiledQuery,
+        *,
+        chunk_size: int = 1000,
+    ) -> AsyncGenerator[AsyncIterator[list[Any]], None]:
+        """Stream compiler-produced rows on this transaction's pinned connection."""
+        stream = _open_compiled_stream(
+            self._bound,
+            self._lifecycle,
+            self._runtime,
+            self._dialect,
+            compiled,
+            chunk_size=chunk_size,
+        )
+        try:
+            yield stream
+        finally:
+            await stream.aclose()
+
+    @contextlib.asynccontextmanager
     async def savepoint(self) -> AsyncGenerator[Transaction, None]:
         """Nest a SAVEPOINT inside this transaction.
 
@@ -532,6 +583,45 @@ class Transaction:
 
 # Shared by QuerySet terminals and relation prefetch helpers.
 ConnectionLike = Connection | Transaction
+
+
+def _open_compiled_stream(
+    driver: object | None,
+    lifecycle: _LifecycleGuard,
+    runtime: RuntimeConfig,
+    dialect: str,
+    compiled: CompiledQuery,
+    *,
+    chunk_size: int,
+) -> ManagedChunkStream:
+    """Open the shared Connection/Transaction streaming execution seam."""
+    lifecycle.reject_if_closing()
+    if not isinstance(compiled, CompiledQuery):
+        raise TypeError("stream_compiled() requires Ferrum compiler output.")
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be at least 1.")
+    if dialect != "postgres":
+        raise FerrumConfigError(
+            "Bounded cursor streaming currently requires the PostgreSQL (asyncpg) "
+            "driver. [FERR-C001]"
+        )
+    if driver is None:
+        raise FerrumConnectionError(
+            "Connection is not open. "
+            "Use 'async with ferrum.connect(...) as conn:' to open it first. "
+            "[FERR-E101]"
+        )
+    open_stream = getattr(driver, "open_stream", None)
+    if open_stream is None or not callable(open_stream):
+        raise FerrumConfigError(
+            "The active PostgreSQL driver does not support bounded streaming. [FERR-C001]"
+        )
+    inner = open_stream(
+        compiled,
+        chunk_size=chunk_size,
+        query_timeout=runtime.query_timeout,
+    )
+    return ManagedChunkStream(inner, lifecycle)
 
 
 @contextlib.asynccontextmanager

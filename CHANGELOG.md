@@ -17,6 +17,39 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.13] - 2026-07-26
+
+
+### Added
+
+- Typed `QuerySet` aggregates (`count`/`sum`/`avg`/`min`/`max`) with grouping,
+  filtered aggregates, date buckets, bound `HAVING`, and structured dict rows.
+- Filtered `update_returning()` for atomic compare-and-set claims.
+- Async context-managed `QuerySet.stream()` with bounded PostgreSQL chunks,
+  normal projection/deferred materialization, and deterministic cursor cleanup.
+- `Field(jsonb_list=True)`, generated/read-only field metadata, and read-only
+  PostgreSQL schema-fidelity drift reporting.
+
+### Changed
+
+- Create/update/upsert/bulk writes now derive their assignment allowlist from
+  `ModelMetadata.writable_fields`; generated/read-only columns remain selectable
+  and hydratable but cannot be written.
+
+### Fixed
+---
+
+## [0.1.12] - 2026-07-26
+
+### Fixed
+
+- **Inherited relation descriptors**: `ClassVar` `ForeignKey` / `OneToOne` /
+  `ManyToMany` declared on a parent model are now collected via MRO, so
+  subclasses (e.g. `Ticket(TicketRead)` with `team` on `TicketRead`) support
+  `filter(team__slug=...)` and `select_related("team")`.
+
+---
+
 ## [0.1.11] - 2026-07-26
 
 ### Added

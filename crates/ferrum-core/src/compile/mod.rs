@@ -18,8 +18,8 @@
 use crate::{
     error::CompileError,
     ir::{
-        metadata::FieldType, BindValue, JoinSpec, ModelMetadata, Operation, Predicate, QuerySetIR,
-        SortDirection, IR_VERSION,
+        metadata::FieldType, AggregateFunction, BindValue, GroupExpression, JoinSpec,
+        ModelMetadata, Operation, Predicate, QuerySetIR, SortDirection, IR_VERSION,
     },
 };
 
@@ -142,6 +142,7 @@ pub fn compile(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<CompiledQuer
     validate_order_by(metadata, ir)?;
     validate_vector_order_by(metadata, ir)?;
     validate_text_search(metadata, ir)?;
+    validate_aggregation(metadata, ir)?;
 
     // Validation passed. Return empty CompiledQuery — sql_text and bound_params
     // are populated by the SQL emitter in `ferrum-sql::emit`.
@@ -151,6 +152,144 @@ pub fn compile(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<CompiledQuer
         param_type_summary: Vec::new(),
         fingerprint: String::new(),
     })
+}
+
+fn validate_field_ref<'a>(
+    metadata: &'a ModelMetadata,
+    field_ref: &crate::ir::FieldRef,
+) -> Result<&'a crate::ir::metadata::FieldMeta, CompileError> {
+    metadata
+        .fields
+        .get(field_ref.index)
+        .ok_or_else(|| CompileError::UnknownField {
+            model: metadata.model_name.clone(),
+            field: field_ref.name.clone(),
+        })
+}
+
+fn validate_aggregation(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<(), CompileError> {
+    let Some(aggregation) = &ir.aggregation else {
+        return Ok(());
+    };
+    if !matches!(ir.operation, Operation::Select { .. }) {
+        return Err(CompileError::MalformedIr {
+            reason: "aggregation is only valid for select operations".into(),
+        });
+    }
+    if aggregation.aggregates.is_empty() {
+        return Err(CompileError::MalformedIr {
+            reason: "aggregation requires at least one aggregate expression".into(),
+        });
+    }
+    if !ir.joins.is_empty()
+        || ir.vector_order_by.is_some()
+        || ir.text_rank_by.is_some()
+        || ir.distinct
+        || ir.exists
+        || !ir.order_by.is_empty()
+    {
+        return Err(CompileError::MalformedIr {
+            reason:
+                "aggregation cannot be combined with joins, ranking, distinct, exists, or order_by"
+                    .into(),
+        });
+    }
+
+    for group in &aggregation.groups {
+        let field_meta = match group {
+            GroupExpression::Field { field } => validate_field_ref(metadata, field)?,
+            GroupExpression::DateTrunc { field, .. } => {
+                let field_meta = validate_field_ref(metadata, field)?;
+                if !matches!(field_meta.field_type, FieldType::Date | FieldType::Datetime) {
+                    return Err(CompileError::UnsupportedOperator {
+                        model: metadata.model_name.clone(),
+                        field: field.name.clone(),
+                        operator: "date_trunc".into(),
+                    });
+                }
+                field_meta
+            }
+        };
+        let _ = field_meta;
+    }
+
+    for aggregate in &aggregation.aggregates {
+        validate_aggregate(metadata, aggregate, &ir.joins)?;
+    }
+    for having in &aggregation.having {
+        if having.aggregate_index >= aggregation.aggregates.len() {
+            return Err(CompileError::MalformedIr {
+                reason: "having aggregate_index is out of range".into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_aggregate(
+    metadata: &ModelMetadata,
+    aggregate: &crate::ir::AggregateExpression,
+    joins: &[JoinSpec],
+) -> Result<(), CompileError> {
+    let field_meta = aggregate
+        .field
+        .as_ref()
+        .map(|field| validate_field_ref(metadata, field))
+        .transpose()?;
+    match aggregate.function {
+        AggregateFunction::Count => {}
+        AggregateFunction::Sum | AggregateFunction::Avg => {
+            let Some(field_meta) = field_meta else {
+                return Err(CompileError::MalformedIr {
+                    reason: "sum and avg require a field".into(),
+                });
+            };
+            if !matches!(
+                field_meta.field_type,
+                FieldType::Int | FieldType::BigInt | FieldType::Float | FieldType::Decimal
+            ) {
+                return Err(CompileError::UnsupportedOperator {
+                    model: metadata.model_name.clone(),
+                    field: field_meta.name.clone(),
+                    operator: format!("{:?}", aggregate.function).to_lowercase(),
+                });
+            }
+        }
+        AggregateFunction::Min | AggregateFunction::Max => {
+            let Some(field_meta) = field_meta else {
+                return Err(CompileError::MalformedIr {
+                    reason: "min and max require a field".into(),
+                });
+            };
+            if matches!(
+                field_meta.field_type,
+                FieldType::Json
+                    | FieldType::Bytes
+                    | FieldType::Vector
+                    | FieldType::ArrayText
+                    | FieldType::ArrayUuid
+                    | FieldType::ArrayInt
+                    | FieldType::ArrayFloat
+                    | FieldType::TsVector
+            ) {
+                return Err(CompileError::UnsupportedOperator {
+                    model: metadata.model_name.clone(),
+                    field: field_meta.name.clone(),
+                    operator: format!("{:?}", aggregate.function).to_lowercase(),
+                });
+            }
+        }
+    }
+    if aggregate.function != AggregateFunction::Count && aggregate.field.is_none() {
+        return Err(CompileError::MalformedIr {
+            reason: "only count may omit a field".into(),
+        });
+    }
+    if let Some(predicate) = &aggregate.filter {
+        validate_predicate(metadata, predicate, joins)?;
+        validate_predicate_fts(metadata, predicate)?;
+    }
+    Ok(())
 }
 
 fn validate_joins(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<(), CompileError> {
@@ -622,6 +761,7 @@ mod tests {
             distinct: false,
             exists: false,
             joins: vec![],
+            aggregation: None,
         }
     }
 
@@ -804,6 +944,53 @@ mod tests {
     }
 
     #[test]
+    fn rejects_sum_on_text_field() {
+        let meta = make_metadata();
+        let mut ir = base_ir("User");
+        ir.operation = Operation::Select { fields: vec![] };
+        ir.aggregation = Some(crate::ir::Aggregation {
+            groups: vec![],
+            aggregates: vec![crate::ir::AggregateExpression {
+                function: crate::ir::AggregateFunction::Sum,
+                field: Some(FieldRef {
+                    name: "email".into(),
+                    index: 1,
+                }),
+                filter: None,
+            }],
+            having: vec![],
+        });
+
+        let error = compile(&meta, &ir).unwrap_err();
+
+        assert!(matches!(error, CompileError::UnsupportedOperator { .. }));
+    }
+
+    #[test]
+    fn rejects_having_unknown_aggregate_index() {
+        let meta = make_metadata();
+        let mut ir = base_ir("User");
+        ir.operation = Operation::Select { fields: vec![] };
+        ir.aggregation = Some(crate::ir::Aggregation {
+            groups: vec![],
+            aggregates: vec![crate::ir::AggregateExpression {
+                function: crate::ir::AggregateFunction::Count,
+                field: None,
+                filter: None,
+            }],
+            having: vec![crate::ir::Having {
+                aggregate_index: 4,
+                operator: crate::ir::HavingOperator::Gt,
+                value: BindValue::Int(0),
+            }],
+        });
+
+        let error = compile(&meta, &ir).unwrap_err();
+
+        assert!(matches!(error, CompileError::MalformedIr { .. }));
+    }
+
+    #[test]
     fn query_fingerprint_contains_operation_and_model() {
         let meta = make_metadata();
         let fp = meta.query_fingerprint("Select");
@@ -836,6 +1023,7 @@ mod tests {
             distinct: false,
             exists: false,
             joins: vec![],
+            aggregation: None,
         };
         assert!(compile(&meta, &ir).is_ok());
     }
@@ -865,6 +1053,7 @@ mod tests {
             distinct: false,
             exists: false,
             joins: vec![],
+            aggregation: None,
         };
         assert!(matches!(
             compile(&meta, &ir).unwrap_err(),
@@ -889,6 +1078,7 @@ mod tests {
             distinct: false,
             exists: false,
             joins: vec![],
+            aggregation: None,
         };
         assert!(matches!(
             compile(&meta, &ir).unwrap_err(),
@@ -922,6 +1112,7 @@ mod tests {
             distinct: false,
             exists: false,
             joins: vec![],
+            aggregation: None,
         };
         assert!(matches!(
             compile(&meta, &ir).unwrap_err(),

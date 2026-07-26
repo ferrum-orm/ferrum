@@ -15,7 +15,7 @@ pub mod metadata;
 pub use metadata::ModelMetadata;
 
 /// Version of the IR contract this crate implements.
-pub const IR_VERSION: u32 = 3;
+pub const IR_VERSION: u32 = 4;
 
 /// The root IR node produced by `QuerySet._build_ir()` on the Python side.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +65,90 @@ pub struct QuerySetIR {
     /// To-one JOINs for ``select_related()`` (validated on the Python side).
     #[serde(default)]
     pub joins: Vec<JoinSpec>,
+
+    /// Optional typed aggregate projection.
+    #[serde(default)]
+    pub aggregation: Option<Aggregation>,
+}
+
+/// Aggregate projection for grouped and scalar aggregate queries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Aggregation {
+    /// GROUP BY expressions, emitted in this order.
+    pub groups: Vec<GroupExpression>,
+    /// Aggregate expressions, emitted after grouping keys.
+    pub aggregates: Vec<AggregateExpression>,
+    /// HAVING constraints referencing aggregate positions.
+    #[serde(default)]
+    pub having: Vec<Having>,
+}
+
+/// A metadata-backed GROUP BY expression.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GroupExpression {
+    /// Group directly by a model field.
+    Field { field: FieldRef },
+    /// Group a date/datetime field by a fixed truncation bucket.
+    DateTrunc {
+        field: FieldRef,
+        granularity: DateTruncGranularity,
+    },
+}
+
+/// Fixed `DATE_TRUNC` buckets. Unknown input is rejected during deserialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DateTruncGranularity {
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Quarter,
+    Year,
+}
+
+/// One typed aggregate projection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AggregateExpression {
+    pub function: AggregateFunction,
+    /// COUNT may omit a field to emit COUNT(*); all other functions require one.
+    pub field: Option<FieldRef>,
+    /// `PostgreSQL` FILTER predicate, validated through the normal predicate path.
+    #[serde(default)]
+    pub filter: Option<Predicate>,
+}
+
+/// Aggregate functions supported by Ferrum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AggregateFunction {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+/// A HAVING constraint against an aggregate by zero-based projection index.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Having {
+    pub aggregate_index: usize,
+    pub operator: HavingOperator,
+    pub value: BindValue,
+}
+
+/// Fixed HAVING comparison operators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HavingOperator {
+    Eq,
+    Ne,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
 }
 
 /// JOIN kind for ``select_related`` (LEFT) vs relation-filter (INNER) joins.

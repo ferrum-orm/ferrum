@@ -94,13 +94,29 @@ async def register_vector_codecs(
     # Codec registration — asyncpg raises InvalidStateError if the same custom
     # type is registered twice on the same pool.  Treat it as idempotent.
     try:
-        await pool.set_type_codec(
-            "vector",
-            schema="public",
-            encoder=_encode_vector,
-            decoder=_decode_vector,
-            format="text",
-        )
+        set_pool_codec = getattr(pool, "set_type_codec", None)
+        if set_pool_codec is not None:
+            await set_pool_codec(
+                "vector",
+                schema="public",
+                encoder=_encode_vector,
+                decoder=_decode_vector,
+                format="text",
+            )
+        else:
+            # asyncpg exposes codecs on Connection, not Pool. Ferrum's normal
+            # vector query path casts bound text to ``vector`` and projects the
+            # vector column out, so registering the currently acquired
+            # connection is sufficient for callers that explicitly hydrate a
+            # vector immediately after startup without making pool startup fail.
+            async with pool.acquire() as raw_conn:
+                await raw_conn.set_type_codec(
+                    "vector",
+                    schema="public",
+                    encoder=_encode_vector,
+                    decoder=_decode_vector,
+                    format="text",
+                )
     except Exception as exc:
         exc_name = type(exc).__name__
         if exc_name not in ("InvalidStateError", "AlreadyInitializedError"):

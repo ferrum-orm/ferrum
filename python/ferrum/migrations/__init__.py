@@ -23,6 +23,12 @@ Public API (stable):
 import ferrum.migrations.loader as loader
 import ferrum.migrations.operations as operations
 from ferrum.migrations.base import Migration
+from ferrum.migrations.drift import (
+    DriftReport,
+    FieldDifference,
+    PrimaryKeyDifference,
+    detect_drift,
+)
 from ferrum.migrations.operations import (
     CreateExtension,
     CreateFullTextCatalog,
@@ -54,18 +60,22 @@ __all__ = [
     "CreateFunction",
     "CreatePolicy",
     "DisableRLS",
+    "DriftReport",
     "DropExtension",
     "DropFullTextIndex",
     "DropFunction",
     "DropPolicy",
     "EnableRLS",
+    "FieldDifference",
     "IndexState",
     "Migration",
     "MigrationResult",
+    "PrimaryKeyDifference",
     "SchemaState",
     "_op_to_sql",
     "apply",
     "compute_plan",
+    "detect_drift",
     "loader",
     "operations",
 ]
