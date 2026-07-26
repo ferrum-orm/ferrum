@@ -145,12 +145,22 @@ def build_join_ir(
     metadata: ModelMetadata,
     relation_name: str,
     field_index: dict[str, int],
+    *,
+    join_kind: str = "left",
+    project_remote: bool = True,
+    remote_field_names: frozenset[str] | None = None,
 ) -> dict[str, Any]:
-    """Build the JOIN IR entry for one ``select_related()`` relation.
+    """Build the JOIN IR entry for ``select_related()`` or relation-filter lookups.
 
     Only ForeignKey and OneToOne relations are valid here because they preserve
     one output row per parent row. To-many relations must use prefetching to
     avoid row multiplication and surprising hydration behavior.
+
+    Args:
+        join_kind: ``"left"`` (select_related) or ``"inner"`` (relation filters).
+        project_remote: When ``True``, SELECT projects ``alias__col`` columns.
+        remote_field_names: When set, only these remote fields are included
+            (for filter allowlisting on filter-only joins).
     """
     rel = resolve_relation(metadata, relation_name)
     if rel.kind not in ("fk", "one_to_one"):
@@ -176,8 +186,14 @@ def build_join_ir(
     remote_meta = remote.get_metadata()
     remote_pk = remote_meta.fields[remote_meta.pk_index]
     remote_fields = [
-        {"index": i, "name": f.name, "column": f.column_name}
+        {
+            "index": i,
+            "name": f.name,
+            "column": f.column_name,
+            "allowed_operators": list(f.allowed_operators),
+        }
         for i, f in enumerate(remote_meta.fields)
+        if remote_field_names is None or f.name in remote_field_names
     ]
     alias = relation_name
     return {
@@ -187,6 +203,8 @@ def build_join_ir(
         "remote_table": remote_meta.table_name,
         "remote_pk_column": remote_pk.column_name,
         "remote_fields": remote_fields,
+        "join_kind": join_kind,
+        "project_remote": project_remote,
     }
 
 

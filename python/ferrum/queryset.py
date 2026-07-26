@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     ConnectionLike = Connection | Transaction
 
 _M = TypeVar("_M", bound="Model")
+_P = TypeVar("_P", bound="Model")
 # Row type produced by a queryset's terminals. Bound per subclass: ``_M`` for the
 # model queryset, ``dict``/``tuple``/``Any`` for the value variants.
 _R = TypeVar("_R")
@@ -107,6 +108,15 @@ def _msgpack_row_default(obj: Any) -> Any:  # noqa: ANN401
     # Structural-only copy for the Rust presence/nullability check; the real
     # value keeps its native type for model_construct, so str() here is lossless.
     return str(obj)
+
+
+def _encode_vector_literal(vector: list[float]) -> str:
+    """Encode a float list as a pgvector text literal (``[f,f,...]``).
+
+    Bound as ``text`` with an SQL ``::vector`` cast — asyncpg ``float[]``
+    binding raises ``DataError`` against pgvector columns.
+    """
+    return "[" + ",".join(str(float(v)) for v in vector) + "]"
 
 
 def _encode_bind_value(value: object) -> dict[str, object]:
@@ -199,6 +209,34 @@ def _decode_bound_param(param: str | dict[str, Any]) -> object:
     return val
 
 
+def _echo_compiled(
+    conn: ConnectionLike,
+    *,
+    sql: str,
+    bound_params: list[Any],
+    compiled: dict[str, Any],
+    model: str,
+    operation: str,
+    duration_ms: float | None = None,
+    row_count: int | None = None,
+    status: str = "ok",
+) -> None:
+    """Best-effort SQL echo for local debugging (never raises)."""
+    from ferrum.echo import echo_sql
+
+    echo_sql(
+        sql=sql,
+        bound_params=bound_params,
+        param_type_summary=compiled.get("param_type_summary"),
+        model=model,
+        operation=operation,
+        duration_ms=duration_ms,
+        row_count=row_count,
+        status=status,
+        conn_echo=getattr(conn, "_echo", None),
+    )
+
+
 def _row_to_dict(row: Any) -> dict[str, Any]:  # noqa: ANN401
     """Convert a driver row (Record, sqlite3.Row, dict) to a plain dict."""
     if isinstance(row, dict):
@@ -234,14 +272,20 @@ class _RowEncoder(json.JSONEncoder):
 def _parse_lookup(lookup: str) -> tuple[str, str]:
     """Split ``field__operator`` lookup syntax into a field name and operator.
 
-    Bare field names are equality lookups. The split is intentionally from the
-    right so field names may contain relation-style prefixes in later IR shapes
-    without changing the lookup operator rule.
+    Bare field names are equality lookups. Relation paths (``team__slug``) are
+    handled by :func:`_resolve_lookup` before this helper is used for the base
+    (non-relation) case — the split is intentionally from the right so the
+    trailing segment is the operator.
     """
     if "__" in lookup:
         field_name, operator = lookup.rsplit("__", 1)
         return field_name, operator
     return lookup, "eq"
+
+
+def _fk_oto_relations(metadata: ModelMetadata) -> dict[str, Any]:
+    """Return ``{relation_name: RelationMeta}`` for forward FK / OneToOne only."""
+    return {r.field_name: r for r in metadata.relations if r.kind in ("fk", "one_to_one")}
 
 
 def _validate_lookup(
@@ -275,6 +319,70 @@ def _validate_lookup(
         )
 
 
+_FTS_OPS = frozenset({"match", "match_phrase", "match_websearch", "match_boolean"})
+
+
+def _resolve_lookup(
+    lookup: str,
+    metadata: ModelMetadata,
+    field_index: dict[str, int],
+) -> tuple[str, str, str | None, dict[str, int], ModelMetadata]:
+    """Resolve a Django-style lookup into base or one-level relation form.
+
+    Returns ``(field_name, operator, join_alias, target_field_index, target_meta)``.
+    ``join_alias`` is ``None`` for base-table lookups.
+    """
+    relations = _fk_oto_relations(metadata)
+    if "__" in lookup:
+        first, rest = lookup.split("__", 1)
+        if first in relations:
+            from ferrum.registry import get_model
+
+            rel = relations[first]
+            remote = get_model(rel.to_model)
+            remote_meta = remote.get_metadata()
+            remote_index = {f.name: i for i, f in enumerate(remote_meta.fields)}
+            if "__" in rest:
+                remote_field, operator = rest.rsplit("__", 1)
+                if remote_field not in remote_index:
+                    # Could be multi-hop (team__owner__name) — not supported in v1.
+                    if rest.split("__", 1)[0] in _fk_oto_relations(remote_meta):
+                        raise FerrumCompileError(
+                            f"Nested relation lookups are not supported "
+                            f"({lookup!r}); use one level (e.g. 'team__slug').",
+                            model=metadata.model_name,
+                            field=lookup,
+                        )
+                    raise FerrumCompileError(
+                        f"Unknown field {remote_field!r} on related model "
+                        f"{remote_meta.model_name!r}.",
+                        model=metadata.model_name,
+                        field=lookup,
+                    )
+                _validate_lookup(remote_field, operator, remote_meta, field_index=remote_index)
+                if operator in _FTS_OPS:
+                    raise FerrumCompileError(
+                        "Full-text operators are not supported on relation lookups.",
+                        model=metadata.model_name,
+                        field=lookup,
+                        operator=operator,
+                    )
+                return remote_field, operator, first, remote_index, remote_meta
+            # ``relation__field`` → equality on remote field.
+            if rest not in remote_index:
+                raise FerrumCompileError(
+                    f"Unknown field {rest!r} on related model {remote_meta.model_name!r}.",
+                    model=metadata.model_name,
+                    field=lookup,
+                )
+            _validate_lookup(rest, "eq", remote_meta, field_index=remote_index)
+            return rest, "eq", first, remote_index, remote_meta
+
+    field_name, operator = _parse_lookup(lookup)
+    _validate_lookup(field_name, operator, metadata, field_index=field_index)
+    return field_name, operator, None, field_index, metadata
+
+
 def _filter_dict_to_ir(
     flt: dict[str, Any],
     metadata: ModelMetadata,
@@ -295,36 +403,45 @@ def _kwargs_to_ir_filters(
     kwargs: dict[str, Any],
     metadata: ModelMetadata,
     field_index: dict[str, int],
-) -> list[dict[str, Any]]:
-    """Convert Django-style keyword lookups into validated predicate leaves."""
+) -> tuple[list[dict[str, Any]], dict[str, set[str]]]:
+    """Convert Django-style keyword lookups into validated predicate leaves.
+
+    Returns ``(leaves, filter_joins)`` where ``filter_joins`` maps relation
+    alias → set of remote field names needed for allowlisting.
+    """
     leaves: list[dict[str, Any]] = []
+    filter_joins: dict[str, set[str]] = {}
     for lookup, value in kwargs.items():
-        field_name, operator = _parse_lookup(lookup)
-        _validate_lookup(field_name, operator, metadata, field_index=field_index)
-        leaves.append(
-            {
-                "kind": "filter",
-                "filter": {
-                    "field": {"index": field_index[field_name], "name": field_name},
-                    "operator": operator,
-                    "value": _encode_bind_value(value),
-                },
-            }
+        field_name, operator, join_alias, target_index, _target_meta = _resolve_lookup(
+            lookup, metadata, field_index
         )
-    return leaves
+        filt: dict[str, Any] = {
+            "field": {"index": target_index[field_name], "name": field_name},
+            "operator": operator,
+            "value": _encode_bind_value(value),
+        }
+        if join_alias is not None:
+            filt["join_alias"] = join_alias
+            filter_joins.setdefault(join_alias, set()).add(field_name)
+        leaves.append({"kind": "filter", "filter": filt})
+    return leaves, filter_joins
 
 
 def _q_to_predicate(
     q: Q,
     metadata: ModelMetadata,
     field_index: dict[str, int],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, set[str]]]:
     """Serialize a ``Q`` boolean tree into the IR predicate shape.
 
     Each leaf is validated through the same metadata allowlist as plain
     ``filter(**kwargs)``. Empty ``Q()`` objects are rejected because compiling an
     empty predicate would make caller intent ambiguous for destructive terminals.
+
+    Returns ``(predicate_ir, filter_joins)`` where ``filter_joins`` maps relation
+    alias → remote field names referenced by relation lookups.
     """
+    filter_joins: dict[str, set[str]] = {}
 
     def walk(node: Q) -> dict[str, Any]:
         children_ir: list[dict[str, Any]] = []
@@ -332,7 +449,9 @@ def _q_to_predicate(
             if isinstance(child, Q):
                 children_ir.append(walk(child))
             elif isinstance(child, dict):
-                leaves = _kwargs_to_ir_filters(child, metadata, field_index)
+                leaves, joins = _kwargs_to_ir_filters(child, metadata, field_index)
+                for alias, fields in joins.items():
+                    filter_joins.setdefault(alias, set()).update(fields)
                 if len(leaves) == 1:
                     children_ir.append(leaves[0])
                 else:
@@ -353,7 +472,7 @@ def _q_to_predicate(
             return {"kind": "not", "child": inner}
         return inner
 
-    return walk(q)
+    return walk(q), filter_joins
 
 
 def _hydrate_rows(
@@ -447,6 +566,9 @@ class _QuerySetBase(Generic[_R]):
         self._defer_fields: frozenset[str] = frozenset()
         self._select_related: tuple[str, ...] = ()
         self._prefetch_related: tuple[str, ...] = ()
+        # When set by ``QuerySet.project()``, rows hydrate into this model while
+        # IR compilation continues against ``_model`` (source table / filters).
+        self._hydrate_model: type[Model] | None = None
 
     # ------------------------------------------------------------------
     # Chaining methods (return a new queryset of the same type — no I/O, no SQL)
@@ -456,8 +578,10 @@ class _QuerySetBase(Generic[_R]):
         """Add filter(s), including ``Q`` boolean trees. Returns a new QuerySet.
 
         Uses Django-style ``field__operator=value`` syntax; bare ``field=value``
-        is the ``eq`` lookup. Field names are validated against the model
-        metadata allowlist at call time (Stage 0 first gate, QUERY_ENGINE.md §6).
+        is the ``eq`` lookup. One-level relation lookups
+        (``team__slug=...`` / ``Q(team__slug=...)``) auto-INNER-JOIN the related
+        table. Field names are validated against the model metadata allowlist at
+        call time (Stage 0 first gate, QUERY_ENGINE.md §6).
         """
         q = args_to_q(*args, **kwargs)
         if q is None:
@@ -466,7 +590,7 @@ class _QuerySetBase(Generic[_R]):
         metadata = self._get_metadata()
         if metadata is not None:
             field_index = {f.name: i for i, f in enumerate(metadata.fields)}
-            _q_to_predicate(q, metadata, field_index)
+            _q_to_predicate(q, metadata, field_index)  # Stage-0 validate only
         qs._predicate_q = q if qs._predicate_q is None else qs._predicate_q & q
         qs._is_filtered = True
         return qs
@@ -624,16 +748,41 @@ class _QuerySetBase(Generic[_R]):
             "distinct": self._distinct,
             "exists": False,
         }
+        filter_joins: dict[str, set[str]] = {}
         if self._predicate_q is not None:
-            ir["predicate"] = _q_to_predicate(self._predicate_q, metadata, field_index)
-        if self._select_related:
-            from ferrum.relations import build_join_ir
+            predicate_ir, filter_joins = _q_to_predicate(self._predicate_q, metadata, field_index)
+            ir["predicate"] = predicate_ir
 
-            ir["joins"] = [
-                build_join_ir(metadata, name, field_index) for name in self._select_related
-            ]
-        else:
-            ir["joins"] = []
+        from ferrum.relations import build_join_ir
+
+        joins: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for name in self._select_related:
+            joins.append(
+                build_join_ir(
+                    metadata,
+                    name,
+                    field_index,
+                    join_kind="left",
+                    project_remote=True,
+                )
+            )
+            seen.add(name)
+        for alias, remote_fields in filter_joins.items():
+            if alias in seen:
+                # Already LEFT JOINed via select_related; WHERE still applies.
+                continue
+            joins.append(
+                build_join_ir(
+                    metadata,
+                    alias,
+                    field_index,
+                    join_kind="inner",
+                    project_remote=False,
+                    remote_field_names=frozenset(remote_fields),
+                )
+            )
+        ir["joins"] = joins
         if self._vector_order_by is not None:
             ir["vector_order_by"] = self._vector_order_by
         if self._text_rank_by is not None:
@@ -790,10 +939,30 @@ class _QuerySetBase(Generic[_R]):
                 duration_ms=duration_ms,
                 failure_category=type(mapped).__name__,
             )
+            _echo_compiled(
+                conn,
+                sql=sql_text,
+                bound_params=bound_params,
+                compiled=compiled,
+                model=model_name,
+                operation="select",
+                duration_ms=duration_ms,
+                status="error",
+            )
             raise mapped from None
         duration_ms = (time.monotonic() - t0) * 1000
         _hooks.query_success(
             fingerprint=fingerprint,
+            duration_ms=duration_ms,
+            row_count=len(rows),
+        )
+        _echo_compiled(
+            conn,
+            sql=sql_text,
+            bound_params=bound_params,
+            compiled=compiled,
+            model=model_name,
+            operation="select",
             duration_ms=duration_ms,
             row_count=len(rows),
         )
@@ -1010,6 +1179,7 @@ class _QuerySetBase(Generic[_R]):
         qs._defer_fields = self._defer_fields
         qs._select_related = self._select_related
         qs._prefetch_related = self._prefetch_related
+        qs._hydrate_model = self._hydrate_model
 
     def _get_metadata(self) -> ModelMetadata | None:
         """Return the model's ``ModelMetadata`` if available, else ``None``."""
@@ -1100,10 +1270,12 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 field=field,
             )
         qs = self._clone()
+        # Text literal + SQL ``::vector`` cast (see ferrum-sql emit). Avoids
+        # asyncpg binding ``list[float]`` as ``float[]`` (DataError on pgvector).
         qs._vector_order_by = {
             "field": {"index": field_index[field], "name": field},
             "metric": metric,
-            "value": _encode_bind_value(vector),
+            "value": _encode_bind_value(_encode_vector_literal(vector)),
         }
         return qs
 
@@ -1173,6 +1345,55 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
     # ------------------------------------------------------------------
     # Result-shape switches (return value-typed sibling querysets)
     # ------------------------------------------------------------------
+
+    def project(self, model: type[_P]) -> QuerySet[_P]:
+        """Hydrate rows into a different model that maps to the same table.
+
+        Typical use: query a wide model (e.g. ``Ticket`` with a vector column)
+        and return a narrower read model (e.g. ``TicketRead``)::
+
+            await (
+                Ticket.objects.filter(...)
+                .nearest_to("summary_embedding", vec)
+                .project(TicketRead)
+                .all(conn)
+            )
+
+        SELECT columns are restricted to fields shared by the source and target
+        models. Filters / ``nearest_to`` / joins continue to compile against the
+        source model. The target model must declare the same ``table`` name.
+        """
+        source_meta = self._get_metadata()
+        if source_meta is None:
+            raise FerrumCompileError(
+                f"Model {self._model.__name__!r} has no metadata.",
+                model=self._model.__name__,
+            )
+        target_meta = getattr(model, "__ferrum_metadata__", None)
+        if target_meta is None:
+            raise FerrumCompileError(
+                f"Model {model.__name__!r} has no metadata.",
+                model=model.__name__,
+            )
+        if source_meta.table_name != target_meta.table_name:
+            raise FerrumCompileError(
+                f"project() requires the same table; "
+                f"{source_meta.model_name!r} maps to {source_meta.table_name!r}, "
+                f"{target_meta.model_name!r} maps to {target_meta.table_name!r}.",
+                model=source_meta.model_name,
+            )
+        source_names = {f.name for f in source_meta.fields}
+        shared = tuple(f.name for f in target_meta.fields if f.name in source_names)
+        if not shared:
+            raise FerrumCompileError(
+                f"project({model.__name__!r}) shares no fields with {source_meta.model_name!r}.",
+                model=source_meta.model_name,
+            )
+        qs = self._clone()
+        qs._hydrate_model = model
+        qs._only_fields = shared
+        # Type checkers: result terminals return ``model`` instances.
+        return cast(QuerySet[_P], qs)
 
     def values(self, *fields: str) -> ValuesQuerySet:
         """Return rows as dicts instead of model instances."""
@@ -2229,6 +2450,17 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 f"{api} cannot be used with select_related(); joins do not apply to UPDATE/DELETE.",
                 model=self._model.__name__,
             )
+        metadata = self._get_metadata()
+        if self._predicate_q is not None and metadata is not None:
+            field_index = {f.name: i for i, f in enumerate(metadata.fields)}
+            _, filter_joins = _q_to_predicate(self._predicate_q, metadata, field_index)
+            if filter_joins:
+                raise FerrumCompileError(
+                    f"{api} cannot be used with relation lookups "
+                    f"({', '.join(sorted(filter_joins))}); "
+                    "JOINs do not apply to UPDATE/DELETE.",
+                    model=self._model.__name__,
+                )
         if self._vector_order_by is not None or self._text_rank_by is not None:
             raise FerrumCompileError(
                 f"{api} cannot be used with nearest_to()/rank_by()/search(); "
@@ -2625,9 +2857,15 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         Applies ``select_related`` JOIN splitting and ``prefetch_related``
         batched loading — the model-only tail of the previous ``all()``.
         """
+        hydrate_model = self._hydrate_model if self._hydrate_model is not None else self._model
         deferred = self._deferred_field_names(metadata) if metadata is not None else None
+        # When projecting onto a narrower model, only() already excludes source-only
+        # columns — the deferred set is for the source SELECT shape and must not
+        # mark target fields as deferred.
+        if self._hydrate_model is not None:
+            deferred = None
         instances = _hydrate_rows(
-            self._model,
+            hydrate_model,
             rows,
             fingerprint=fingerprint,
             deferred=deferred,
@@ -2653,7 +2891,9 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             from ferrum.relations import prefetch_related_objects
 
             await prefetch_related_objects(instances, self._model, self._prefetch_related, conn)
-        return instances
+        # ``project()`` returns ``QuerySet[_P]`` via cast; hydration may target a
+        # different same-table model than ``_M`` at the type level.
+        return cast(list[_M], instances)
 
 
 class ValuesQuerySet(_QuerySetBase[dict[str, Any]]):

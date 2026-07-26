@@ -91,6 +91,7 @@ fn bench_select_ir() -> QuerySetIR {
                 },
                 operator: "eq".into(),
                 value: BindValue::Bool(true),
+                join_alias: None,
             },
             Filter {
                 field: FieldRef {
@@ -99,6 +100,7 @@ fn bench_select_ir() -> QuerySetIR {
                 },
                 operator: "icontains".into(),
                 value: BindValue::Text("example.com".into()),
+                join_alias: None,
             },
         ],
         order_by: vec![

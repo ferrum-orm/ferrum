@@ -67,9 +67,20 @@ pub struct QuerySetIR {
     pub joins: Vec<JoinSpec>,
 }
 
-/// JOIN metadata for ``select_related`` (`PostgreSQL` LEFT JOIN).
+/// JOIN kind for ``select_related`` (LEFT) vs relation-filter (INNER) joins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinKind {
+    /// ``LEFT JOIN`` — used by ``select_related()`` (preserve parent rows).
+    #[default]
+    Left,
+    /// ``INNER JOIN`` — used by relation-filter lookups (``team__slug=...``).
+    Inner,
+}
+
+/// JOIN metadata for ``select_related`` and relation-filter lookups.
 ///
-/// The emitter produces `LEFT JOIN <remote_table> AS <alias> ON <base_table>.<local_col> = <alias>.<remote_pk_column>`.
+/// The emitter produces `<JOIN KIND> <remote_table> AS <alias> ON <base_table>.<local_col> = <alias>.<remote_pk_column>`.
 /// All identifier fields are validated on the Python side before this struct is serialized into the IR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinSpec {
@@ -83,13 +94,25 @@ pub struct JoinSpec {
     pub remote_table: String,
     /// Remote table PK column name (from model metadata).
     pub remote_pk_column: String,
-    /// Columns to project from the remote table into `<alias>__<column>` aliases.
+    /// Columns available on the joined table (for SELECT projection and/or filter allowlisting).
     pub remote_fields: Vec<JoinFieldRef>,
+    /// ``left`` (default) or ``inner``.
+    #[serde(default)]
+    pub join_kind: JoinKind,
+    /// When ``true`` (default), project ``remote_fields`` into ``alias__col`` SELECT aliases.
+    /// Filter-only joins set this ``false`` so hydration is not polluted.
+    #[serde(default = "default_true")]
+    pub project_remote: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// A field reference into a joined (remote) model's metadata.
 ///
-/// Projected as `<alias>.<column> AS "<alias>__<column>"` in the SELECT list.
+/// When ``JoinSpec::project_remote`` is true, projected as
+/// `<alias>.<column> AS "<alias>__<column>"` in the SELECT list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinFieldRef {
     /// Index into the remote model's `ModelMetadata::fields`.
@@ -98,6 +121,9 @@ pub struct JoinFieldRef {
     pub name: String,
     /// Database column name of the remote field.
     pub column: String,
+    /// Operator allowlist copied from the remote field's ``FieldMeta`` (SQL-2).
+    #[serde(default)]
+    pub allowed_operators: Vec<String>,
 }
 
 /// The SQL operation this IR node represents.
@@ -149,10 +175,6 @@ pub enum Operation {
     },
 }
 
-fn default_true() -> bool {
-    true
-}
-
 /// One row payload for :variant:`Operation::BulkUpdate`.
 /// ``pk_values`` has one entry per PK field (single entry for single-PK models).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,17 +195,26 @@ pub struct FieldRef {
 
 /// A filter predicate (one leaf of the WHERE clause).
 ///
-/// `operator` must be in `FieldMeta::allowed_operators` for `field`; the compiler
-/// rejects any string not in that allowlist before SQL is produced (SQL-1).
+/// `operator` must be in `FieldMeta::allowed_operators` for `field` (base model)
+/// or in the matching ``JoinFieldRef::allowed_operators`` when ``join_alias`` is
+/// set. The compiler rejects any string not in that allowlist before SQL is
+/// produced (SQL-1 / SQL-2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Filter {
     /// The model field being filtered.
+    ///
+    /// When ``join_alias`` is set, ``index``/``name`` refer to the **remote**
+    /// model's field (matched against ``JoinSpec::remote_fields``).
     pub field: FieldRef,
     /// Ferrum operator string, e.g. `"eq"`, `"gt"`, `"icontains"`, `"is_null"`.
-    /// Validated against `FieldMeta::allowed_operators` before SQL emission.
+    /// Validated against the field's operator allowlist before SQL emission.
     pub operator: String,
     /// Bound value for the filter — never interpolated into SQL text.
     pub value: BindValue,
+    /// When set, the filter targets a column on the JOIN with this alias
+    /// (Django-style ``relation__field`` lookups). ``None`` = base table.
+    #[serde(default)]
+    pub join_alias: Option<String>,
 }
 
 /// Composable boolean predicate tree (``Q`` objects on the Python side).

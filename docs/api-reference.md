@@ -76,16 +76,16 @@ Configuration factory extending `pydantic.ConfigDict`. `table` sets the database
 Immutable, frozen dataclass — the allowlist source for the Rust compiler and migration
 planner. Never carries connection info, bound values, or row data.
 
-| Field                       | Type                    | Description                                               |
-| --------------------------- | ----------------------- | --------------------------------------------------------- |
-| `table_name`                | `str`                   | Resolved table name.                                      |
-| `model_name`                | `str`                   | Class name.                                               |
-| `fields`                    | `tuple[FieldMeta, ...]` | Per-field descriptors.                                    |
-| `indexes`                   | `tuple[IndexMeta, ...]` | Declarative btree/GIN/etc. indexes.                         |
-| `full_text_indexes`         | `tuple[FullTextIndexMeta, ...]` | Declarative cross-dialect FTS indexes.              |
-| `allowed_sort_directions`   | `tuple[str, ...]`       | `("asc", "desc")`.                                        |
-| `pk_index`                  | `int`                   | Index of the PK field.                                    |
-| `to_metadata_json() -> str` | method                  | Serializes to the JSON shape the native compiler expects. |
+| Field                       | Type                            | Description                                               |
+| --------------------------- | ------------------------------- | --------------------------------------------------------- |
+| `table_name`                | `str`                           | Resolved table name.                                      |
+| `model_name`                | `str`                           | Class name.                                               |
+| `fields`                    | `tuple[FieldMeta, ...]`         | Per-field descriptors.                                    |
+| `indexes`                   | `tuple[IndexMeta, ...]`         | Declarative btree/GIN/etc. indexes.                       |
+| `full_text_indexes`         | `tuple[FullTextIndexMeta, ...]` | Declarative cross-dialect FTS indexes.                    |
+| `allowed_sort_directions`   | `tuple[str, ...]`               | `("asc", "desc")`.                                        |
+| `pk_index`                  | `int`                           | Index of the PK field.                                    |
+| `to_metadata_json() -> str` | method                          | Serializes to the JSON shape the native compiler expects. |
 
 `FieldMeta` (frozen): `name`, `column_name`, `python_type_name`, `field_type`,
 `allowed_operators`, `nullable`, `pk`, plus optional `max_length`, `db_default`,
@@ -106,12 +106,12 @@ Declarative index for `class Meta: indexes = [...]`. Fields: `fields`, optional 
 
 Declarative full-text index for `class Meta: full_text_indexes = [...]`.
 
-| Field                  | Type              | Description                                                                 |
-| ---------------------- | ----------------- | --------------------------------------------------------------------------- |
-| `fields`               | `tuple[str, ...]` | Base-table columns to index (required).                                     |
-| `name`                 | `str \| None`     | Index / virtual-table name (auto-generated when omitted).                   |
-| `config`               | `str \| None`     | PostgreSQL `regconfig` or language hint (metadata allowlist).               |
-| `sqlite_content_table` | `str \| None`     | SQLite external-content source table when it differs from the model table.  |
+| Field                  | Type              | Description                                                                |
+| ---------------------- | ----------------- | -------------------------------------------------------------------------- |
+| `fields`               | `tuple[str, ...]` | Base-table columns to index (required).                                    |
+| `name`                 | `str \| None`     | Index / virtual-table name (auto-generated when omitted).                  |
+| `config`               | `str \| None`     | PostgreSQL `regconfig` or language hint (metadata allowlist).              |
+| `sqlite_content_table` | `str \| None`     | SQLite external-content source table when it differs from the model table. |
 
 On PostgreSQL, prefer a `TSVector` column plus a GIN index for stored vectors; on
 MySQL, SQLite FTS5, and SQL Server, `FullTextIndex` drives dialect-specific migration
@@ -138,24 +138,25 @@ Lazy, chainable, async query builder. Chaining methods return a **new** `QuerySe
 
 #### Chaining methods (no I/O, no SQL)
 
-| Method                                                     | Description                                                                             |
-| ---------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `filter(*args, **kwargs) -> QuerySet[M]`                   | Add lookups or `Q` boolean trees (`field__operator=value`; bare `field=value` is `eq`). |
-| `exclude(*args, **kwargs) -> QuerySet[M]`                  | Negated filter (`~Q(...)`).                                                             |
-| `distinct() -> QuerySet[M]`                                | Emit `SELECT DISTINCT`.                                                                 |
-| `only(*fields) -> QuerySet[M]`                             | Project a field subset; deferred fields raise on access.                                |
-| `defer(*fields) -> QuerySet[M]`                            | Omit fields from SELECT; deferred fields raise on access.                               |
-| `select_related(*relations) -> QuerySet[M]`                | FK / O2O forward relations via `LEFT JOIN` (one query).                                 |
-| `prefetch_related(*relations) -> QuerySet[M]`              | Reverse FK / M2M via batched follow-up queries (N+1 → 2).                               |
-| `values(*fields) -> ValuesQuerySet`                        | Switch to a dict-returning queryset (`all() -> list[dict[str, Any]]`).                   |
-| `values_list(*fields, flat=False) -> ValuesListQuerySet \| FlatValuesListQuerySet` | Switch to a tuple-returning queryset; `flat=True` returns a flat scalar queryset (`FlatValuesListQuerySet`). |
-| `order_by(*fields) -> QuerySet[M]`                         | `ORDER BY`; prefix a field with `-` for DESC.                                           |
-| `limit(count) -> QuerySet[M]`                              | Set `LIMIT`.                                                                            |
-| `offset(count) -> QuerySet[M]`                             | Set `OFFSET`.                                                                           |
-| `nearest_to(field, vector, *, metric="l2") -> QuerySet[M]` | pgvector KNN ordering (`l2`, `cosine`, `inner_product`).                                |
-| `rank_by(field, query, *, mode="plain") -> QuerySet[M]`    | Full-text relevance ordering (`plain`, `phrase`, `websearch`, `boolean`).               |
-| `search(query, *, field, mode="plain") -> QuerySet[M]`    | Filter + rank on a full-text field in one call.                                          |
-| `to_ir_json() -> str`                                      | Serialize current state to the ADR-002 v3 IR JSON string (runs allowlist checks).       |
+| Method                                                                             | Description                                                                                                                          |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `filter(*args, **kwargs) -> QuerySet[M]`                                           | Add lookups or `Q` trees (`field__op=value`; bare `field=value` is `eq`). One-level relation lookups (`team__slug`) auto-INNER-JOIN. |
+| `exclude(*args, **kwargs) -> QuerySet[M]`                                          | Negated filter (`~Q(...)`).                                                                                                          |
+| `distinct() -> QuerySet[M]`                                                        | Emit `SELECT DISTINCT`.                                                                                                              |
+| `only(*fields) -> QuerySet[M]`                                                     | Project a field subset; deferred fields raise on access.                                                                             |
+| `defer(*fields) -> QuerySet[M]`                                                    | Omit fields from SELECT; deferred fields raise on access.                                                                            |
+| `select_related(*relations) -> QuerySet[M]`                                        | FK / O2O forward relations via `LEFT JOIN` (one query).                                                                              |
+| `prefetch_related(*relations) -> QuerySet[M]`                                      | Reverse FK / M2M via batched follow-up queries (N+1 → 2).                                                                            |
+| `values(*fields) -> ValuesQuerySet`                                                | Switch to a dict-returning queryset (`all() -> list[dict[str, Any]]`).                                                               |
+| `values_list(*fields, flat=False) -> ValuesListQuerySet \| FlatValuesListQuerySet` | Switch to a tuple-returning queryset; `flat=True` returns a flat scalar queryset (`FlatValuesListQuerySet`).                         |
+| `order_by(*fields) -> QuerySet[M]`                                                 | `ORDER BY`; prefix a field with `-` for DESC.                                                                                        |
+| `limit(count) -> QuerySet[M]`                                                      | Set `LIMIT`.                                                                                                                         |
+| `offset(count) -> QuerySet[M]`                                                     | Set `OFFSET`.                                                                                                                        |
+| `nearest_to(field, vector, *, metric="l2") -> QuerySet[M]`                         | pgvector KNN ordering (`l2`, `cosine`, `inner_product`). Combines with `order_by` as secondary keys.                                 |
+| `project(model) -> QuerySet[P]`                                                    | Hydrate into another same-table model; SELECT restricted to shared fields.                                                           |
+| `rank_by(field, query, *, mode="plain") -> QuerySet[M]`                            | Full-text relevance ordering (`plain`, `phrase`, `websearch`, `boolean`).                                                            |
+| `search(query, *, field, mode="plain") -> QuerySet[M]`                             | Filter + rank on a full-text field in one call.                                                                                      |
+| `to_ir_json() -> str`                                                              | Serialize current state to the ADR-002 v3 IR JSON string (runs allowlist checks).                                                    |
 
 **Full-text IR (`text_rank_by`)** — when `rank_by()` or `search()` is used, the serialized
 IR includes an optional top-level node:
@@ -174,13 +175,13 @@ IR includes an optional top-level node:
 node to dialect-specific `ORDER BY` relevance expressions (`ts_rank`, `MATCH … AGAINST`,
 `bm25()`, or `CONTAINSTABLE`/`FREETEXTTABLE`). Query strings in both the filter predicate
 and `text_rank_by` are bound parameters — never interpolated into SQL.
-| `qs[start:stop]`                                           | Slice shorthand for `offset` / `limit`.                                                 |
+| `qs[start:stop]` | Slice shorthand for `offset` / `limit`. |
 
 #### Terminal coroutines (require `conn: Connection`)
 
 | Method                                                                 | Returns            | Notes                                                                         |
 | ---------------------------------------------------------------------- | ------------------ | ----------------------------------------------------------------------------- |
-| `await create(conn, obj_or_dict)`                                      | `M`                | `INSERT … RETURNING *` from a model instance or dict, hydrates the row.      |
+| `await create(conn, obj_or_dict)`                                      | `M`                | `INSERT … RETURNING *` from a model instance or dict, hydrates the row.       |
 | `await create(conn, **values)`                                         | `M`                | `INSERT … RETURNING *`, hydrates the row.                                     |
 | `await bulk_create(conn, objects, *, batch_size=1000, returning=True)` | `list[M]` or `int` | Multi-row `INSERT`; `returning=False` returns inserted count.                 |
 | `await bulk_update(conn, objects, fields, *, batch_size=1000)`         | `int`              | PK-keyed batched `UPDATE … FROM (VALUES …)`.                                  |
@@ -244,11 +245,11 @@ and rejects `fields` entries that are unknown, primary keys, or deferred on the 
 checkers infer the exact terminal result type. They share the full chaining/terminal surface
 of `QuerySet` (filter, order_by, all, first, get, count, exists) but re-shape rows:
 
-| Class                    | Produced by                      | `all()` returns          |
-| ------------------------ | -------------------------------- | ------------------------ |
-| `ValuesQuerySet`         | `values(*fields)`                | `list[dict[str, Any]]`   |
-| `ValuesListQuerySet`     | `values_list(*fields)`           | `list[tuple[Any, ...]]`  |
-| `FlatValuesListQuerySet` | `values_list(*fields, flat=True)`| `list[Any]` (bare scalars when exactly one field is selected) |
+| Class                    | Produced by                       | `all()` returns                                               |
+| ------------------------ | --------------------------------- | ------------------------------------------------------------- |
+| `ValuesQuerySet`         | `values(*fields)`                 | `list[dict[str, Any]]`                                        |
+| `ValuesListQuerySet`     | `values_list(*fields)`            | `list[tuple[Any, ...]]`                                       |
+| `FlatValuesListQuerySet` | `values_list(*fields, flat=True)` | `list[Any]` (bare scalars when exactly one field is selected) |
 
 All three are exported from the top-level `ferrum` package.
 
@@ -261,47 +262,47 @@ concrete model type, and `all()` / `first()` / `get()` infer `list[YourModel]` /
 
 #### Operators by field type
 
-| Field type                                              | Allowed operators                                                                      |
-| ------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `int`, `big_int`, `float`, `decimal`                    | `eq ne gt gte lt lte in is_null range`                                                 |
-| `text`                                                  | `eq ne iexact contains icontains startswith endswith istartswith iendswith in is_null` |
-| `datetime`, `date`, `time`                              | `eq ne gt gte lt lte is_null range`                                                    |
-| `bool`                                                  | `eq ne is_null`                                                                        |
-| `uuid`, `bytes`                                         | `eq ne in is_null`                                                                     |
-| `json`                                                  | `eq is_null contains has_key has_any_keys`                                             |
-| `array_text`, `array_int`, `array_uuid`, `array_float`  | `eq is_null contains contained_by overlap`                                             |
-| `enum`                                                  | `eq ne in is_null`                                                                     |
-| `vector`                                                | `is_null` (KNN via `nearest_to`)                                                       |
-| `tsvector`                                              | `match match_phrase match_websearch match_boolean is_null`                             |
-| indexed `text` (via `Meta.full_text_indexes`)           | `match match_phrase match_websearch match_boolean` (same as `tsvector`)                |
+| Field type                                             | Allowed operators                                                                      |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| `int`, `big_int`, `float`, `decimal`                   | `eq ne gt gte lt lte in is_null range`                                                 |
+| `text`                                                 | `eq ne iexact contains icontains startswith endswith istartswith iendswith in is_null` |
+| `datetime`, `date`, `time`                             | `eq ne gt gte lt lte is_null range`                                                    |
+| `bool`                                                 | `eq ne is_null`                                                                        |
+| `uuid`, `bytes`                                        | `eq ne in is_null`                                                                     |
+| `json`                                                 | `eq is_null contains has_key has_any_keys`                                             |
+| `array_text`, `array_int`, `array_uuid`, `array_float` | `eq is_null contains contained_by overlap`                                             |
+| `enum`                                                 | `eq ne in is_null`                                                                     |
+| `vector`                                               | `is_null` (KNN via `nearest_to`)                                                       |
+| `tsvector`                                             | `match match_phrase match_websearch match_boolean is_null`                             |
+| indexed `text` (via `Meta.full_text_indexes`)          | `match match_phrase match_websearch match_boolean` (same as `tsvector`)                |
 
 **Full-text operator SQL mapping** (query string always bound; config/index names from metadata):
 
-| Operator          | PostgreSQL              | MySQL                         | SQLite FTS5              | SQL Server        |
-| ----------------- | ----------------------- | ----------------------------- | ------------------------ | ----------------- |
-| `match`           | `@@ plainto_tsquery`    | `MATCH … NATURAL LANGUAGE`    | virtual table `MATCH`    | `FREETEXT`        |
-| `match_phrase`    | `@@ phraseto_tsquery`   | `MATCH … NATURAL LANGUAGE`    | virtual table `MATCH`    | `CONTAINS`        |
-| `match_websearch` | `@@ websearch_to_tsquery` | `MATCH … NATURAL LANGUAGE`  | virtual table `MATCH`    | `FREETEXT`        |
-| `match_boolean`   | `@@ to_tsquery`         | `MATCH … BOOLEAN MODE`        | virtual table `MATCH`    | `CONTAINS`        |
+| Operator          | PostgreSQL                | MySQL                      | SQLite FTS5           | SQL Server |
+| ----------------- | ------------------------- | -------------------------- | --------------------- | ---------- |
+| `match`           | `@@ plainto_tsquery`      | `MATCH … NATURAL LANGUAGE` | virtual table `MATCH` | `FREETEXT` |
+| `match_phrase`    | `@@ phraseto_tsquery`     | `MATCH … NATURAL LANGUAGE` | virtual table `MATCH` | `CONTAINS` |
+| `match_websearch` | `@@ websearch_to_tsquery` | `MATCH … NATURAL LANGUAGE` | virtual table `MATCH` | `FREETEXT` |
+| `match_boolean`   | `@@ to_tsquery`           | `MATCH … BOOLEAN MODE`     | virtual table `MATCH` | `CONTAINS` |
 
 Ranking via `rank_by()` emits `ts_rank` (PG), `MATCH … AGAINST` (MySQL),
 correlated `bm25()` (SQLite), or `CONTAINSTABLE`/`FREETEXTTABLE` (SQL Server).
 
 **Array operator SQL mapping** (`field__op=value`):
 
-| Operator       | PostgreSQL SQL emitted          | Notes                                           |
-| -------------- | ------------------------------- | ----------------------------------------------- |
-| `contains`     | `col @> $1`                     | Array contains all elements in `$1`             |
-| `contained_by` | `col <@ $1`                     | Array is a subset of `$1`                       |
-| `overlap`      | `col && $1`                     | Array shares at least one element with `$1`     |
+| Operator       | PostgreSQL SQL emitted | Notes                                       |
+| -------------- | ---------------------- | ------------------------------------------- |
+| `contains`     | `col @> $1`            | Array contains all elements in `$1`         |
+| `contained_by` | `col <@ $1`            | Array is a subset of `$1`                   |
+| `overlap`      | `col && $1`            | Array shares at least one element with `$1` |
 
 **JSONB operator SQL mapping** (`field__op=value`):
 
-| Operator       | PostgreSQL SQL emitted          | Notes                                           |
-| -------------- | ------------------------------- | ----------------------------------------------- |
-| `contains`     | `col @> $1`                     | JSONB column contains the JSON sub-document     |
-| `has_key`      | `col ? $1`                      | JSONB column has top-level key `$1`             |
-| `has_any_keys` | `col ?| $1`                     | JSONB column has any of the keys in array `$1`  |
+| Operator       | PostgreSQL SQL emitted | Notes                                       |
+| -------------- | ---------------------- | ------------------------------------------- | ---------------------------------------------- |
+| `contains`     | `col @> $1`            | JSONB column contains the JSON sub-document |
+| `has_key`      | `col ? $1`             | JSONB column has top-level key `$1`         |
+| `has_any_keys` | `col ?                 | $1`                                         | JSONB column has any of the keys in array `$1` |
 
 An unsupported operator for a field raises `FerrumCompileError` before SQL emission.
 
@@ -334,20 +335,22 @@ in hook payloads.
 
 Production runtime options (all optional):
 
-| Parameter           | Description                                                               |
-| ------------------- | ------------------------------------------------------------------------- |
-| `acquire_timeout`   | Seconds to wait for a pooled connection (`FerrumTimeoutError` on expiry). |
-| `query_timeout`     | Per-query Python-side deadline in seconds.                                |
-| `statement_timeout` | Server-side `statement_timeout` in milliseconds (PostgreSQL).             |
-| `max_lifetime`      | Recycle idle connections after this many seconds.                         |
-| `retry`             | Explicit `RetryPolicy` — default is **no retries**.                       |
-| `drain_timeout`     | Seconds to wait for in-flight queries during graceful `close()`.          |
+| Parameter           | Description                                                                                                            |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `acquire_timeout`   | Seconds to wait for a pooled connection (`FerrumTimeoutError` on expiry).                                              |
+| `query_timeout`     | Per-query Python-side deadline in seconds.                                                                             |
+| `statement_timeout` | Server-side `statement_timeout` in milliseconds (PostgreSQL).                                                          |
+| `max_lifetime`      | Recycle idle connections after this many seconds.                                                                      |
+| `retry`             | Explicit `RetryPolicy` — default is **no retries**.                                                                    |
+| `drain_timeout`     | Seconds to wait for in-flight queries during graceful `close()`.                                                       |
+| `echo`              | SQLAlchemy-like console logging: `True`/`"sql"` or `"debug"`/`"verbose"`. Also `ferrum.enable_echo()` / `FERRUM_ECHO`. |
 
 ```python
 async with ferrum.connect(
     "postgresql://user@host/db",
     query_timeout=5.0,
     statement_timeout=5000,
+    echo=True,  # print compiled SQL to stderr
 ) as conn:
     users = await User.objects.filter(active=True).all(conn)
 ```
@@ -577,25 +580,26 @@ from ferrum import (
 )
 ```
 
-| Class | Classification | SQL emitted |
-|---|---|---|
-| `CreateExtension(name, *, schema=None)` | `non_transactional` | `CREATE EXTENSION IF NOT EXISTS "name"` |
-| `DropExtension(name, *, cascade=False)` | `destructive` | `DROP EXTENSION IF EXISTS "name" [CASCADE]` |
-| `EnableRLS(table_name, *, force=False)` | `safe` | `ALTER TABLE "t" ENABLE [FORCE] ROW LEVEL SECURITY` |
-| `DisableRLS(table_name)` | `destructive` | `ALTER TABLE "t" DISABLE ROW LEVEL SECURITY` |
-| `CreatePolicy(policy_name, table_name, using, *, check_expr=None, command="ALL", role=None)` | `safe` | `CREATE POLICY "name" ON "table" [FOR cmd] [TO role] USING (expr) [WITH CHECK (expr)]` |
-| `DropPolicy(policy_name, table_name)` | `destructive` | `DROP POLICY IF EXISTS "name" ON "table"` |
-| `CreateFunction(function_name, body)` | `non_transactional` | `body` emitted verbatim |
-| `DropFunction(function_name, *, args="")` | `destructive` | `DROP FUNCTION IF EXISTS "name"(args)` |
-| `CreateFullTextCatalog(catalog_name)` | `safe` | SQL Server full-text catalog DDL |
-| `CreateFullTextIndex(table_name, index_name, columns, *, config=None, sqlite_content_table=None, catalog=None)` | `safe` | Dialect-specific full-text index DDL |
-| `DropFullTextIndex(table_name, index_name)` | `destructive` | Drop full-text index / FTS5 virtual table |
+| Class                                                                                                           | Classification      | SQL emitted                                                                            |
+| --------------------------------------------------------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------- |
+| `CreateExtension(name, *, schema=None)`                                                                         | `non_transactional` | `CREATE EXTENSION IF NOT EXISTS "name"`                                                |
+| `DropExtension(name, *, cascade=False)`                                                                         | `destructive`       | `DROP EXTENSION IF EXISTS "name" [CASCADE]`                                            |
+| `EnableRLS(table_name, *, force=False)`                                                                         | `safe`              | `ALTER TABLE "t" ENABLE [FORCE] ROW LEVEL SECURITY`                                    |
+| `DisableRLS(table_name)`                                                                                        | `destructive`       | `ALTER TABLE "t" DISABLE ROW LEVEL SECURITY`                                           |
+| `CreatePolicy(policy_name, table_name, using, *, check_expr=None, command="ALL", role=None)`                    | `safe`              | `CREATE POLICY "name" ON "table" [FOR cmd] [TO role] USING (expr) [WITH CHECK (expr)]` |
+| `DropPolicy(policy_name, table_name)`                                                                           | `destructive`       | `DROP POLICY IF EXISTS "name" ON "table"`                                              |
+| `CreateFunction(function_name, body)`                                                                           | `non_transactional` | `body` emitted verbatim                                                                |
+| `DropFunction(function_name, *, args="")`                                                                       | `destructive`       | `DROP FUNCTION IF EXISTS "name"(args)`                                                 |
+| `CreateFullTextCatalog(catalog_name)`                                                                           | `safe`              | SQL Server full-text catalog DDL                                                       |
+| `CreateFullTextIndex(table_name, index_name, columns, *, config=None, sqlite_content_table=None, catalog=None)` | `safe`              | Dialect-specific full-text index DDL                                                   |
+| `DropFullTextIndex(table_name, index_name)`                                                                     | `destructive`       | Drop full-text index / FTS5 virtual table                                              |
 
 **Security note**: `CreatePolicy.using`, `CreatePolicy.check_expr`, and `CreateFunction.body`
 are raw SQL fragments supplied by the developer in migration files. They are emitted verbatim
 and are **not** safe endpoints for user input.
 
 **Classification gates**:
+
 - `destructive` operations require `confirm=True` in `apply()` (MIG-2).
 - `non_transactional` operations are tracked via `_NON_TRANSACTIONAL_KINDS` in `orchestrator.py`
   and will be subject to the ADR-004 non-transactional gate once that ADR is resolved.

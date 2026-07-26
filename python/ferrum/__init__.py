@@ -6,7 +6,7 @@ Import paths are stable API; internal module paths are not.
 
 from __future__ import annotations
 
-__version__ = "0.1.9"
+__version__ = "0.1.11"
 __all__ = [
     "CreateExtension",
     "CreateFunction",
@@ -50,6 +50,8 @@ __all__ = [
     "clear_hooks",
     "connect",
     "contrib",
+    "disable_echo",
+    "enable_echo",
     "enable_metrics",
     "enable_opentelemetry",
     "get_metrics",
@@ -63,6 +65,7 @@ __all__ = [
 
 from ferrum import contrib, observability, session
 from ferrum.connection import Transaction, connect
+from ferrum.echo import disable_echo, enable_echo
 from ferrum.errors import (
     FerrumCompileError,
     FerrumConfigError,

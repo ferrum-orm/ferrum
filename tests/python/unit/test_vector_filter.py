@@ -38,7 +38,9 @@ class TestNearestToIr:
         vob = ir["vector_order_by"]
         assert vob["field"]["name"] == "embedding"
         assert vob["metric"] == "l2"
-        assert vob["value"]["type"] == "float_array"
+        # Text literal + SQL ::vector cast — float[] binding raises DataError.
+        assert vob["value"]["type"] == "text"
+        assert vob["value"]["value"] == "[0.1,0.2,0.3]"
 
     def test_nearest_to_non_vector_field_raises(self) -> None:
         with pytest.raises(FerrumCompileError, match="vector field"):
@@ -103,7 +105,25 @@ class TestVectorFilterCompile:
         sql = compiled["sql_text"]
         assert "ORDER BY" in sql
         assert "<=>" in sql
+        assert "::vector" in sql
         assert "LIMIT $2" in sql or "LIMIT $1" in sql
+
+    def test_nearest_to_combines_with_secondary_order_by(self) -> None:
+        """``.nearest_to(...).order_by(...)`` keeps KNN primary, order_by secondary."""
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        qs = (
+            Doc.objects.nearest_to("embedding", [0.0, 0.0, 1.0], metric="cosine")
+            .order_by("-id")
+            .limit(5)
+        )
+        sql = qs._compile()["sql_text"]
+        assert "<=>" in sql
+        assert "::vector" in sql
+        assert '"id" DESC' in sql
+        # Distance expression must precede the secondary column.
+        dist_idx = sql.index("<=>")
+        id_idx = sql.index('"id" DESC')
+        assert dist_idx < id_idx
 
     def test_match_compiles_to_plainto_tsquery(self) -> None:
         pytest.importorskip("ferrum._native", reason="Rust extension not built")

@@ -15,7 +15,10 @@ use crate::fts;
 use ferrum_core::{
     compile::CompiledQuery,
     error::CompileError,
-    ir::{BindValue, ModelMetadata, Predicate, QuerySetIR, SortDirection, VectorMetric},
+    ir::{
+        BindValue, Filter, JoinKind, JoinSpec, ModelMetadata, Predicate, QuerySetIR, SortDirection,
+        VectorMetric,
+    },
 };
 use std::fmt::Write as _;
 
@@ -59,6 +62,9 @@ pub fn emit_select(
     };
 
     for join in &ir.joins {
+        if !join.project_remote {
+            continue;
+        }
         let alias = dialect.quote_ident(&join.alias);
         for rf in &join.remote_fields {
             let col = dialect.quote_ident(&rf.column);
@@ -85,6 +91,7 @@ pub fn emit_select(
 
     if ir.exists {
         let mut inner = format!("SELECT 1 FROM {table}");
+        append_joins(dialect, metadata, ir, &table, &mut inner);
         if let Some(where_clause) = where_sql {
             write!(inner, " WHERE {where_clause}").expect("write to String is infallible");
         }
@@ -110,17 +117,7 @@ pub fn emit_select(
 
     let distinct_kw = if ir.distinct { "DISTINCT " } else { "" };
     let mut sql = format!("SELECT {distinct_kw}{fields} FROM {table}");
-    for join in &ir.joins {
-        let alias = dialect.quote_ident(&join.alias);
-        let remote_table = dialect.quote_ident(&join.remote_table);
-        let local_col = dialect.quote_ident(&metadata.fields[join.local_field.index].column_name);
-        let remote_pk = dialect.quote_ident(&join.remote_pk_column);
-        write!(
-            sql,
-            " LEFT JOIN {remote_table} AS {alias} ON {table}.{local_col} = {alias}.{remote_pk}"
-        )
-        .expect("write to String is infallible");
-    }
+    append_joins(dialect, metadata, ir, &table, &mut sql);
     if let Some(where_clause) = where_sql {
         write!(sql, " WHERE {where_clause}").expect("write to String is infallible");
     }
@@ -656,30 +653,12 @@ fn append_order_limit_offset(
     bound_params: &mut Vec<BindValue>,
     param_type_summary: &mut Vec<String>,
 ) -> Result<(), CompileError> {
-    if !ir.order_by.is_empty() {
-        let mut order_parts: Vec<String> = Vec::new();
-        for o in &ir.order_by {
-            let col = qualify_base_column(
-                dialect,
-                table,
-                &metadata.fields[o.field.index].column_name,
-                qualify_columns,
-            );
-            let dir = match o.direction {
-                SortDirection::Asc => "ASC",
-                SortDirection::Desc => "DESC",
-                SortDirection::Unknown => {
-                    return Err(CompileError::InvalidSortDirection {
-                        model: metadata.model_name.clone(),
-                        field: o.field.name.clone(),
-                        direction: "unknown".into(),
-                    })
-                }
-            };
-            order_parts.push(format!("{col} {dir}"));
-        }
-        write!(sql, " ORDER BY {}", order_parts.join(", ")).expect("write to String is infallible");
-    } else if let Some(vector_order) = &ir.vector_order_by {
+    // KNN / FTS ranking are primary ORDER BY keys; plain ``order_by()`` columns
+    // are secondary (tie-breakers). Previously an explicit ``order_by`` silently
+    // dropped ``vector_order_by`` / ``text_rank_by``.
+    let mut order_parts: Vec<String> = Vec::new();
+
+    if let Some(vector_order) = &ir.vector_order_by {
         let col = qualify_base_column(
             dialect,
             table,
@@ -688,7 +667,15 @@ fn append_order_limit_offset(
         );
         let op = vector_metric_to_sql(vector_order.metric);
         let placeholder = dialect.placeholder(bound_params.len() + 1);
-        write!(sql, " ORDER BY {col} {op} {placeholder}").expect("write to String is infallible");
+        // pgvector distance ops require a ``vector`` typed RHS. Binding a
+        // Python ``list[float]`` as ``float[]`` raises DataError; the IR carries
+        // a text literal ``'[f,f,...]'`` and we cast ``$N::vector`` on Postgres.
+        let rhs = if dialect == Dialect::Postgres {
+            format!("{placeholder}::vector")
+        } else {
+            placeholder
+        };
+        order_parts.push(format!("{col} {op} {rhs}"));
         param_type_summary.push(format!("{}:nearest_to", vector_order.field.name));
         bound_params.push(vector_order.value.clone());
     } else if let Some(text_rank) = &ir.text_rank_by {
@@ -710,9 +697,34 @@ fn append_order_limit_offset(
             table_name,
             bound_params.len() + 1,
         );
-        write!(sql, " ORDER BY {rank_sql}").expect("write to String is infallible");
+        order_parts.push(rank_sql);
         param_type_summary.push(format!("{}:text_rank", text_rank.field.name));
         bound_params.push(text_rank.query.clone());
+    }
+
+    for o in &ir.order_by {
+        let col = qualify_base_column(
+            dialect,
+            table,
+            &metadata.fields[o.field.index].column_name,
+            qualify_columns,
+        );
+        let dir = match o.direction {
+            SortDirection::Asc => "ASC",
+            SortDirection::Desc => "DESC",
+            SortDirection::Unknown => {
+                return Err(CompileError::InvalidSortDirection {
+                    model: metadata.model_name.clone(),
+                    field: o.field.name.clone(),
+                    direction: "unknown".into(),
+                })
+            }
+        };
+        order_parts.push(format!("{col} {dir}"));
+    }
+
+    if !order_parts.is_empty() {
+        write!(sql, " ORDER BY {}", order_parts.join(", ")).expect("write to String is infallible");
     }
 
     if dialect == Dialect::Mssql {
@@ -762,6 +774,67 @@ fn append_order_limit_offset(
 /// Returns `None` when there are no constraints (caller omits the `WHERE` keyword).
 /// All column references come from metadata allowlists; all values travel as
 /// bound parameters (SQL-1 + SQL-2).
+fn append_joins(
+    dialect: Dialect,
+    metadata: &ModelMetadata,
+    ir: &QuerySetIR,
+    table: &str,
+    sql: &mut String,
+) {
+    for join in &ir.joins {
+        let join_kw = match join.join_kind {
+            JoinKind::Left => "LEFT JOIN",
+            JoinKind::Inner => "INNER JOIN",
+        };
+        let alias = dialect.quote_ident(&join.alias);
+        let remote_table = dialect.quote_ident(&join.remote_table);
+        let local_col = dialect.quote_ident(&metadata.fields[join.local_field.index].column_name);
+        let remote_pk = dialect.quote_ident(&join.remote_pk_column);
+        write!(
+            sql,
+            " {join_kw} {remote_table} AS {alias} ON {table}.{local_col} = {alias}.{remote_pk}"
+        )
+        .expect("write to String is infallible");
+    }
+}
+
+fn resolve_filter_column(
+    dialect: Dialect,
+    metadata: &ModelMetadata,
+    filter: &Filter,
+    joins: &[JoinSpec],
+    table: &str,
+    qualify_columns: bool,
+) -> Result<String, CompileError> {
+    if let Some(alias) = &filter.join_alias {
+        let join =
+            joins
+                .iter()
+                .find(|j| j.alias == *alias)
+                .ok_or_else(|| CompileError::MalformedIr {
+                    reason: format!("filter join_alias {alias:?} has no matching join"),
+                })?;
+        let remote = join
+            .remote_fields
+            .iter()
+            .find(|f| f.name == filter.field.name || f.index == filter.field.index)
+            .ok_or_else(|| CompileError::UnknownField {
+                model: metadata.model_name.clone(),
+                field: format!("{alias}__{}", filter.field.name),
+            })?;
+        let alias_q = dialect.quote_ident(&join.alias);
+        let col_q = dialect.quote_ident(&remote.column);
+        Ok(format!("{alias_q}.{col_q}"))
+    } else {
+        Ok(qualify_base_column(
+            dialect,
+            table,
+            &metadata.fields[filter.field.index].column_name,
+            qualify_columns,
+        ))
+    }
+}
+
 fn build_where_sql(
     dialect: Dialect,
     metadata: &ModelMetadata,
@@ -774,12 +847,8 @@ fn build_where_sql(
     let mut parts: Vec<String> = Vec::new();
 
     for filter in &ir.filters {
-        let col = qualify_base_column(
-            dialect,
-            table,
-            &metadata.fields[filter.field.index].column_name,
-            qualify_columns,
-        );
+        let col =
+            resolve_filter_column(dialect, metadata, filter, &ir.joins, table, qualify_columns)?;
         let (clause, param) = filter_clause(
             dialect,
             metadata,
@@ -801,6 +870,7 @@ fn build_where_sql(
             dialect,
             metadata,
             predicate,
+            &ir.joins,
             table,
             qualify_columns,
             bound_params,
@@ -822,10 +892,12 @@ fn build_where_sql(
 /// `And`/`Or` wrap their children in parentheses to preserve grouping semantics
 /// regardless of SQL operator precedence. `Not` wraps its child in `NOT (…)`.
 /// Leaf `Filter` nodes delegate to `filter_clause`.
+#[allow(clippy::too_many_arguments)]
 fn emit_predicate(
     dialect: Dialect,
     metadata: &ModelMetadata,
     predicate: &Predicate,
+    joins: &[JoinSpec],
     table: &str,
     qualify_columns: bool,
     bound_params: &mut Vec<BindValue>,
@@ -840,6 +912,7 @@ fn emit_predicate(
                         dialect,
                         metadata,
                         child,
+                        joins,
                         table,
                         qualify_columns,
                         bound_params,
@@ -857,6 +930,7 @@ fn emit_predicate(
                         dialect,
                         metadata,
                         child,
+                        joins,
                         table,
                         qualify_columns,
                         bound_params,
@@ -872,6 +946,7 @@ fn emit_predicate(
                 dialect,
                 metadata,
                 child,
+                joins,
                 table,
                 qualify_columns,
                 bound_params,
@@ -879,12 +954,8 @@ fn emit_predicate(
             )?
         )),
         Predicate::Filter { filter } => {
-            let col = qualify_base_column(
-                dialect,
-                table,
-                &metadata.fields[filter.field.index].column_name,
-                qualify_columns,
-            );
+            let col =
+                resolve_filter_column(dialect, metadata, filter, joins, table, qualify_columns)?;
             let (clause, param) = filter_clause(
                 dialect,
                 metadata,
@@ -1105,6 +1176,7 @@ mod tests {
             },
             operator: "eq".into(),
             value: BindValue::Text("x@example.com".into()),
+            join_alias: None,
         });
         let q = emit_select(Dialect::Postgres, &meta, &ir).unwrap();
         // Bound value must NOT appear in SQL text (SQL-2).
@@ -1184,6 +1256,7 @@ mod tests {
             },
             operator: "icontains".into(), // not allowed for Int field
             value: BindValue::Int(42),
+            join_alias: None,
         });
         let err = emit_select(Dialect::Postgres, &meta, &ir).unwrap_err();
         assert!(matches!(err, CompileError::UnsupportedOperator { .. }));
@@ -1234,6 +1307,7 @@ mod tests {
             },
             operator: "eq".into(),
             value: BindValue::Text("user@example.com".into()),
+            join_alias: None,
         });
         ir.limit = Some(20);
 
@@ -1483,6 +1557,7 @@ mod tests {
                 },
                 operator: "eq".into(),
                 value: BindValue::Int(42),
+                join_alias: None,
             }],
         );
         let q = emit_update(Dialect::Postgres, &meta, &ir).unwrap();
@@ -1539,6 +1614,7 @@ mod tests {
             },
             operator: "eq".into(),
             value: BindValue::Int(7),
+            join_alias: None,
         }]);
         let q = emit_delete(Dialect::Postgres, &meta, &ir).unwrap();
         // Filter value must not appear in sql_text.
@@ -1577,6 +1653,7 @@ mod tests {
             },
             operator: "eq".into(),
             value: BindValue::Text("x@example.com".into()),
+            join_alias: None,
         });
         let q = emit_select(Dialect::Mssql, &meta, &ir).unwrap();
         assert!(q.sql_text.contains("[users]"), "bracket-quoted table");
@@ -1682,6 +1759,7 @@ mod tests {
                 },
                 operator: "eq".into(),
                 value: BindValue::Int(42),
+                join_alias: None,
             }],
         );
         let q = emit_update(Dialect::Mssql, &meta, &ir).unwrap();
@@ -1748,6 +1826,7 @@ mod tests {
             },
             operator: "eq".into(),
             value: BindValue::Text("a@example.com".into()),
+            join_alias: None,
         });
         ir.limit = Some(5);
 

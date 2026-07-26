@@ -17,28 +17,67 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.1.9] - 2026-07-12
+## [0.1.11] - 2026-07-26
 
+### Added
+
+- **Relation-filter JOINs**: Django-style one-level lookups
+  (`filter(team__slug=...)`, `Q(team__slug=...) | Q(team__id=...)`) auto-INNER-JOIN
+  the related FK/OTO table. Combines with `select_related()` (reuses LEFT JOIN).
+  Nested hops and relation lookups on UPDATE/DELETE are rejected.
+
+### Changed
+
+### Fixed
+
+---
+
+## [0.1.10] - 2026-07-26
+
+### Added
+
+- **`QuerySet.project(model)`**: hydrate rows into a different model that maps to
+  the same table (e.g. `Ticket.objects.nearest_to(...).project(TicketRead)`).
+  SELECT is restricted to shared fields; filters / KNN compile against the source.
+- **SQL echo / verbose mode** (SQLAlchemy-like): `ferrum.enable_echo()`,
+  `ferrum.connect(..., echo=True|"debug")`, or `FERRUM_ECHO=1|debug`. Prints
+  compiled SQL (+ param types; bound values only in debug/verbose). Generic
+  `DEBUG=1` never enables echo.
+
+### Changed
+
+- **`nearest_to()` + `order_by()`**: KNN distance is the primary `ORDER BY` key;
+  plain `order_by()` columns are secondary tie-breakers (previously `order_by`
+  silently dropped `vector_order_by`).
+- **`nearest_to()` bind format**: query vectors are bound as pgvector text
+  literals with an SQL `$N::vector` cast, fixing asyncpg `float[]` → `DataError`
+  against pgvector columns.
+
+### Fixed
+
+---
+
+## [0.1.9] - 2026-07-12
 
 ### Added
 
 ### Changed
 
 ### Fixed
+
 ---
 
 ## [0.1.8] - 2026-07-10
 
-
 ### Added
 
 ### Changed
 
 ### Fixed
+
 ---
 
 ## [0.2.0] - 2026-07-10
-
 
 ### Added
 
@@ -65,6 +104,7 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `update_instance`) reject instances carrying deferred (`only()`/`defer()`)
   fields — `model_dump()` bypasses the deferred-field guard and would silently
   write class defaults for columns that were never loaded.
+
 ---
 
 ## [0.1.6] - 2026-07-01

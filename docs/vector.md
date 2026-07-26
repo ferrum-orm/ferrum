@@ -113,7 +113,9 @@ hits = (
     await Document.objects
     .filter(title__icontains="orm")
     .nearest_to("embedding", query_vec, metric="cosine")
+    .order_by("-created_at")   # secondary tie-breaker (optional)
     .limit(10)
+    .project(DocumentRead)     # optional: hydrate a narrower same-table model
     .all(conn)
 )
 ```
@@ -124,7 +126,12 @@ hits = (
 | `vector` | Query embedding as `list[float]` (bound parameter) |
 | `metric` | `"l2"` (default), `"cosine"`, or `"inner_product"` |
 
-IR node: `vector_order_by` → compiled to `ORDER BY col <-> $n` / `<=>` / `<#>`.
+IR node: `vector_order_by` → compiled to `ORDER BY col <-> $n::vector` / `<=>` /
+`<#>`. The vector is bound as a pgvector text literal (`[f,f,...]`) — not
+`float[]` — so asyncpg does not raise `DataError`.
+
+When both `nearest_to()` and `order_by()` are set, distance is primary and
+`order_by` columns are secondary.
 
 **Constraints:**
 
@@ -132,6 +139,7 @@ IR node: `vector_order_by` → compiled to `ORDER BY col <-> $n` / `<=>` / `<#>`
 - Cannot combine `nearest_to()` with `rank_by()` / `search()` on the same queryset.
 - Values / only / defer projections that conflict with KNN ordering raise at terminal
   compile time.
+- `project(model)` requires the target model to declare the same table name.
 
 ### Metric operators (PostgreSQL)
 

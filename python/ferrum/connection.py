@@ -116,6 +116,7 @@ class Connection:
         max_lifetime: float | None = None,
         retry: RetryPolicy | None = None,
         drain_timeout: float = 30.0,
+        echo: bool | str = False,
     ) -> None:
         if dsn is None:
             dsn, database_url_env = resolve_database_url_for_cwd()
@@ -138,6 +139,8 @@ class Connection:
         )
         self._lifecycle = _LifecycleGuard()
         self._driver: DriverProtocol | None = None
+        # SQLAlchemy-like console echo: False | True/"sql" | "debug"/"verbose".
+        self._echo: bool | str = echo
 
     @property
     def dialect(self) -> str:
@@ -340,12 +343,20 @@ class Connection:
             if deadline is not None:
                 async with asyncio.timeout(deadline), tx_cm as bound:
                     yield Transaction(
-                        bound, dialect, runtime=self._runtime, lifecycle=self._lifecycle
+                        bound,
+                        dialect,
+                        runtime=self._runtime,
+                        lifecycle=self._lifecycle,
+                        echo=self._echo,
                     )
             else:
                 async with tx_cm as bound:
                     yield Transaction(
-                        bound, dialect, runtime=self._runtime, lifecycle=self._lifecycle
+                        bound,
+                        dialect,
+                        runtime=self._runtime,
+                        lifecycle=self._lifecycle,
+                        echo=self._echo,
                     )
         except TimeoutError:
             raise FerrumTimeoutError(
@@ -427,11 +438,13 @@ class Transaction:
         *,
         runtime: RuntimeConfig | None = None,
         lifecycle: _LifecycleGuard | None = None,
+        echo: bool | str = False,
     ) -> None:
         self._bound = bound
         self._dialect = dialect
         self._runtime = runtime or RuntimeConfig()
         self._lifecycle = lifecycle or _LifecycleGuard()
+        self._echo: bool | str = echo
 
     @property
     def dialect(self) -> str:
@@ -472,6 +485,7 @@ class Transaction:
                 self._dialect,
                 runtime=self._runtime,
                 lifecycle=self._lifecycle,
+                echo=self._echo,
             )
 
     async def call_function(
@@ -532,6 +546,7 @@ async def connect(
     max_lifetime: float | None = None,
     retry: RetryPolicy | None = None,
     drain_timeout: float = 30.0,
+    echo: bool | str = False,
 ) -> AsyncGenerator[Connection, None]:
     """Async context manager that yields an open Ferrum connection.
 
@@ -548,6 +563,10 @@ async def connect(
     - ``max_lifetime``: recycle idle connections after this many seconds.
     - ``retry``: explicit :class:`RetryPolicy` (default: no retries).
     - ``drain_timeout``: seconds to wait for in-flight work on ``close()``.
+    - ``echo``: SQLAlchemy-like console logging — ``True``/``"sql"`` prints
+      SQL + param type summary; ``"debug"``/``"verbose"`` also prints bound
+      values (local-dev only). Also controllable via ``ferrum.enable_echo()``
+      or ``FERRUM_ECHO=1|debug``.
     """
     conn = Connection(
         dsn,
@@ -559,6 +578,7 @@ async def connect(
         max_lifetime=max_lifetime,
         retry=retry,
         drain_timeout=drain_timeout,
+        echo=echo,
     )
     try:
         await conn.open()

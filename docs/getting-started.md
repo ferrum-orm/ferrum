@@ -284,18 +284,22 @@ column is written, which is last-writer-wins against concurrent updates.
 
 ### Filter syntax
 
-Django-style `field__operator=value`; a bare `field=value` means `eq`:
+Django-style `field__operator=value`; a bare `field=value` means `eq`. One-level
+relation lookups auto-INNER-JOIN the related FK / OneToOne table:
 
 ```python
 Note.objects.filter(body="exact")            # eq
 Note.objects.filter(body__icontains="ferr")  # case-insensitive contains
 Note.objects.filter(id__gte=10, id__lt=100)  # range via two bounds
 Note.objects.filter(id__in=[1, 2, 3])
+Ticket.objects.filter(team__slug="dice")     # JOIN teams ON … WHERE teams.slug = $n
+Ticket.objects.filter(Q(team__slug="dice") | Q(team__id=team_uuid))
 ```
 
 Allowed operators depend on the field type and are enforced against the model's allowlist
 **before** any SQL is emitted. An unknown field or unsupported operator raises
 `FerrumCompileError` immediately. See [API Reference → Operators](./api-reference.md#operators-by-field-type).
+Nested relation hops (`a__b__c`) are not supported yet.
 
 ### Ordering
 
@@ -349,6 +353,19 @@ clear_hooks()                  # test teardown
 Tiers B (normalized SQL) and C (full SQL + bound values) require an explicit opt-in via the
 `FERRUM_OBS` environment variable and are **never** enabled by a generic `DEBUG=1`. Tier C
 is local-dev only and additionally gated behind `FERRUM_OBS_ALLOW_TIER_C=1`.
+
+For a SQLAlchemy-style console dump during local development (does not elevate hook tiers):
+
+```python
+import ferrum
+
+ferrum.enable_echo()                 # SQL + param type summary → stderr
+# ferrum.enable_echo(verbose=True)   # also print bound values (local-dev only)
+
+async with ferrum.connect(echo=True) as conn:          # or echo="debug"
+    ...
+# Or: FERRUM_ECHO=1 / FERRUM_ECHO=debug
+```
 
 ---
 
@@ -523,11 +540,11 @@ ranked = await Document.objects.rank_by("search_vector", "rust", mode="plain").a
 Lookup operators on `tsvector` (and indexed `text` fields): `match`, `match_phrase`,
 `match_websearch`, `match_boolean`. Query strings are always bound parameters.
 
-| Lookup suffix       | `rank_by` / `search` mode | Meaning                                      |
-| ------------------- | ------------------------- | -------------------------------------------- |
-| `__match`           | `plain`                   | Natural-language terms                       |
-| `__match_phrase`    | `phrase`                  | Exact phrase                                 |
-| `__match_websearch` | `websearch`               | Web-style quotes and `-` negation            |
+| Lookup suffix       | `rank_by` / `search` mode | Meaning                                     |
+| ------------------- | ------------------------- | ------------------------------------------- |
+| `__match`           | `plain`                   | Natural-language terms                      |
+| `__match_phrase`    | `phrase`                  | Exact phrase                                |
+| `__match_websearch` | `websearch`               | Web-style quotes and `-` negation           |
 | `__match_boolean`   | `boolean`                 | Boolean query syntax (`&`, `\|`, `!`, etc.) |
 
 `.search(query, *, field, mode="plain")` combines the matching filter with
@@ -536,12 +553,12 @@ relevance. `.rank_by()` alone adds an `ORDER BY` score without requiring a filte
 
 ### Per-dialect notes
 
-| Driver     | Column / index model                         | Filter emit                         | Ranking emit                          |
-| ---------- | -------------------------------------------- | ----------------------------------- | ------------------------------------- |
-| PostgreSQL | `TSVector` column + optional GIN index       | `@@ plainto_/phraseto_/websearch_to_/to_tsquery` | `ts_rank(...)`              |
-| MySQL      | `FULLTEXT` index on base `text` columns      | `MATCH(cols) AGAINST(? IN … MODE)`  | same `MATCH … AGAINST` expression     |
-| SQLite     | FTS5 **virtual table** + content sync        | virtual-table `MATCH`               | correlated `bm25()`                   |
-| SQL Server | `CREATE FULLTEXT CATALOG` + full-text index  | `CONTAINS` / `FREETEXT`             | `CONTAINSTABLE` / `FREETEXTTABLE` JOIN |
+| Driver     | Column / index model                        | Filter emit                                      | Ranking emit                           |
+| ---------- | ------------------------------------------- | ------------------------------------------------ | -------------------------------------- |
+| PostgreSQL | `TSVector` column + optional GIN index      | `@@ plainto_/phraseto_/websearch_to_/to_tsquery` | `ts_rank(...)`                         |
+| MySQL      | `FULLTEXT` index on base `text` columns     | `MATCH(cols) AGAINST(? IN … MODE)`               | same `MATCH … AGAINST` expression      |
+| SQLite     | FTS5 **virtual table** + content sync       | virtual-table `MATCH`                            | correlated `bm25()`                    |
+| SQL Server | `CREATE FULLTEXT CATALOG` + full-text index | `CONTAINS` / `FREETEXT`                          | `CONTAINSTABLE` / `FREETEXTTABLE` JOIN |
 
 - **PostgreSQL:** declare `TSVector` with `Field(fts_config="english")` (regconfig
   allowlist). GIN indexes on `tsvector` columns use `Meta.indexes` with `using="gin"`.

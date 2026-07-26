@@ -18,7 +18,7 @@
 use crate::{
     error::CompileError,
     ir::{
-        metadata::FieldType, BindValue, ModelMetadata, Operation, Predicate, QuerySetIR,
+        metadata::FieldType, BindValue, JoinSpec, ModelMetadata, Operation, Predicate, QuerySetIR,
         SortDirection, IR_VERSION,
     },
 };
@@ -127,16 +127,18 @@ pub fn compile(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result<CompiledQuer
         Operation::BulkDelete { pk_fields, ids } => validate_bulk_delete(metadata, pk_fields, ids)?,
     }
 
+    // Joins first so filter ``join_alias`` references can be checked against them.
+    validate_joins(metadata, ir)?;
+
     // Validate all field references in filters before touching SQL.
     for filter in &ir.filters {
-        validate_filter(metadata, filter)?;
+        validate_filter(metadata, filter, &ir.joins)?;
     }
 
     if let Some(predicate) = &ir.predicate {
-        validate_predicate(metadata, predicate)?;
+        validate_predicate(metadata, predicate, &ir.joins)?;
     }
 
-    validate_joins(metadata, ir)?;
     validate_order_by(metadata, ir)?;
     validate_vector_order_by(metadata, ir)?;
     validate_text_search(metadata, ir)?;
@@ -319,14 +321,15 @@ fn validate_vector_order_by(metadata: &ModelMetadata, ir: &QuerySetIR) -> Result
             operator: "nearest_to".into(),
         });
     }
-    // Accept both float_array (canonical vector type) and int_array (integer
-    // dims encoded by _encode_bind_value when the caller passes a list[int]).
+    // Prefer text (pgvector literal ``[f,f,...]`` + SQL ``::vector`` cast) so
+    // asyncpg does not bind ``list[float]`` as ``float[]`` (DataError). Still
+    // accept float_array / int_array for backwards-compatible IR producers.
     if !matches!(
         vector_order.value,
-        BindValue::FloatArray(_) | BindValue::IntArray(_)
+        BindValue::Text(_) | BindValue::FloatArray(_) | BindValue::IntArray(_)
     ) {
         return Err(CompileError::MalformedIr {
-            reason: "vector_order_by.value must be float_array or int_array".into(),
+            reason: "vector_order_by.value must be text, float_array, or int_array".into(),
         });
     }
     Ok(())
@@ -466,6 +469,11 @@ fn validate_predicate_fts(
         Predicate::Not { child } => validate_predicate_fts(metadata, child)?,
         Predicate::Filter { filter } => {
             if FTS_OPERATORS.contains(&filter.operator.as_str()) {
+                if filter.join_alias.is_some() {
+                    return Err(CompileError::MalformedIr {
+                        reason: "full-text operators are not supported on relation lookups".into(),
+                    });
+                }
                 validate_fts_filter(metadata, filter)?;
             }
         }
@@ -482,7 +490,36 @@ pub fn ir_has_where_clause(ir: &QuerySetIR) -> bool {
 fn validate_filter(
     metadata: &ModelMetadata,
     filter: &crate::ir::Filter,
+    joins: &[JoinSpec],
 ) -> Result<(), CompileError> {
+    if let Some(alias) = &filter.join_alias {
+        let join =
+            joins
+                .iter()
+                .find(|j| j.alias == *alias)
+                .ok_or_else(|| CompileError::MalformedIr {
+                    reason: format!("filter join_alias {alias:?} has no matching join"),
+                })?;
+        let remote = join
+            .remote_fields
+            .iter()
+            .find(|f| f.name == filter.field.name || f.index == filter.field.index)
+            .ok_or_else(|| CompileError::UnknownField {
+                model: metadata.model_name.clone(),
+                field: format!("{alias}__{}", filter.field.name),
+            })?;
+        if !remote.allowed_operators.is_empty()
+            && !remote.allowed_operators.contains(&filter.operator)
+        {
+            return Err(CompileError::UnsupportedOperator {
+                model: metadata.model_name.clone(),
+                field: format!("{alias}__{}", filter.field.name),
+                operator: filter.operator.clone(),
+            });
+        }
+        return Ok(());
+    }
+
     let field_meta =
         metadata
             .fields
@@ -502,15 +539,19 @@ fn validate_filter(
     Ok(())
 }
 
-fn validate_predicate(metadata: &ModelMetadata, predicate: &Predicate) -> Result<(), CompileError> {
+fn validate_predicate(
+    metadata: &ModelMetadata,
+    predicate: &Predicate,
+    joins: &[JoinSpec],
+) -> Result<(), CompileError> {
     match predicate {
         Predicate::And { children } | Predicate::Or { children } => {
             for child in children {
-                validate_predicate(metadata, child)?;
+                validate_predicate(metadata, child, joins)?;
             }
         }
-        Predicate::Not { child } => validate_predicate(metadata, child)?,
-        Predicate::Filter { filter } => validate_filter(metadata, filter)?,
+        Predicate::Not { child } => validate_predicate(metadata, child, joins)?,
+        Predicate::Filter { filter } => validate_filter(metadata, filter, joins)?,
     }
     Ok(())
 }
@@ -604,6 +645,7 @@ mod tests {
             },
             operator: "eq".into(),
             value: BindValue::Int(1),
+            join_alias: None,
         });
         let err = compile(&meta, &ir).unwrap_err();
         assert!(matches!(err, CompileError::UnknownField { .. }));
@@ -634,6 +676,7 @@ mod tests {
             },
             operator: "regex".into(), // not in allowed_operators
             value: BindValue::Int(1),
+            join_alias: None,
         });
         let err = compile(&meta, &ir).unwrap_err();
         assert!(matches!(err, CompileError::UnsupportedOperator { .. }));
@@ -679,6 +722,7 @@ mod tests {
             },
             operator: "match".into(),
             value: BindValue::Text("hello".into()),
+            join_alias: None,
         });
         let err = compile(&meta, &ir).unwrap_err();
         assert!(matches!(err, CompileError::UnsupportedOperator { .. }));
@@ -723,6 +767,7 @@ mod tests {
             },
             operator: "match_phrase".into(),
             value: BindValue::Text("hello world".into()),
+            join_alias: None,
         });
         ir.text_rank_by = Some(crate::ir::TextRankBy {
             field: FieldRef {
@@ -746,6 +791,7 @@ mod tests {
             },
             operator: "eq".into(),
             value: BindValue::Text("test@example.com".into()),
+            join_alias: None,
         });
         ir.order_by.push(OrderBy {
             field: FieldRef {
