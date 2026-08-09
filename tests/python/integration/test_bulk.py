@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from decimal import Decimal
+from typing import Annotated
+from uuid import UUID, uuid4
+
 import pytest
 
 import ferrum
@@ -87,3 +92,53 @@ async def test_bulk_create_count_mode(
         )
         assert count == 5
         assert await Row.objects.count(pg_conn) == 5
+
+
+@pytest.mark.integration
+async def test_bulk_update_non_text_column_types(
+    pg_conn: ferrum.connection.Connection,
+    require_native: None,
+    unique_suffix: str,
+) -> None:
+    """bulk_update casts VALUES placeholders to the DDL column type.
+
+    A UUID primary key previously compiled to ``$1::text``, so the
+    ``t.id = v.id`` join raised ``UndefinedFunction``; ``uuid[]``/``tsvector``
+    columns failed the SET assignment and ``numeric`` columns failed parameter
+    binding against a ``double precision`` cast.
+    """
+    table_name = f"ferrum_int_bulk_types_{unique_suffix}"
+
+    class Ticket(ferrum.Model):
+        id: Annotated[UUID, ferrum.Field(primary_key=True)]
+        first_seen_at: Annotated[datetime, ferrum.Field(primary_key=True)]
+        related_ids: list[UUID] = ferrum.Field(default_factory=list)
+        amount: Decimal | None = None
+
+        class Meta:
+            table = table_name
+
+    create_sql = f"""
+        CREATE TABLE "{table_name}" (
+            id UUID NOT NULL,
+            first_seen_at TIMESTAMPTZ NOT NULL,
+            related_ids UUID[] NOT NULL DEFAULT '{{}}',
+            amount NUMERIC(12, 4),
+            PRIMARY KEY (id, first_seen_at)
+        )
+    """
+    drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
+
+    async with transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
+        seen_at = datetime.now(UTC)
+        row = await Ticket.objects.create(pg_conn, id=uuid4(), first_seen_at=seen_at)
+
+        related = [uuid4()]
+        row.related_ids = related
+        row.amount = Decimal("1.0050")
+        updated = await Ticket.objects.bulk_update(pg_conn, [row], ("related_ids", "amount"))
+        assert updated == 1
+
+        stored = await Ticket.objects.get(pg_conn, id=row.id, first_seen_at=seen_at)
+        assert stored.related_ids == related
+        assert stored.amount == Decimal("1.0050")

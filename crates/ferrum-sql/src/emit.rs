@@ -1219,6 +1219,11 @@ fn filter_clause(
 /// `UPDATE … FROM (VALUES …)` requires explicit casts so `PostgreSQL` can infer
 /// the correct column types when the VALUES clause contains multiple rows.
 /// The cast is appended to the placeholder, e.g. `$1::bigint`, `$2::text`.
+///
+/// The cast must be assignment-compatible with the DDL column type, and for PK
+/// columns it must match exactly: the join predicate `t.pk = v.pk` resolves an
+/// operator rather than an assignment cast, so a `uuid` column compared against
+/// a `text` VALUES column fails with `UndefinedFunction` (42883).
 fn postgres_value_cast(
     field_type: ferrum_core::ir::metadata::FieldType,
     placeholder: &str,
@@ -1226,8 +1231,11 @@ fn postgres_value_cast(
     use ferrum_core::ir::metadata::FieldType;
     let cast = match field_type {
         FieldType::Int | FieldType::BigInt => "bigint",
-        FieldType::Float | FieldType::Decimal => "double precision",
-        FieldType::Text | FieldType::Uuid | FieldType::TsVector | FieldType::Enum => "text",
+        FieldType::Float => "double precision",
+        FieldType::Decimal => "numeric",
+        FieldType::Text | FieldType::Enum => "text",
+        FieldType::Uuid => "uuid",
+        FieldType::TsVector => "tsvector",
         FieldType::Bool => "boolean",
         FieldType::Datetime => "timestamptz",
         FieldType::Date => "date",
@@ -1235,7 +1243,8 @@ fn postgres_value_cast(
         FieldType::Json => "jsonb",
         FieldType::Bytes => "bytea",
         FieldType::Vector => "vector",
-        FieldType::ArrayText | FieldType::ArrayUuid => "text[]",
+        FieldType::ArrayText => "text[]",
+        FieldType::ArrayUuid => "uuid[]",
         FieldType::ArrayInt => "bigint[]",
         FieldType::ArrayFloat => "double precision[]",
     };
@@ -2110,6 +2119,79 @@ mod tests {
         };
         let err = emit_bulk_update(Dialect::Mssql, &meta, &ir).unwrap_err();
         assert!(matches!(err, CompileError::MalformedIr { .. }));
+    }
+
+    /// Every VALUES placeholder must carry the cast of its DDL column type.
+    /// A `uuid` PK cast to `text` made `t.id = v.id` resolve `uuid = text`,
+    /// which `PostgreSQL` rejects with `UndefinedFunction` (42883); `uuid[]` and
+    /// `tsvector` columns failed the SET assignment for the same reason.
+    #[test]
+    fn bulk_update_casts_match_column_types() {
+        let field = |name: &str, field_type: FieldType| FieldMeta {
+            name: name.into(),
+            column_name: name.into(),
+            field_type,
+            allowed_operators: vec!["eq".into()],
+            nullable: true,
+            vector_dimensions: None,
+            fts_config: None,
+            fts_source_columns: None,
+        };
+        let meta = ModelMetadata {
+            model_name: "Ticket".into(),
+            table_name: "tickets".into(),
+            fields: vec![
+                field("id", FieldType::Uuid),
+                field("tags", FieldType::ArrayUuid),
+                field("search", FieldType::TsVector),
+                field("amount", FieldType::Decimal),
+            ],
+            pk_index: 0,
+            pk_fields: vec![0],
+            full_text_indexes: vec![],
+        };
+        let field_ref = |name: &str, index: usize| FieldRef {
+            name: name.into(),
+            index,
+        };
+        let ir = QuerySetIR {
+            version: IR_VERSION,
+            model_name: "Ticket".into(),
+            operation: Operation::BulkUpdate {
+                pk_fields: vec![field_ref("id", 0)],
+                fields: vec![
+                    field_ref("tags", 1),
+                    field_ref("search", 2),
+                    field_ref("amount", 3),
+                ],
+                rows: vec![ferrum_core::ir::BulkUpdateRow {
+                    pk_values: vec![BindValue::Text(
+                        "00000000-0000-0000-0000-000000000001".into(),
+                    )],
+                    values: vec![
+                        BindValue::TextArray(vec![]),
+                        BindValue::Text("lexeme".into()),
+                        BindValue::Text("1.005".into()),
+                    ],
+                }],
+            },
+            filters: vec![],
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            vector_order_by: None,
+            text_rank_by: None,
+            predicate: None,
+            distinct: false,
+            exists: false,
+            joins: vec![],
+            aggregation: None,
+        };
+        let q = emit_bulk_update(Dialect::Postgres, &meta, &ir).unwrap();
+        assert!(q.sql_text.contains("$1::uuid,"), "{}", q.sql_text);
+        assert!(q.sql_text.contains("$2::uuid[]"), "{}", q.sql_text);
+        assert!(q.sql_text.contains("$3::tsvector"), "{}", q.sql_text);
+        assert!(q.sql_text.contains("$4::numeric"), "{}", q.sql_text);
     }
 
     // ── MessagePack wire-format round-trip ───────────────────────────────────

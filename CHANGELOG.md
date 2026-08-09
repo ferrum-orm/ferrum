@@ -17,6 +17,23 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.16] - 2026-08-09
+
+
+### Added
+
+### Changed
+
+### Fixed
+
+- `bulk_update()` now casts each `VALUES` placeholder to its DDL column type
+  instead of a lossy approximation. A `uuid` primary key compiled to
+  `$1::text`, so the `t.pk = v.pk` join raised
+  `FerrumDatabaseError: UndefinedFunctionError` (PostgreSQL 42883); `uuid[]`
+  and `tsvector` columns failed the `SET` assignment, and `numeric` columns
+  failed parameter binding against a `double precision` cast.
+---
+
 ## [0.1.15] - 2026-07-26
 
 
