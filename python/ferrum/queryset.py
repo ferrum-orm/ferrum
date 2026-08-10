@@ -215,8 +215,16 @@ def _encode_bind_value(value: object) -> dict[str, object]:
 
 def _prepare_field_value(field: Any, value: object) -> object:  # noqa: ANN401
     """Normalize a Python value for the field's database representation."""
-    if value is not None and field.field_type == "json":
+    if value is None:
+        return value
+    if field.field_type == "json":
         return json.dumps(value, default=str, separators=(",", ":"))
+    if field.field_type == "vector" and isinstance(value, (list, tuple)):
+        # asyncpg has no built-in codec for the pgvector ``vector`` type and
+        # falls back to text, so a bound ``list[float]`` raises DataError
+        # ("expected str, got list"). Bind the pgvector text literal instead —
+        # the same encoding ``nearest_to()`` uses on the read path.
+        return _encode_vector_literal([float(v) for v in cast(list[Any], value)])
     return value
 
 

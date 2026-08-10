@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import UTC, datetime
@@ -14,7 +15,7 @@ import pytest
 import pytest_asyncio
 
 import ferrum
-from ferrum.ext.pgvector import vector_search
+from ferrum.ext.pgvector import register_vector_codecs, vector_search
 from ferrum.migrations import apply
 from ferrum.migrations import operations as ops
 from ferrum.session import current_setting, tenant_transaction
@@ -380,6 +381,123 @@ async def test_vector_search_returns_score_column(
     assert rows
     assert "score" in rows[0]
     assert rows[0]["score"] is not None
+
+
+@pytest.mark.integration
+async def test_vector_writes_round_trip_through_orm(
+    pg_conn: ferrum.connection.Connection,
+    compat_models: dict[str, Any],
+) -> None:
+    """create/update/bulk_update/upsert must accept a ``list[float]`` embedding.
+
+    asyncpg has no codec for pgvector's ``vector`` type and falls back to text,
+    so binding a Python list raised ``DataError`` on every ORM write path — the
+    ticket-analyzer embedding stage hit this on ``bulk_update``.
+    """
+    Team = compat_models["Team"]
+    Ticket = compat_models["Ticket"]
+
+    team = await _create_team(pg_conn, Team, name="team")
+    seen = datetime(2024, 6, 3, tzinfo=UTC)
+    created = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    updated = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    bulk = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    upserted = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+
+    async def stored(ticket_id: int) -> str:
+        pool = raw_pool(pg_conn)
+        table = Ticket.get_metadata().table_name
+        async with pool.acquire() as raw:
+            return await raw.fetchval(
+                f'SELECT summary_embedding::text FROM "{table}" WHERE id = $1',
+                ticket_id,
+            )
+
+    await Ticket.objects.create(
+        pg_conn,
+        id=1,
+        first_seen_at=seen,
+        team_id=team.id,
+        summary="created",
+        summary_embedding=created,
+    )
+    assert await stored(1) == "[1,0,0,0,0,0,0,0]"
+
+    await Ticket.objects.filter(id=1).update(pg_conn, summary_embedding=updated)
+    assert await stored(1) == "[0,1,0,0,0,0,0,0]"
+
+    row = Ticket.model_construct(id=1, first_seen_at=seen, summary_embedding=bulk)
+    assert await Ticket.objects.bulk_update(pg_conn, [row], ["summary_embedding"]) == 1
+    assert await stored(1) == "[0,0,1,0,0,0,0,0]"
+
+    await Ticket.objects.upsert(
+        pg_conn,
+        conflict_fields=["id", "first_seen_at"],
+        update_fields=["summary_embedding"],
+        returning=False,
+        id=1,
+        first_seen_at=seen,
+        team_id=team.id,
+        summary="created",
+        summary_embedding=upserted,
+    )
+    assert await stored(1) == "[0,0,0,1,0,0,0,0]"
+
+
+@pytest.mark.integration
+async def test_registered_vector_codec_decodes_on_every_pooled_connection(
+    pg_dsn: str,
+    unique_suffix: str,
+    require_native: None,
+) -> None:
+    """A registered codec must survive pool growth, not just the first connection."""
+    doc_table = f"ta_int_vec_pool_{unique_suffix}"
+
+    class Doc(ferrum.Model):
+        class Meta:
+            table = doc_table
+
+        id: Annotated[int, ferrum.Field(primary_key=True)]
+        embedding: Annotated[ferrum.Vector | None, ferrum.Field(vector_dimensions=3)] = None
+
+    async with ferrum.connect(pg_dsn, min_size=1, max_size=4) as conn:
+        await register_vector_codecs(conn)
+        await apply(
+            conn,
+            _plan(
+                f"create_{doc_table}",
+                [
+                    ops.CreateTable(
+                        doc_table,
+                        [
+                            ops.Column("id", "BIGINT", not_null=True, primary_key=True),
+                            ops.Column("embedding", "vector(3)"),
+                        ],
+                    )
+                ],
+            ),
+            dry_run=False,
+            confirm=True,
+        )
+        try:
+            for i in range(4):
+                await Doc.objects.create(conn, id=i, embedding=[float(i), 0.0, 1.0])
+
+            async def read(doc_id: int) -> Any:
+                got = await Doc.objects.get(conn, id=doc_id)
+                return got.embedding
+
+            # Concurrent reads force the pool past its first connection.
+            results = await asyncio.gather(*[read(i) for i in range(4)])
+            for i, embedding in enumerate(results):
+                assert embedding == [float(i), 0.0, 1.0]
+        finally:
+            await apply(
+                conn,
+                _plan(f"drop_{doc_table}", [ops.DropTable(doc_table)]),
+                dry_run=False,
+                confirm=True,
+            )
 
 
 @pytest.mark.integration

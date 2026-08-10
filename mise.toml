@@ -151,3 +151,12 @@ run = [
   "rm -rf target/ dist/ wheelhouse/ .pytest_cache/ .ruff_cache/",
   "bash -c 'find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true'",
 ]
+
+[tasks.push]
+description = "Lint, commit, push (usage: mise run publish <commit-msg>)"
+usage = 'arg "<msg>" help="Commit message"'
+run = """
+git add .
+git commit -m "${usage_msg}"
+git push origin $(git branch --show-current)
+"""

@@ -159,6 +159,7 @@ class AsyncpgDriver:
         self._statement_timeout_ms = statement_timeout_ms
         self._max_lifetime = max_lifetime
         self._pool: Any = None
+        self._extra_codecs: list[dict[str, Any]] = []
 
     async def open(self) -> None:
         try:
@@ -177,9 +178,12 @@ class AsyncpgDriver:
             pool_kwargs["max_inactive_connection_lifetime"] = self._max_lifetime
 
         statement_timeout_ms = self._statement_timeout_ms
+        extra_codecs = self._extra_codecs
 
         async def _init_conn(conn: Any) -> None:
             await _register_json_codecs(conn)
+            for codec in extra_codecs:
+                await conn.set_type_codec(**codec)
             if statement_timeout_ms is not None:
                 await conn.execute(f"SET statement_timeout = {statement_timeout_ms}")
 
@@ -192,6 +196,39 @@ class AsyncpgDriver:
                 f"(database={diag['database']}, username={diag['username']}): "
                 f"{type(exc).__name__} [FERR-E101]"
             ) from None
+
+    async def add_type_codec(
+        self,
+        type_name: str,
+        *,
+        schema: str,
+        encoder: Any,
+        decoder: Any,
+        format: str = "text",
+    ) -> None:
+        """Register an asyncpg type codec on every connection in the pool.
+
+        asyncpg exposes ``set_type_codec`` on a connection, not on a pool, so
+        registering directly against one acquired connection only covers that
+        connection — every other pooled connection keeps the default codec and
+        the same query succeeds or fails depending on which one it lands on.
+        Recording the codec here applies it from the pool ``init`` hook, and
+        expiring the pool forces already-initialized connections to be replaced
+        so the registration is uniform.
+        """
+        if any(c["typename"] == type_name and c["schema"] == schema for c in self._extra_codecs):
+            return
+        self._extra_codecs.append(
+            {
+                "typename": type_name,
+                "schema": schema,
+                "encoder": encoder,
+                "decoder": decoder,
+                "format": format,
+            }
+        )
+        if self._pool is not None:
+            await self._pool.expire_connections()
 
     async def close(self) -> None:
         if self._pool is not None:

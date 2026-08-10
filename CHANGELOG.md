@@ -17,8 +17,33 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.1.16] - 2026-08-09
+## [0.1.17] - 2026-08-10
 
+### Added
+
+### Changed
+
+### Fixed
+
+- Vector writes now bind a pgvector text literal instead of a raw `list[float]`.
+  asyncpg has no codec for the `vector` type and falls back to text, so
+  `create()`, `update()`, `bulk_create()`, `bulk_update()`, and `upsert()`
+  raised `FerrumDatabaseError: DataError` ("expected str, got list") on any
+  `Vector` field. Read-path `nearest_to()` / `vector_search()` already encoded
+  the literal; the write paths did not.
+- `ferrum.ext.pgvector.register_vector_codecs()` now registers the `vector`
+  codec pool-wide. asyncpg exposes `set_type_codec` on a connection rather than
+  a pool, so the previous fallback configured only the one connection it
+  acquired — every other pooled connection decoded `vector` columns as `str`,
+  making a read's result depend on which connection served it. The asyncpg
+  driver gained `add_type_codec()`, which applies codecs from the pool `init`
+  hook and expires live connections so the registration is uniform. The
+  `timeout` argument now actually bounds the `CREATE EXTENSION` statement
+  (it was previously assembled into an unused string).
+
+---
+
+## [0.1.16] - 2026-08-09
 
 ### Added
 
@@ -32,30 +57,30 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `FerrumDatabaseError: UndefinedFunctionError` (PostgreSQL 42883); `uuid[]`
   and `tsvector` columns failed the `SET` assignment, and `numeric` columns
   failed parameter binding against a `double precision` cast.
+
 ---
 
 ## [0.1.15] - 2026-07-26
 
-
 ### Added
 
 ### Changed
 
 ### Fixed
+
 ---
 
 ## [0.1.14] - 2026-07-26
 
-
 ### Added
 
 ### Changed
 
 ### Fixed
+
 ---
 
 ## [0.1.13] - 2026-07-26
-
 
 ### Added
 
@@ -74,6 +99,7 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and hydratable but cannot be written.
 
 ### Fixed
+
 ---
 
 ## [0.1.12] - 2026-07-26

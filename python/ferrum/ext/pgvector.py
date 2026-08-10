@@ -61,40 +61,43 @@ async def register_vector_codecs(
 ) -> None:
     """Ensure the ``vector`` extension exists and register asyncpg codecs.
 
+    The codec is installed pool-wide (every current and future connection), so
+    ``vector`` columns decode to ``list[float]`` no matter which pooled
+    connection serves a query.
+
+    Writing a vector does not require this call: Ferrum binds vector values as
+    pgvector text literals, which asyncpg accepts without a codec.
+
     Idempotent: safe to call multiple times and from concurrent startup paths.
-    ``DuplicateObjectError`` from the extension-creation step and codec
-    re-registration on an already-configured pool are both handled gracefully.
+    ``DuplicateObjectError`` from the extension-creation step and repeat
+    registration of the same codec are both handled gracefully.
 
     Args:
         conn: An open Ferrum ``Connection``.
-        timeout: Statement timeout (seconds) for the ``CREATE EXTENSION`` DDL.
+        timeout: Timeout (seconds) for the ``CREATE EXTENSION`` DDL.
             Defaults to 5 s.  Set to ``0`` to disable the timeout guard.
 
     Raises:
-        FerrumConfigError: If the connection is not a PostgreSQL connection or
-            the pool is not open.
+        FerrumConfigError: If the connection is not a PostgreSQL connection, the
+            pool is not open, or the driver is not the asyncpg driver.
     """
     if conn.dialect != "postgres":
         raise FerrumConfigError(
             "pgvector integration requires a PostgreSQL connection. [FERR-C001]"
         )
-    driver = conn._require_driver()
+    driver = conn._driver
     pool = getattr(driver, "_pool", None)
-    # TimedQueryExecutor wraps the real driver; fall back to its _inner attribute.
-    if pool is None:
-        inner = getattr(driver, "_inner", None)
-        pool = getattr(inner, "_pool", None) if inner is not None else None
-    if pool is None:
+    if driver is None or pool is None:
         raise FerrumConfigError("PostgreSQL pool is not open. [FERR-C001]")
 
     # CREATE EXTENSION — idempotent via IF NOT EXISTS; the DuplicateObjectError
     # guard covers rare race conditions where two concurrent startup paths both
     # attempt the DDL at the same moment.
     try:
-        create_sql = "CREATE EXTENSION IF NOT EXISTS vector"
-        if timeout > 0:
-            create_sql = f"SET LOCAL statement_timeout = {int(timeout * 1000)}; {create_sql}"
-        await pool.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        await pool.execute(
+            "CREATE EXTENSION IF NOT EXISTS vector",
+            timeout=timeout if timeout > 0 else None,
+        )
     except Exception as exc:
         # asyncpg raises DuplicateObjectError (SQLSTATE 42710) if another
         # concurrent caller committed the extension between our IF NOT EXISTS
@@ -103,37 +106,21 @@ async def register_vector_codecs(
         if "DuplicateObject" not in exc_name:
             raise
 
-    # Codec registration — asyncpg raises InvalidStateError if the same custom
-    # type is registered twice on the same pool.  Treat it as idempotent.
-    try:
-        set_pool_codec = getattr(pool, "set_type_codec", None)
-        if set_pool_codec is not None:
-            await set_pool_codec(
-                "vector",
-                schema="public",
-                encoder=_encode_vector,
-                decoder=_decode_vector,
-                format="text",
-            )
-        else:
-            # asyncpg exposes codecs on Connection, not Pool. Ferrum's normal
-            # vector query path casts bound text to ``vector`` and projects the
-            # vector column out, so registering the currently acquired
-            # connection is sufficient for callers that explicitly hydrate a
-            # vector immediately after startup without making pool startup fail.
-            async with pool.acquire() as raw_conn:
-                await raw_conn.set_type_codec(
-                    "vector",
-                    schema="public",
-                    encoder=_encode_vector,
-                    decoder=_decode_vector,
-                    format="text",
-                )
-    except Exception as exc:
-        exc_name = type(exc).__name__
-        if exc_name not in ("InvalidStateError", "AlreadyInitializedError"):
-            # Re-raise unknown errors; swallow the known re-registration ones.
-            raise
+    # Registering through the driver applies the codec from the pool's ``init``
+    # hook, so every connection — including ones the pool opens later — decodes
+    # ``vector`` columns to ``list[float]``. Registering against a single
+    # acquired connection instead made vector reads depend on which pooled
+    # connection served the query.
+    add_codec = getattr(driver, "add_type_codec", None)
+    if add_codec is None:
+        raise FerrumConfigError("pgvector integration requires the asyncpg driver. [FERR-C001]")
+    await add_codec(
+        "vector",
+        schema="public",
+        encoder=_encode_vector,
+        decoder=_decode_vector,
+        format="text",
+    )
 
 
 async def vector_search(

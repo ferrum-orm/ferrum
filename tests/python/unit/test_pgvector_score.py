@@ -38,6 +38,14 @@ def _make_conn(*, dialect: str = "postgres") -> MagicMock:
     return conn
 
 
+def _make_driver(pool: MagicMock) -> MagicMock:
+    """Stand in for ``AsyncpgDriver``: a pool plus the pool-wide codec hook."""
+    driver = MagicMock()
+    driver._pool = pool
+    driver.add_type_codec = AsyncMock()
+    return driver
+
+
 def _make_pg_conn(fetch_return: list | None = None) -> MagicMock:
     conn = _make_conn(dialect="postgres")
     driver = MagicMock()
@@ -266,8 +274,7 @@ class TestRegisterVectorCodecsHardening:
         conn = _make_conn(dialect="postgres")
         driver = MagicMock()
         driver._pool = None
-        driver._inner = None
-        conn._require_driver.return_value = driver
+        conn._driver = driver
         with pytest.raises(FerrumConfigError, match="pool is not open"):
             await register_vector_codecs(conn)
 
@@ -280,35 +287,52 @@ class TestRegisterVectorCodecsHardening:
 
         pool = MagicMock()
         pool.execute = AsyncMock(side_effect=DuplicateObjectError())
-        pool.set_type_codec = AsyncMock()
 
-        driver = MagicMock()
-        driver._pool = pool
+        driver = _make_driver(pool)
 
         conn = _make_conn(dialect="postgres")
-        conn._require_driver.return_value = driver
+        conn._driver = driver
 
         # Should not propagate — swallowed as idempotent
         await register_vector_codecs(conn)
 
     @pytest.mark.asyncio
-    async def test_codec_already_registered_is_swallowed(self) -> None:
-        """Re-registration (InvalidStateError) on an already-configured pool is benign."""
+    async def test_codec_registers_pool_wide_not_on_one_connection(self) -> None:
+        """The codec must reach every pooled connection, not just one.
 
-        class InvalidStateError(Exception):
-            pass
-
+        asyncpg exposes ``set_type_codec`` on a connection; registering against
+        a single acquired connection made vector decoding depend on which
+        pooled connection served the query.
+        """
         pool = MagicMock()
         pool.execute = AsyncMock()
-        pool.set_type_codec = AsyncMock(side_effect=InvalidStateError())
+        driver = _make_driver(pool)
 
-        driver = MagicMock()
+        conn = _make_conn(dialect="postgres")
+        conn._driver = driver
+
+        await register_vector_codecs(conn)
+
+        pool.acquire.assert_not_called()
+        driver.add_type_codec.assert_awaited_once()
+        call = driver.add_type_codec.await_args
+        assert call.args == ("vector",)
+        assert call.kwargs["schema"] == "public"
+        assert call.kwargs["encoder"] is _encode_vector
+        assert call.kwargs["format"] == "text"
+
+    @pytest.mark.asyncio
+    async def test_non_asyncpg_driver_raises_config_error(self) -> None:
+        pool = MagicMock()
+        pool.execute = AsyncMock()
+        driver = MagicMock(spec=["_pool"])
         driver._pool = pool
 
         conn = _make_conn(dialect="postgres")
-        conn._require_driver.return_value = driver
+        conn._driver = driver
 
-        await register_vector_codecs(conn)
+        with pytest.raises(FerrumConfigError, match="asyncpg driver"):
+            await register_vector_codecs(conn)
 
     @pytest.mark.asyncio
     async def test_unknown_extension_error_propagates(self) -> None:
@@ -319,13 +343,11 @@ class TestRegisterVectorCodecsHardening:
 
         pool = MagicMock()
         pool.execute = AsyncMock(side_effect=_UnexpectedError("disk full"))
-        pool.set_type_codec = AsyncMock()
 
-        driver = MagicMock()
-        driver._pool = pool
+        driver = _make_driver(pool)
 
         conn = _make_conn(dialect="postgres")
-        conn._require_driver.return_value = driver
+        conn._driver = driver
 
         with pytest.raises(_UnexpectedError):
             await register_vector_codecs(conn)
@@ -334,12 +356,11 @@ class TestRegisterVectorCodecsHardening:
     async def test_timeout_parameter_is_accepted(self) -> None:
         pool = MagicMock()
         pool.execute = AsyncMock()
-        pool.set_type_codec = AsyncMock()
 
-        driver = MagicMock()
-        driver._pool = pool
+        driver = _make_driver(pool)
 
         conn = _make_conn(dialect="postgres")
-        conn._require_driver.return_value = driver
+        conn._driver = driver
 
         await register_vector_codecs(conn, timeout=10.0)
+        assert pool.execute.await_args.kwargs["timeout"] == 10.0
