@@ -1,0 +1,44 @@
+version: 1
+task_id: w3-c-autodiff
+owner: production-readiness-executor
+status: complete
+phase: complete
+run_id: 20260829T102316Z
+base_revision: 22931420c7c7212fe4e9718faa710d9a890ea473
+dependencies_checked: true
+owned_paths_checked: true
+shared_path_lease: null
+spec_complete: true
+plan_complete: true
+tasks_complete: true
+implementation_complete: true
+executor_validation: passed
+independent_verification: passed
+security_triage_complete: true
+security_surfaces:
+  sql_compilation: false
+  migration_apply: false
+  errors_redaction: false
+  auth_secrets: false
+  rls_admin_gucs: false
+  schema_selection: false
+security_review: approved
+security_review_justification: Autodiff generates migration ops; destructive/type-narrowing classification must be correct
+architecture_review: approved
+product_review: not_required
+code_review: approved
+artifacts:
+  task_contract: .agent-work/production-readiness/tasks/w3-c-autodiff.md
+  latest_log: .agent-work/production-readiness/logs/w3-c-autodiff/20260829T102316Z.md
+  latest_verification: null
+  architecture_review: .agent-work/production-readiness/reviews/w3-c-autodiff/20260829T102316Z-chief-architect.md
+  security_review: .agent-work/production-readiness/reviews/w3-c-autodiff/20260829T102316Z-security-engineer.md
+  product_review: null
+  code_review: .agent-work/production-readiness/reviews/w3-c-autodiff/20260829T102316Z-code-reviewer.md
+changed_paths:
+  - python/ferrum/migrations/autodiff.py
+  - tests/python/unit/test_autodiff.py
+  - tests/python/integration/test_autodiff.py
+blockers: []
+next_action: transition to awaiting_verification; request independent verification via ferrum-readiness-verification
+updated_at: 2026-08-29T10:23:16Z

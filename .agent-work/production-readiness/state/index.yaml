@@ -1,12 +1,12 @@
 version: 1
 goal: ferrum-production-readiness
 plan: .cursor/plans/ferrum-production-readiness_6b5f422d.plan.md
-updated_at: 2026-08-29T10:14:08Z
+updated_at: 2026-08-29T10:36:09Z
 updated_by: production-readiness-coordinator
 status: active
-current_wave: wave-2
+current_wave: consumer-pilots
 shared_path_leases: {}
-ownership_checked_at: 2026-08-29T09:56:32Z
+ownership_checked_at: 2026-08-29T10:23:16Z
 shared_paths:
   - AGENTS.md
   - CLAUDE.md
@@ -51,7 +51,7 @@ waves:
       - w1-f-tenancy-shards
   wave-2:
     dependencies: [wave-1]
-    status: ready
+    status: complete
     workstreams:
       - w2-a-field-codecs
       - w2-b-query-expressiveness
@@ -61,14 +61,14 @@ waves:
       - w2-f-schema-drift-cli
   wave-3:
     dependencies: [w1-c-migration-safety]
-    status: ready
+    status: complete
     workstreams:
       - w3-a-migration-graph
       - w3-b-schema-shard-migrations
       - w3-c-autodiff
   wave-4:
     dependencies: [wave-1]
-    status: ready
+    status: complete
     workstreams:
       - w4-a-observability
       - w4-b-performance
@@ -76,7 +76,7 @@ waves:
       - w4-d-packaging-release
   consumer-pilots:
     dependencies: [wave-2, wave-4]
-    status: blocked
+    status: ready
     workstreams:
       - pilot-ticket-analyzer
       - pilot-org-ai-platform
@@ -92,26 +92,26 @@ workstreams:
   w1-f-tenancy-shards: complete
   w2-a-field-codecs: complete
   w2-b-query-expressiveness: complete
-  w2-c-relations-bulk: blocked
+  w2-c-relations-bulk: complete
   w2-d-framework-integrations: complete
   w2-e-extension-lifecycle: complete
   w2-f-schema-drift-cli: complete
   w3-a-migration-graph: complete
   w3-b-schema-shard-migrations: complete
-  w3-c-autodiff: blocked
+  w3-c-autodiff: complete
   w4-a-observability: complete
   w4-b-performance: complete
   w4-c-typing: complete
   w4-d-packaging-release: complete
-  pilot-ticket-analyzer: blocked
-  pilot-org-ai-platform: blocked
+  pilot-ticket-analyzer: ready
+  pilot-org-ai-platform: ready
 release_gates:
   correctness: passed
   transactions: passed
   migrations: passed
   error_redaction: passed
   pool_operability: passed
-  consumer_contracts: pending
+  consumer_contracts: ready
   packaging: passed
 blockers:
   - id: w0-c-shared-path-overlap
