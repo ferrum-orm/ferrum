@@ -237,6 +237,75 @@ def resetdb_cmd(
     dispatch_resetdb(env=env, confirm=confirm)
 
 
+@cli.command("check-schema")
+def check_schema_cmd(
+    schema: str = typer.Option(
+        "public",
+        "--schema",
+        help="PostgreSQL schema to introspect (default: public)",
+    ),
+    exclude_tables: str | None = typer.Option(
+        None,
+        "--exclude-tables",
+        help="Comma-separated extra table names to exclude from drift comparison",
+    ),
+    auth_tables: str | None = typer.Option(
+        None,
+        "--auth-tables",
+        help=(
+            "Comma-separated Better Auth table names (default: user, session, "
+            "account, verification)"
+        ),
+    ),
+    langgraph_tables: str | None = typer.Option(
+        None,
+        "--langgraph-tables",
+        help=(
+            "Comma-separated LangGraph checkpoint tables (default: checkpoints, "
+            "checkpoint_writes, checkpoint_blobs, checkpoint_migrations)"
+        ),
+    ),
+    alembic_tables: str | None = typer.Option(
+        None,
+        "--alembic-tables",
+        help="Comma-separated Alembic version tables (default: alembic_version)",
+    ),
+    include_unmapped: bool = typer.Option(
+        False,
+        "--include-unmapped",
+        help="Report live tables that have no registered Ferrum model (default: ignore)",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit machine-readable JSON for CI (default: human-readable summary)",
+    ),
+    expected_extensions: str | None = typer.Option(
+        None,
+        "--expected-extensions",
+        help="Comma-separated extension names expected to be installed (e.g. pgvector,pg_trgm)",
+    ),
+) -> None:
+    """Compare registered Ferrum models with the live PostgreSQL schema.
+
+    Read-only: never emits or applies DDL. Numbered SQL migrations remain
+    authoritative; this command only reports drift. Exit codes: 0 = clean,
+    1 = drift, 2 = configuration/connection error.
+    """
+    from ferrum.cli.check_schema_cmd import dispatch_check_schema
+
+    dispatch_check_schema(
+        schema=schema,
+        exclude_tables=exclude_tables,
+        auth_tables=auth_tables,
+        langgraph_tables=langgraph_tables,
+        alembic_tables=alembic_tables,
+        include_unmapped=include_unmapped,
+        json_output=json_output,
+        expected_extensions=expected_extensions,
+    )
+
+
 def app() -> None:
     """Invoke the Typer CLI (console-script entry after bootstrap)."""
     cli()

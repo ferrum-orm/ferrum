@@ -84,3 +84,17 @@ def test_main_calls_app_when_typer_present(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert called["bootstrap"] is True
     assert called["app"] is True
+
+
+def test_check_schema_help_lists_flags() -> None:
+    result = runner.invoke(cli, ["check-schema", "--help"])
+    assert result.exit_code == 0
+    help_text = _plain(result.stdout)
+    assert "--schema" in help_text
+    assert "--exclude-tables" in help_text
+    assert "--auth-tables" in help_text
+    assert "--langgraph-tables" in help_text
+    assert "--alembic-tables" in help_text
+    assert "--json" in help_text
+    assert "--include-unmapped" in help_text
+    assert "--expected-extensions" in help_text

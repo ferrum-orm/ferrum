@@ -4,17 +4,8 @@ plan: .cursor/plans/ferrum-production-readiness_6b5f422d.plan.md
 updated_at: 2026-08-29T12:00:00Z
 updated_by: production-readiness-coordinator
 status: active
-current_wave: wave-1
-shared_path_leases:
-  w1-f-shared-20260829T100000Z:
-    lease_id: w1-f-shared-20260829T100000Z
-    workstream: w1-f-tenancy-shards
-    run_id: 20260829T085649Z
-    holder: production-readiness-executor
-    paths:
-      - python/ferrum/__init__.py
-    acquired_at: 2026-08-29T10:00:00Z
-    expires_at: 2026-08-30T10:00:00Z
+current_wave: wave-2
+shared_path_leases: {}
 ownership_checked_at: 2026-08-29T12:00:00Z
 shared_paths:
   - AGENTS.md
@@ -102,13 +93,13 @@ workstreams:
   w2-a-field-codecs: blocked
   w2-b-query-expressiveness: blocked
   w2-c-relations-bulk: blocked
-  w2-d-framework-integrations: blocked
+  w2-d-framework-integrations: complete
   w2-e-extension-lifecycle: blocked
-  w2-f-schema-drift-cli: blocked
+  w2-f-schema-drift-cli: complete
   w3-a-migration-graph: blocked
   w3-b-schema-shard-migrations: blocked
   w3-c-autodiff: blocked
-  w4-a-observability: blocked
+  w4-a-observability: complete
   w4-b-performance: blocked
   w4-c-typing: blocked
   w4-d-packaging-release: blocked

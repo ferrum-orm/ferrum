@@ -35,8 +35,14 @@ _HOOKS: list[HookFn] = []
 _EVENT_HOOKS: dict[str, list[HookFn]] = {}
 
 # Tier A keys — the only keys allowed in default payloads (LOG-1).
+# Extended by W4-A with safe enum/count/duration keys for pool, transaction,
+# migration, retry, and timeout events. Every added key holds an enum string,
+# integer count, float duration, or boolean — never a bound value, DSN,
+# credential, row datum, or free-form user input. SecurityEngineer review
+# required for any further additions.
 _TIER_A_KEYS = frozenset(
     {
+        # Original W1-D query-path keys (do not remove — W1-D contract).
         "event",
         "model",
         "table",
@@ -47,6 +53,19 @@ _TIER_A_KEYS = frozenset(
         "failure_category",
         "category",
         "rows_affected",
+        # W4-A pool-lifecycle keys (integer pool snapshot counts).
+        "pool_size",
+        "pool_idle",
+        "pool_acquired_count",
+        "pool_waiters",
+        # W4-A transaction keys (enum isolation level + booleans).
+        "isolation",
+        "readonly",
+        "deferrable",
+        # W4-A migration keys (enum direction: "up" | "down").
+        "direction",
+        # W4-A retry keys (integer attempt number).
+        "attempt",
     }
 )
 
@@ -285,3 +304,196 @@ class QueryTimer:
         if category:
             payload["category"] = category
         dispatch(payload)
+
+
+# ---------------------------------------------------------------------------
+# W4-A: Tier-A-safe helpers for pool, transaction, migration, retry, timeout.
+#
+# These helpers dispatch payloads that carry ONLY Tier-A-safe fields (enums,
+# integer counts, durations, booleans). They never accept or carry bound
+# parameter values, DSNs, credentials, row data, or free-form user input
+# (LOG-1, §3). Dispatch sites in connection.py / runtime.py / migrations /
+# drivers are owned by other workstreams; the helpers here are the contract
+# those dispatch sites will call when instrumented.
+# ---------------------------------------------------------------------------
+
+
+def pool_acquire(
+    *,
+    pool_size: int = -1,
+    pool_idle: int = -1,
+    pool_acquired_count: int = -1,
+    pool_waiters: int = -1,
+) -> None:
+    """Dispatch a Tier A ``pool_acquire`` hook payload.
+
+    Fires when a pooled connection is acquired. All fields are integer pool
+    snapshots (``-1`` sentinel when unavailable) — never DSNs, credentials, or
+    bound values (LOG-1, §3).
+    """
+    dispatch(
+        {
+            "event": "pool_acquire",
+            "pool_size": pool_size,
+            "pool_idle": pool_idle,
+            "pool_acquired_count": pool_acquired_count,
+            "pool_waiters": pool_waiters,
+        }
+    )
+
+
+def pool_release(
+    *,
+    pool_size: int = -1,
+    pool_idle: int = -1,
+    pool_acquired_count: int = -1,
+    pool_waiters: int = -1,
+) -> None:
+    """Dispatch a Tier A ``pool_release`` hook payload.
+
+    Fires when a pooled connection is returned to the pool. Same integer-only
+    fields as :func:`pool_acquire` (LOG-1, §3).
+    """
+    dispatch(
+        {
+            "event": "pool_release",
+            "pool_size": pool_size,
+            "pool_idle": pool_idle,
+            "pool_acquired_count": pool_acquired_count,
+            "pool_waiters": pool_waiters,
+        }
+    )
+
+
+def pool_wait(*, pool_waiters: int = -1) -> None:
+    """Dispatch a Tier A ``pool_wait`` hook payload.
+
+    Fires when an acquire call begins waiting for a free connection. Only the
+    integer waiter count is carried (LOG-1, §3).
+    """
+    dispatch({"event": "pool_wait", "pool_waiters": pool_waiters})
+
+
+def pool_timeout(*, pool_waiters: int = -1) -> None:
+    """Dispatch a Tier A ``pool_timeout`` hook payload.
+
+    Fires when an acquire call times out waiting for a connection. Carries
+    only the integer waiter count — never the DSN or password (LOG-1, §3).
+    """
+    dispatch({"event": "pool_timeout", "pool_waiters": pool_waiters})
+
+
+def pool_shutdown(*, pool_size: int = -1, pool_acquired_count: int = -1) -> None:
+    """Dispatch a Tier A ``pool_shutdown`` hook payload.
+
+    Fires when the pool begins graceful shutdown (stop_accepting). Integer
+    snapshot fields only (LOG-1, §3).
+    """
+    dispatch(
+        {
+            "event": "pool_shutdown",
+            "pool_size": pool_size,
+            "pool_acquired_count": pool_acquired_count,
+        }
+    )
+
+
+def transaction_start(
+    *,
+    isolation: str | None = None,
+    readonly: bool = False,
+    deferrable: bool = False,
+) -> None:
+    """Dispatch a Tier A ``transaction_start`` hook payload.
+
+    Fires when a transaction begins. ``isolation`` is one of the allowlisted
+    enum values (``serializable`` / ``repeatable_read`` / ``read_committed`` /
+    ``read_unmitted``) or ``None`` for the server default. ``readonly`` and
+    ``deferrable`` are booleans. No bound values or row data (LOG-1, §3).
+    """
+    dispatch(
+        {
+            "event": "transaction_start",
+            "isolation": isolation if isolation is not None else "default",
+            "readonly": readonly,
+            "deferrable": deferrable,
+        }
+    )
+
+
+def transaction_end(
+    *,
+    duration_ms: float,
+    status: str,
+    isolation: str | None = None,
+    readonly: bool = False,
+    deferrable: bool = False,
+) -> None:
+    """Dispatch a Tier A ``transaction_end`` hook payload.
+
+    Fires when a transaction commits or rolls back. ``status`` is ``"ok"`` or
+    ``"error"``. ``duration_ms`` is the wall-clock duration in milliseconds.
+    Enum/boolean/duration fields only (LOG-1, §3).
+    """
+    dispatch(
+        {
+            "event": "transaction_end",
+            "duration_ms": round(duration_ms, 3),
+            "status": status,
+            "isolation": isolation if isolation is not None else "default",
+            "readonly": readonly,
+            "deferrable": deferrable,
+        }
+    )
+
+
+def migration_event(
+    *,
+    event: str,
+    direction: str,
+    status: str,
+    duration_ms: float = 0.0,
+) -> None:
+    """Dispatch a Tier A ``migration_event`` hook payload.
+
+    Fires during migration apply/revert. ``event`` is one of ``"migration_start"``
+    / ``"migration_end"``. ``direction`` is ``"up"`` or ``"down"``. ``status`` is
+    ``"ok"`` or ``"error"``. The migration *id* / filename is intentionally NOT
+    carried — it is project-relative free-form text and a cardinality risk for
+    metric labels. Enum/duration fields only (LOG-1, §3).
+    """
+    dispatch(
+        {
+            "event": event,
+            "direction": direction,
+            "status": status,
+            "duration_ms": round(duration_ms, 3),
+        }
+    )
+
+
+def retry_attempt(*, attempt: int, category: str) -> None:
+    """Dispatch a Tier A ``retry_attempt`` hook payload.
+
+    Fires when a retriable operation is retried. ``attempt`` is the 1-based
+    attempt number. ``category`` is the closed-enum error category from
+    ``ERROR_CATEGORIES`` (e.g. ``"deadlock"``, ``"serialization"``). Integer +
+    closed-enum only — never the exception message or bound values (LOG-1, §3).
+    """
+    dispatch({"event": "retry_attempt", "attempt": attempt, "category": category})
+
+
+def timeout_event(*, category: str, duration_ms: float = 0.0) -> None:
+    """Dispatch a Tier A ``timeout_event`` hook payload.
+
+    Fires when an operation times out (pool acquire, query, transaction
+    deadline). ``category`` is the closed-enum error category (typically
+    ``"timeout"``). Closed-enum + duration only (LOG-1, §3).
+    """
+    dispatch(
+        {
+            "event": "timeout_event",
+            "category": category,
+            "duration_ms": round(duration_ms, 3),
+        }
+    )

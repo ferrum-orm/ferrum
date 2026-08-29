@@ -1,0 +1,45 @@
+version: 1
+task_id: w2-d-framework-integrations
+owner: production-readiness-executor
+status: complete
+phase: complete
+run_id: 20260829T091235Z
+base_revision: b5e7ed3beaab60b7ded6ff6b1f8b77293ad376bb
+dependencies_checked: true
+owned_paths_checked: true
+shared_path_lease: null
+spec_complete: true
+plan_complete: true
+tasks_complete: true
+implementation_complete: true
+executor_validation: passed
+independent_verification: passed
+security_triage_complete: true
+security_surfaces:
+  sql_compilation: false
+  migration_apply: false
+  errors_redaction: false
+  auth_secrets: true
+  rls_admin_gucs: false
+  schema_selection: false
+security_review: approved
+security_review_justification: FastAPI dependency injection and auth adapter must not leak credentials or expose raw connections
+architecture_review: approved
+product_review: not_required
+code_review: approved
+artifacts:
+  task_contract: .agent-work/production-readiness/tasks/w2-d-framework-integrations.md
+  latest_log: .agent-work/production-readiness/logs/w2-d-framework-integrations/20260829T091235Z.md
+  latest_verification: .agent-work/production-readiness/verification/w2-d-framework-integrations/20260829T091235Z.md
+  architecture_review: .agent-work/production-readiness/reviews/w2-d-framework-integrations/20260829T091235Z-chief-architect.md
+  security_review: .agent-work/production-readiness/reviews/w2-d-framework-integrations/20260829T091235Z-security-engineer.md
+  product_review: null
+  code_review: .agent-work/production-readiness/reviews/w2-d-framework-integrations/20260829T091235Z-code-reviewer.md
+changed_paths:
+  - python/ferrum/contrib/fastapi.py
+  - python/ferrum/contrib/__init__.py
+  - tests/python/unit/test_contrib_fastapi.py
+  - tests/python/integration/test_fastapi_integration.py
+blockers: []
+next_action: request independent verification from production-readiness-verifier
+updated_at: 2026-08-29T09:55:00Z

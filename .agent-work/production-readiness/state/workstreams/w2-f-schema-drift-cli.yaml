@@ -1,0 +1,47 @@
+version: 1
+task_id: w2-f-schema-drift-cli
+owner: production-readiness-executor
+status: changes_applied
+phase: awaiting_verification
+run_id: 20260829T110000Z
+base_revision: b5e7ed3beaab60b7ded6ff6b1f8b77293ad376bb
+dependencies_checked: true
+owned_paths_checked: true
+shared_path_lease: null
+spec_complete: true
+plan_complete: true
+tasks_complete: true
+implementation_complete: true
+executor_validation: passed
+independent_verification: passed
+security_triage_complete: true
+security_surfaces:
+  sql_compilation: false
+  migration_apply: false
+  errors_redaction: false
+  auth_secrets: false
+  rls_admin_gucs: false
+  schema_selection: false
+security_review: not_required
+security_review_justification: Schema drift detection is read-only introspection; no SQL compilation, migration apply, or credential surfaces
+architecture_review: approved
+product_review: not_required
+code_review: approved
+artifacts:
+  task_contract: .agent-work/production-readiness/tasks/w2-f-schema-drift-cli.md
+  latest_log: .agent-work/production-readiness/logs/w2-f-schema-drift-cli/20260829T110000Z.md
+  latest_verification: .agent-work/production-readiness/verification/w2-f-schema-drift-cli/20260829T091235Z.md
+  architecture_review: .agent-work/production-readiness/reviews/w2-f-schema-drift-cli/20260829T091235Z-chief-architect.md
+  security_review: null
+  product_review: null
+  code_review: .agent-work/production-readiness/reviews/w2-f-schema-drift-cli/20260829T110000Z-code-reviewer.md
+changed_paths:
+  - python/ferrum/migrations/drift.py
+  - python/ferrum/cli/check_schema_cmd.py
+  - python/ferrum/cli/app.py
+  - tests/python/unit/test_schema_drift.py
+  - tests/python/integration/test_schema_drift.py
+  - tests/python/unit/test_cli.py
+blockers: []
+next_action: request independent verification of the corrective fix by production-readiness-verifier
+updated_at: 2026-08-29T11:30:00Z
