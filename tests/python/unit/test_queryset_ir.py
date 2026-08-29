@@ -11,8 +11,8 @@ from datetime import date, datetime, time
 import pytest
 
 import ferrum
-from ferrum.errors import FerrumCompileError
-from ferrum.queryset import QuerySet, _encode_bind_value
+from ferrum.errors import FerrumCompileError, FerrumConfigError
+from ferrum.queryset import QuerySet, _append_for_update_clause, _encode_bind_value
 
 # ---------------------------------------------------------------------------
 # Fixture models
@@ -550,3 +550,21 @@ class TestGoldenIrToSql:
             'UPDATE "article" SET "title" = $1 WHERE "id" = $2 '
             'RETURNING "id", "title", "published", "score"'
         )
+
+
+class TestAppendForUpdateClauseQuoteEscaping:
+    def test_simple_table_name_quoted(self) -> None:
+        sql = _append_for_update_clause("SELECT 1", {"of": ["article"]}, "postgres")
+        assert sql == 'SELECT 1 FOR UPDATE OF "article"'
+
+    def test_multiple_table_names_quoted(self) -> None:
+        sql = _append_for_update_clause("SELECT 1", {"of": ["article", "comment"]}, "postgres")
+        assert sql == 'SELECT 1 FOR UPDATE OF "article", "comment"'
+
+    def test_embedded_double_quote_doubled(self) -> None:
+        sql = _append_for_update_clause("SELECT 1", {"of": ['bad"name']}, "postgres")
+        assert sql == 'SELECT 1 FOR UPDATE OF "bad""name"'
+
+    def test_non_postgres_dialect_rejected(self) -> None:
+        with pytest.raises(FerrumConfigError):
+            _append_for_update_clause("SELECT 1", {"of": ["article"]}, "mysql")

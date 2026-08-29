@@ -282,6 +282,38 @@ def _decode_bound_param(param: str | dict[str, Any]) -> object:
     return val
 
 
+def _append_for_update_clause(
+    sql_text: str,
+    for_update: dict[str, Any],
+    dialect: str,
+) -> str:
+    """Append ``FOR UPDATE [OF ...] [NOWAIT] [SKIP LOCKED]`` to compiled SQL.
+
+    PostgreSQL places ``FOR UPDATE`` after ``LIMIT``/``OFFSET``, so appending at
+    the end of the compiled statement is correct. The ``of`` list contains
+    validated table names (resolved from model metadata by
+    ``select_for_update()``) — never raw user input (§2.9 no-raw-SQL).
+
+    PostgreSQL-only: the thin-parity backends (MySQL, SQLite, MSSQL) do not
+    support ``FOR UPDATE`` in the same shape and are rejected here so the user
+    gets a clear Ferrum error instead of a dialect-specific syntax error.
+    """
+    if dialect != "postgres":
+        raise FerrumConfigError(
+            "select_for_update() is PostgreSQL-only; the active "
+            f"{dialect!r} backend does not support FOR UPDATE. [FERR-C001]"
+        )
+    parts = ["FOR UPDATE"]
+    of = for_update.get("of", ())
+    if of:
+        parts.append("OF " + ", ".join(f'"{t.replace(chr(34), chr(34) * 2)}"' for t in of))
+    if for_update.get("nowait"):
+        parts.append("NOWAIT")
+    if for_update.get("skip_locked"):
+        parts.append("SKIP LOCKED")
+    return f"{sql_text} {' '.join(parts)}"
+
+
 def _echo_compiled(
     conn: ConnectionLike,
     *,
@@ -696,6 +728,12 @@ class _QuerySetBase(Generic[_R]):
         self._prefetch_related: tuple[str, ...] = ()
         self._aggregate_groups: list[dict[str, str]] = []
         self._having: list[dict[str, Any]] = []
+        # SELECT ... FOR UPDATE [OF ...] [NOWAIT] [SKIP LOCKED] state.
+        # Set by ``QuerySet.select_for_update()``; appended to compiled SQL
+        # by ``all()`` / ``first()`` read terminals. Identifiers in the ``of``
+        # list are validated against model metadata (relation field names or
+        # the literal ``"self"``) and resolved to table names — never raw SQL.
+        self._for_update: dict[str, Any] | None = None
         # When set by ``QuerySet.project()``, rows hydrate into this model while
         # IR compilation continues against ``_model`` (source table / filters).
         self._hydrate_model: type[Model] | None = None
@@ -1149,6 +1187,8 @@ class _QuerySetBase(Generic[_R]):
         metadata = self._get_metadata()
         compiled = self._compile(dialect=conn.dialect)
         sql_text: str = compiled["sql_text"]
+        if self._for_update is not None:
+            sql_text = _append_for_update_clause(sql_text, self._for_update, conn.dialect)
         bound_params = [_decode_bound_param(p) for p in compiled["bound_params"]]
         fingerprint: str = compiled.get("fingerprint", "")  # type: ignore[assignment]
         driver = conn._require_driver()
@@ -1512,6 +1552,7 @@ class _QuerySetBase(Generic[_R]):
         qs._hydrate_model = self._hydrate_model
         qs._aggregate_groups = [dict(group) for group in self._aggregate_groups]
         qs._having = [dict(condition) for condition in self._having]
+        qs._for_update = dict(self._for_update) if self._for_update is not None else None
 
     def _get_metadata(self) -> ModelMetadata | None:
         """Return the model's ``ModelMetadata`` if available, else ``None``."""
@@ -1673,6 +1714,105 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             )
         operator, _ = _TEXT_SEARCH_MODES[mode]
         return self.filter(**{f"{field}__{operator}": query}).rank_by(field, query, mode=mode)
+
+    def select_for_update(
+        self,
+        *,
+        nowait: bool = False,
+        skip_locked: bool = False,
+        of: Sequence[str] = (),
+    ) -> QuerySet[_M]:
+        """Lock matching rows with ``SELECT ... FOR UPDATE`` (PostgreSQL only).
+
+        Appends a ``FOR UPDATE [OF ...] [NOWAIT] [SKIP LOCKED]`` clause to the
+        compiled SELECT. The lock is held until the enclosing transaction
+        commits or rolls back — use this inside ``async with conn.transaction()
+        as tx:`` for the lock to persist. In autocommit the lock is released
+        immediately after the statement (standard PostgreSQL semantics).
+
+        The ``of`` argument accepts a sequence of relation field names (validated
+        against the model's metadata) or the literal string ``"self"`` (the
+        model's own table). Each is resolved to a table name for the
+        ``FOR UPDATE OF`` clause — identifiers come from validated model
+        metadata, never from raw user input (§2.9 no-raw-SQL).
+
+        Cannot be combined with ``update()`` / ``delete()`` / ``bulk_*()`` /
+        ``upsert()`` — those are write terminals and ``FOR UPDATE`` is a
+        read-only clause. Enforced by :meth:`_check_write_scope`.
+
+        Args:
+            nowait: If ``True``, emit ``NOWAIT`` — raise ``FerrumTimeoutError``
+                (category ``lock_timeout``, SQLSTATE 55P03) instead of blocking
+                when a row is already locked.
+            skip_locked: If ``True``, emit ``SKIP LOCKED`` — skip rows that are
+                already locked instead of blocking. ``nowait`` and
+                ``skip_locked`` are mutually exclusive (PostgreSQL rejects
+                both).
+            of: Sequence of relation field names or ``"self"`` for the
+                ``FOR UPDATE OF`` clause. Empty (default) locks all tables in
+                the query.
+
+        Raises:
+            FerrumCompileError: if ``select_for_update()`` is already set, if
+                ``nowait`` and ``skip_locked`` are both true, if an ``of``
+                entry is not a known relation field or ``"self"``, or if the
+                model has no metadata.
+        """
+        if self._for_update is not None:
+            raise FerrumCompileError(
+                "select_for_update() is already set on this QuerySet.",
+                model=self._model.__name__,
+            )
+        if nowait and skip_locked:
+            raise FerrumCompileError(
+                "select_for_update(nowait=True, skip_locked=True) is not valid; "
+                "PostgreSQL rejects NOWAIT and SKIP LOCKED together.",
+                model=self._model.__name__,
+            )
+        metadata = self._get_metadata()
+        if metadata is None:
+            raise FerrumCompileError(
+                f"Model {self._model.__name__!r} has no metadata.",
+                model=self._model.__name__,
+            )
+        of_tables: list[str] = []
+        if of:
+            from ferrum.registry import get_model
+            from ferrum.relations import resolve_relation
+
+            rel_by_name = {r.field_name: r for r in metadata.relations}
+            for entry in of:
+                if entry == "self":
+                    of_tables.append(metadata.table_name)
+                elif entry in rel_by_name:
+                    rel = rel_by_name[entry]
+                    rel_model = get_model(rel.to_model)
+                    rel_meta = rel_model.get_metadata()
+                    of_tables.append(rel_meta.table_name)
+                else:
+                    # Also accept a raw relation field name that
+                    # ``resolve_relation`` can validate (defensive —
+                    # ``rel_by_name`` should already cover forward FK/OTO).
+                    try:
+                        rel = resolve_relation(metadata, entry)
+                    except Exception:
+                        raise FerrumCompileError(
+                            f"Unknown 'of' target {entry!r}; use 'self' or a "
+                            f"relation field name on model "
+                            f"{metadata.model_name!r}.",
+                            model=metadata.model_name,
+                            field=entry,
+                        ) from None
+                    rel_model = get_model(rel.to_model)
+                    rel_meta = rel_model.get_metadata()
+                    of_tables.append(rel_meta.table_name)
+        qs = self._clone()
+        qs._for_update = {
+            "nowait": nowait,
+            "skip_locked": skip_locked,
+            "of": tuple(of_tables),
+        }
+        return qs
 
     # ------------------------------------------------------------------
     # Result-shape switches (return value-typed sibling querysets)
@@ -2126,7 +2266,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         )
         t0 = time.monotonic()
         try:
-            row = await driver.fetchrow(sql_text, *bound_params)
+            row = await driver.fetchrow(sql_text, *bound_params, is_write=True)  # type: ignore
         except Exception as exc:
             duration_ms = (time.monotonic() - t0) * 1000
             mapped = map_db_error(exc, context={"model": model_name, "operation": "insert"})
@@ -2496,7 +2636,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             t0 = time.monotonic()
             try:
                 if returning:
-                    rows = await driver.fetch(sql_text, *bound_params)
+                    rows = await driver.fetch(sql_text, *bound_params, is_write=True)  # type: ignore
                 else:
                     result: str = await driver.execute(sql_text, *bound_params)
                     parts = result.split() if result else []
@@ -2877,7 +3017,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         t0 = time.monotonic()
         try:
             if returning:
-                row = await driver.fetchrow(sql, *bound)
+                row = await driver.fetchrow(sql, *bound, is_write=True)  # type: ignore
             else:
                 await driver.execute(sql, *bound)
                 row = None
@@ -2979,7 +3119,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 t0 = time.monotonic()
                 try:
                     if returning:
-                        row = await driver.fetchrow(sql, *bound)
+                        row = await driver.fetchrow(sql, *bound, is_write=True)  # type: ignore
                         if row is not None:
                             upserted.append(
                                 self._model.model_construct(
@@ -3044,6 +3184,11 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         if self._aggregate_groups or self._having:
             raise FerrumCompileError(
                 f"{api} cannot be used with group_by()/date_trunc()/having().",
+                model=self._model.__name__,
+            )
+        if self._for_update is not None:
+            raise FerrumCompileError(
+                f"{api} cannot be used with select_for_update(); FOR UPDATE is a read-only clause.",
                 model=self._model.__name__,
             )
 
@@ -3291,7 +3436,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         )
         started = time.monotonic()
         try:
-            rows = await conn._require_driver().fetch(sql_text, *bound_params)
+            rows = await conn._require_driver().fetch(sql_text, *bound_params, is_write=True)  # type: ignore
         except Exception as exc:
             duration_ms = (time.monotonic() - started) * 1000
             mapped = map_db_error(

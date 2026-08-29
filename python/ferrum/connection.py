@@ -20,8 +20,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-from collections.abc import AsyncGenerator, AsyncIterator
-from typing import TYPE_CHECKING, Any
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlparse
 
 from ferrum.config import database_url_env_hint, resolve_database_url_for_cwd
@@ -36,15 +36,19 @@ from ferrum.errors import (
     map_db_error,
 )
 from ferrum.runtime import (
+    AdvisoryLockKey,
     ManagedChunkStream,
     RetryPolicy,
     RuntimeConfig,
     TimedQueryExecutor,
+    TransactionRetryPolicy,
     _LifecycleGuard,
 )
 
 if TYPE_CHECKING:
     from ssl import SSLContext
+
+_T = TypeVar("_T")
 
 # PostgreSQL transaction isolation levels accepted by ``Connection.transaction``.
 # Validated as a fixed allowlist so an unknown value fails with a clear Ferrum
@@ -584,6 +588,175 @@ class Connection:
             raise map_db_error(exc) from None
         return [dict(row) for row in rows]
 
+    async def run_transaction(
+        self,
+        fn: Callable[[Transaction], Awaitable[_T]],
+        *,
+        isolation: str | None = None,
+        readonly: bool = False,
+        deferrable: bool = False,
+        deadline: float | None = None,
+        retry: TransactionRetryPolicy | None = None,
+    ) -> _T:
+        """Run ``fn`` in a fresh transaction per attempt, replaying on 40001/40P01.
+
+        This is the **only** write-retry story (ratified §5a). It opens a fresh
+        ``conn.transaction(...)`` per attempt and replays the entire callback
+        from scratch on each retry. Retries are restricted to allowlisted
+        SQLSTATE (``40001`` serialization failure, ``40P01`` deadlock) using
+        the W1-D ``sqlstate`` attribute on mapped ``FerrumError`` exceptions.
+
+        Uses capped exponential backoff with jitter. Honors cancellation and
+        deadline — a cancelled or timed-out attempt rolls back and re-raises
+        without retry.
+
+        **Callback idempotency:** ``fn`` MUST be idempotent. Replay re-executes
+        the entire callback from scratch on each attempt. Non-idempotent side
+        effects (e.g. sending an email, incrementing an external counter) must
+        not be inside ``fn`` unless the caller can tolerate replay.
+
+        Example::
+
+            async def transfer(tx):
+                a = await Account.objects.filter(id=1).select_for_update().first(tx)
+                b = await Account.objects.filter(id=2).select_for_update().first(tx)
+                a.balance -= 50
+                b.balance += 50
+                await Account.objects.update_instance(tx, a, fields=["balance"])
+                await Account.objects.update_instance(tx, b, fields=["balance"])
+
+            await conn.run_transaction(
+                transfer,
+                isolation="serializable",
+                retry=TransactionRetryPolicy(max_attempts=5),
+            )
+
+        Args:
+            fn: Async callback receiving the :class:`Transaction` handle. Must
+                be idempotent — it is replayed in full on each retry.
+            isolation: Transaction isolation level (``serializable`` /
+                ``repeatable_read`` / ``read_committed`` / ``read_uncommitted``),
+                or ``None`` for the server default.
+            readonly: Open each attempt's transaction in READ ONLY mode.
+            deferrable: DEFERRABLE mode (only meaningful for SERIALIZABLE
+                READ ONLY).
+            deadline: Optional wall-clock budget in seconds per attempt.
+                Each attempt's transaction receives the full ``deadline``
+                (the budget is not tracked across attempts). Exceeding it
+                raises :class:`FerrumTimeoutError` after rollback.
+            retry: :class:`TransactionRetryPolicy` for replay on 40001/40P01.
+                ``None`` (default) means no retries — a single attempt.
+
+        Raises:
+            FerrumError: the last mapped exception if retries are exhausted or
+                a non-retriable error occurs.
+            FerrumTimeoutError: if ``deadline`` is exceeded (after rollback).
+            asyncio.CancelledError: if the task is cancelled (after rollback,
+                no retry).
+        """
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                async with self.transaction(
+                    isolation=isolation,
+                    readonly=readonly,
+                    deferrable=deferrable,
+                    deadline=deadline,
+                ) as tx:
+                    return await fn(tx)
+            except FerrumError as exc:
+                if retry is not None and retry.should_retry(exc, attempt):
+                    delay = retry.backoff_seconds(attempt)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    continue
+                raise
+            except asyncio.CancelledError:
+                # Honor cancellation — rollback already happened inside
+                # self.transaction(); do not retry.
+                raise
+
+    @contextlib.asynccontextmanager
+    async def advisory_lock(
+        self,
+        key: int | tuple[int, int] | AdvisoryLockKey,
+    ) -> AsyncGenerator[Transaction, None]:
+        """Pin a connection and take a session-scoped advisory lock.
+
+        PostgreSQL session advisory locks require connection affinity: the lock
+        and unlock must run on the same backend connection. This helper pins one
+        connection from the pool for the duration of the lock, so the affinity is
+        guaranteed. The lock is released (``pg_advisory_unlock``) on context exit,
+        including on exception or cancellation.
+
+        Yields a :class:`Transaction` surface (without an actual transaction) so
+        QuerySet terminals can run against the pinned connection inside the lock.
+        Statements issued through the yielded handle never statement-retry (same
+        object-scoped rule as a real ``Transaction``).
+
+        Example::
+
+            async with conn.advisory_lock(42) as locked:
+                # All queries here run on the same pinned connection that
+                # holds the session advisory lock #42.
+                row = await MyModel.objects.filter(id=1).first(locked)
+
+        Args:
+            key: An ``int`` (64-bit) or ``(int, int)`` tuple (two 32-bit halves),
+                or a validated :class:`AdvisoryLockKey`.
+
+        Yields:
+            A :class:`Transaction` handle bound to the pinned connection.
+
+        Raises:
+            FerrumConnectionError: if the connection is not open.
+            FerrumError: if the lock or unlock fails.
+        """
+        validated = AdvisoryLockKey(key)
+        if self._driver is None:
+            raise FerrumConnectionError(
+                "Connection is not open. "
+                "Use 'async with ferrum.connect(...) as conn:' to open it first. "
+                "[FERR-E101]",
+                category="config",
+            )
+        self._lifecycle.reject_if_closing()
+        acquire_cm = getattr(self._driver, "acquire", None)
+        if acquire_cm is None or not callable(acquire_cm):
+            raise FerrumConfigError(
+                "The active driver does not support connection pinning for "
+                "advisory locks. [FERR-C001]"
+            )
+        lock_sql, lock_args = _advisory_lock_sql(validated)
+        unlock_sql, unlock_args = _advisory_unlock_sql(validated)
+        self._lifecycle.begin()
+        try:
+            async with acquire_cm() as raw_conn:
+                try:
+                    await raw_conn.execute(lock_sql, *lock_args)
+                except Exception as exc:
+                    raise map_db_error(exc) from None
+                try:
+                    yield Transaction(
+                        raw_conn,
+                        self.dialect,
+                        runtime=self._runtime,
+                        lifecycle=self._lifecycle,
+                        echo=self._echo,
+                    )
+                finally:
+                    try:
+                        await raw_conn.execute(unlock_sql, *unlock_args)
+                    except Exception as exc:
+                        raise map_db_error(exc) from None
+        except FerrumError:
+            raise
+        except Exception as exc:
+            raise map_db_error(exc) from None
+        finally:
+            self._lifecycle.end()
+
     async def __aenter__(self) -> Connection:
         await self.open()
         return self
@@ -623,12 +796,19 @@ class Transaction:
         return self._dialect
 
     def _require_driver(self) -> QueryExecutorProtocol:
-        """Return the pinned execution surface (matches ``Connection._require_driver``)."""
+        """Return the pinned execution surface (matches ``Connection._require_driver``).
+
+        Per ratified §5a: statements issued through a ``Transaction`` never
+        statement-retry. The ``TimedQueryExecutor`` is constructed with
+        ``is_transaction=True`` so the retry policy is disabled object-scoped,
+        regardless of the parent ``Connection``'s ``RetryPolicy``.
+        """
         self._lifecycle.reject_if_closing()
         return TimedQueryExecutor(
             self._bound,
             runtime=self._runtime,
             lifecycle=self._lifecycle,
+            is_transaction=True,
         )
 
     @contextlib.asynccontextmanager
@@ -720,6 +900,99 @@ class Transaction:
         sql = f'SELECT * FROM "{schema}"."{function_name}"({placeholders})'  # noqa: S608
         rows = await driver.fetch(sql, *args)
         return [dict(row) for row in rows]
+
+    async def advisory_xact_lock(
+        self,
+        key: int | tuple[int, int] | AdvisoryLockKey,
+    ) -> None:
+        """Take a transaction-scoped advisory lock on this transaction's connection.
+
+        Uses ``pg_advisory_xact_lock`` — the lock is automatically released when
+        the enclosing transaction commits or rolls back. No explicit unlock is
+        needed. This is the safe pooling-friendly advisory lock primitive: the
+        lock is tied to the transaction, not the connection session.
+
+        Must be called inside the ``async with conn.transaction() as tx:`` block
+        (i.e. on an active ``Transaction``). Calling on a closed or committed
+        transaction raises.
+
+        Args:
+            key: An ``int`` (64-bit) or ``(int, int)`` tuple (two 32-bit halves),
+                or a validated :class:`AdvisoryLockKey`.
+
+        Raises:
+            FerrumError: if the lock acquisition fails.
+        """
+        validated = AdvisoryLockKey(key)
+        driver = self._require_driver()
+        sql, args = _advisory_xact_lock_sql(validated)
+        await driver.execute(sql, *args)
+
+    async def advisory_try_xact_lock(
+        self,
+        key: int | tuple[int, int] | AdvisoryLockKey,
+    ) -> bool:
+        """Try to take a transaction-scoped advisory lock without blocking.
+
+        Uses ``pg_try_advisory_xact_lock`` — returns ``True`` if the lock was
+        acquired, ``False`` if it is held by another session. Like
+        :meth:`advisory_xact_lock`, the lock is auto-released at transaction
+        commit/rollback.
+
+        Must be called inside the ``async with conn.transaction() as tx:`` block.
+
+        Args:
+            key: An ``int`` (64-bit) or ``(int, int)`` tuple (two 32-bit halves),
+                or a validated :class:`AdvisoryLockKey`.
+
+        Returns:
+            ``True`` if the lock was acquired, ``False`` if it is already held.
+
+        Raises:
+            FerrumError: if the lock attempt fails.
+        """
+        validated = AdvisoryLockKey(key)
+        driver = self._require_driver()
+        sql, args = _advisory_try_xact_lock_sql(validated)
+        result = await driver.fetchval(sql, *args)
+        return bool(result)
+
+
+# ---------------------------------------------------------------------------
+# Advisory lock SQL helpers
+#
+# The SQL is constructed from validated :class:`AdvisoryLockKey` arguments only
+# — no user-supplied identifiers. Parameters are bound as ``$N`` positional
+# values with explicit casts so asyncpg sends the correct integer width.
+# ---------------------------------------------------------------------------
+
+
+def _advisory_lock_sql(key: AdvisoryLockKey) -> tuple[str, tuple[int, ...]]:
+    args = key.as_args()
+    if len(args) == 1:
+        return "SELECT pg_advisory_lock($1::bigint)", args
+    return "SELECT pg_advisory_lock($1::int, $2::int)", args
+
+
+def _advisory_unlock_sql(key: AdvisoryLockKey) -> tuple[str, tuple[int, ...]]:
+    args = key.as_args()
+    if len(args) == 1:
+        return "SELECT pg_advisory_unlock($1::bigint)", args
+    return "SELECT pg_advisory_unlock($1::int, $2::int)", args
+
+
+def _advisory_xact_lock_sql(key: AdvisoryLockKey) -> tuple[str, tuple[int, ...]]:
+    args = key.as_args()
+    if len(args) == 1:
+        return "SELECT pg_advisory_xact_lock($1::bigint)", args
+    return "SELECT pg_advisory_xact_lock($1::int, $2::int)", args
+
+
+def _advisory_try_xact_lock_sql(key: AdvisoryLockKey) -> tuple[str, tuple[int, ...]]:
+    args = key.as_args()
+    if len(args) == 1:
+        return "SELECT pg_try_advisory_xact_lock($1::bigint)", args
+    return "SELECT pg_try_advisory_xact_lock($1::int, $2::int)", args
 
 
 # Shared by QuerySet terminals and relation prefetch helpers.

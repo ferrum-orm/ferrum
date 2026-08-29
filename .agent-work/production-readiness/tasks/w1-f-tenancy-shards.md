@@ -2,8 +2,8 @@
 task_id: w1-f-tenancy-shards
 wave: wave-1
 owner: production-readiness-executor
-status: ready
-run_id: null
+status: in_progress
+run_id: 20260829T085649Z
 shared_path_lease: w1-f-shared-20260829T100000Z
 dependencies:
   - w1-e-pool-lifecycle

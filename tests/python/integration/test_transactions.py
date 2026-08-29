@@ -22,7 +22,7 @@ import pytest
 import ferrum
 from ferrum.errors import FerrumTimeoutError
 
-from .backends import Backend, Capability
+from .backends import POSTGRES, Backend, Capability
 from .schema import Column, transient_table
 
 
@@ -191,3 +191,223 @@ async def test_deadline_rolls_back(
                 await model.objects.create(tx, name="slow", balance=1)
                 await asyncio.sleep(5)
         assert await _row_count(db_conn, backend, table) == 0
+
+
+# ---------------------------------------------------------------------------
+# select_for_update — live PostgreSQL locking (§5a acceptance criterion 4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_select_for_update_nowait_raises_lock_timeout(
+    pg_conn: ferrum.connection.Connection,
+    require_native: None,
+    unique_suffix: str,
+) -> None:
+    """NOWAIT: a second FOR UPDATE on a locked row raises lock_timeout (55P03)."""
+    table = f"ferrum_int_tx_for_update_nowait_{unique_suffix}"
+    model = _model(table)
+    async with transient_table(
+        pg_conn,
+        table,
+        backend=POSTGRES,
+        columns=_account_columns(),
+    ):
+        await model.objects.create(pg_conn, name="alice", balance=100)
+        # Hold a FOR UPDATE lock in a transaction.
+        async with pg_conn.transaction() as tx1:
+            rows = await model.objects.filter(name="alice").select_for_update().all(tx1)
+            assert len(rows) == 1
+            # A second transaction with NOWAIT should raise lock_timeout.
+            async with pg_conn.transaction() as tx2:
+                with pytest.raises(FerrumTimeoutError) as exc_info:
+                    await model.objects.filter(name="alice").select_for_update(nowait=True).all(tx2)
+                assert exc_info.value.category == "lock_timeout"
+
+
+@pytest.mark.integration
+async def test_select_for_update_skip_locked(
+    pg_conn: ferrum.connection.Connection,
+    require_native: None,
+    unique_suffix: str,
+) -> None:
+    """SKIP LOCKED: a second FOR UPDATE skips the locked row."""
+    table = f"ferrum_int_tx_for_update_skip_{unique_suffix}"
+    model = _model(table)
+    async with transient_table(
+        pg_conn,
+        table,
+        backend=POSTGRES,
+        columns=_account_columns(),
+    ):
+        await model.objects.create(pg_conn, name="alice", balance=100)
+        await model.objects.create(pg_conn, name="bob", balance=50)
+        async with pg_conn.transaction() as tx1:
+            # Lock alice.
+            rows = await model.objects.filter(name="alice").select_for_update().all(tx1)
+            assert len(rows) == 1
+            # A second transaction with SKIP LOCKED should get only bob.
+            async with pg_conn.transaction() as tx2:
+                rows2 = await model.objects.select_for_update(skip_locked=True).all(tx2)
+                names = {r.name for r in rows2}
+                assert "bob" in names
+                assert "alice" not in names
+
+
+@pytest.mark.integration
+async def test_select_for_update_blocks_until_commit(
+    pg_conn: ferrum.connection.Connection,
+    require_native: None,
+    unique_suffix: str,
+) -> None:
+    """FOR UPDATE (no NOWAIT) blocks until the holding transaction commits."""
+    table = f"ferrum_int_tx_for_update_block_{unique_suffix}"
+    model = _model(table)
+    async with transient_table(
+        pg_conn,
+        table,
+        backend=POSTGRES,
+        columns=_account_columns(),
+    ):
+        await model.objects.create(pg_conn, name="alice", balance=100)
+
+        holder_done = asyncio.Event()
+
+        async def hold_lock() -> None:
+            async with pg_conn.transaction() as tx:
+                await model.objects.filter(name="alice").select_for_update().all(tx)
+                await asyncio.sleep(0.2)
+            holder_done.set()
+
+        hold_task = asyncio.ensure_future(hold_lock())
+        await asyncio.sleep(0.05)  # let the holder acquire the lock
+        # This should block until the holder commits.
+        async with pg_conn.transaction() as tx2:
+            rows = await model.objects.filter(name="alice").select_for_update().all(tx2)
+            assert len(rows) == 1
+        await hold_task
+        assert holder_done.is_set()
+
+
+@pytest.mark.integration
+async def test_select_for_update_rejected_on_write(
+    pg_conn: ferrum.connection.Connection,
+    require_native: None,
+    unique_suffix: str,
+) -> None:
+    """select_for_update is rejected by write terminals (_check_write_scope)."""
+    from ferrum.errors import FerrumCompileError
+
+    table = f"ferrum_int_tx_for_update_reject_{unique_suffix}"
+    model = _model(table)
+    async with transient_table(
+        pg_conn,
+        table,
+        backend=POSTGRES,
+        columns=_account_columns(),
+    ):
+        await model.objects.create(pg_conn, name="alice", balance=100)
+        with pytest.raises(FerrumCompileError, match="FOR UPDATE"):
+            await (
+                model.objects.filter(name="alice").select_for_update().update(pg_conn, balance=200)
+            )
+
+
+# ---------------------------------------------------------------------------
+# Advisory locks — live PostgreSQL (§5a acceptance criterion 5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_advisory_xact_lock_exclusive(
+    pg_conn: ferrum.connection.Connection,
+    require_native: None,
+) -> None:
+    """pg_advisory_xact_lock holds exclusively within a transaction."""
+    key = 42
+    async with pg_conn.transaction() as tx1:
+        await tx1.advisory_xact_lock(key)
+        # A second transaction trying the same key should block (or return False
+        # with try_lock). Use try_lock to avoid hanging the test.
+        async with pg_conn.transaction() as tx2:
+            acquired = await tx2.advisory_try_xact_lock(key)
+            assert acquired is False
+    # After tx1 commits, a new transaction can acquire the lock.
+    async with pg_conn.transaction() as tx3:
+        acquired = await tx3.advisory_try_xact_lock(key)
+        assert acquired is True
+
+
+@pytest.mark.integration
+async def test_advisory_xact_lock_two_part_key(
+    pg_conn: ferrum.connection.Connection,
+    require_native: None,
+) -> None:
+    """Two-part (int, int) advisory lock keys work."""
+    key = (100, 200)
+    async with pg_conn.transaction() as tx1:
+        await tx1.advisory_xact_lock(key)
+        async with pg_conn.transaction() as tx2:
+            acquired = await tx2.advisory_try_xact_lock(key)
+            assert acquired is False
+
+
+@pytest.mark.integration
+async def test_advisory_session_lock(
+    pg_conn: ferrum.connection.Connection,
+    require_native: None,
+) -> None:
+    """Connection.advisory_lock pins a connection and holds a session lock."""
+    key = 999
+    async with pg_conn.advisory_lock(key) as locked_conn:
+        # Inside the lock, we can run queries on the pinned connection.
+        result = await locked_conn._require_driver().fetchval("SELECT 1")
+        assert result == 1
+        # A different connection's transaction cannot acquire the same session lock.
+        async with pg_conn.transaction() as tx2:
+            acquired = await tx2.advisory_try_xact_lock(key)
+            assert acquired is False
+    # After the context exits, the lock is released.
+    async with pg_conn.transaction() as tx3:
+        acquired = await tx3.advisory_try_xact_lock(key)
+        assert acquired is True
+
+
+# ---------------------------------------------------------------------------
+# run_transaction — live replay and no-leak (§5a acceptance criterion 3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_run_transaction_no_connection_leak(
+    pg_conn: ferrum.connection.Connection,
+    require_native: None,
+    unique_suffix: str,
+) -> None:
+    """run_transaction with retries does not leak pooled connections."""
+
+    table = f"ferrum_int_tx_run_tx_leak_{unique_suffix}"
+    model = _model(table)
+    async with transient_table(
+        pg_conn,
+        table,
+        backend=POSTGRES,
+        columns=_account_columns(),
+    ):
+        stats_before = pg_conn.pool_stats()
+        calls = 0
+
+        async def fn(tx: ferrum.Transaction) -> int:
+            nonlocal calls
+            calls += 1
+            await model.objects.create(tx, name=f"row-{calls}", balance=calls)
+            return calls
+
+        result = await pg_conn.run_transaction(fn)
+        assert result == 1
+        assert calls == 1
+
+        stats_after = pg_conn.pool_stats()
+        if stats_before is not None and stats_after is not None:
+            assert stats_after.acquired == stats_before.acquired
+            assert stats_after.inflight == stats_before.inflight

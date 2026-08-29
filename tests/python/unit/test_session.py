@@ -1,4 +1,4 @@
-"""Unit tests for ferrum.session — transaction-scoped GUC helpers.
+"""Unit tests for ferrum.session — transaction-scoped GUC and schema helpers.
 
 Invariants covered:
 - set_config with a disallowed GUC name raises FerrumCompileError.
@@ -10,6 +10,10 @@ Invariants covered:
 - Admin mode sets both tenant GUC and admin GUC.
 - Rollback path: GUC uses transaction_local=true (verified via SQL text).
 - tenant_transaction validates guc_name before opening transaction.
+- platform_admin_transaction sets ONLY an admin GUC (no fake tenant).
+- platform_admin_transaction rejects non-admin GUCs before opening the tx.
+- schema_transaction validates schema against regex AND allowlist before tx.
+- schema_transaction sets search_path via set_config (transaction-local).
 """
 
 from __future__ import annotations
@@ -22,9 +26,15 @@ import pytest
 
 from ferrum.errors import FerrumCompileError
 from ferrum.session import (
+    ALLOWED_ADMIN_GUC_NAMES,
     ALLOWED_GUC_NAMES,
+    ALLOWED_SCHEMA_NAMES,
+    _validate_admin_guc,
     _validate_guc_name,
+    _validate_schema_name,
     current_setting,
+    platform_admin_transaction,
+    schema_transaction,
     set_config,
     tenant_transaction,
 )
@@ -373,3 +383,270 @@ class TestTenantTransaction:
 
         assert received_kwargs.get("isolation") == "serializable"
         assert received_kwargs.get("readonly") is True
+
+
+# ---------------------------------------------------------------------------
+# helpers for admin/schema context managers
+# ---------------------------------------------------------------------------
+
+
+def _make_conn_with_tx() -> tuple[MagicMock, MagicMock, list[tuple[str, ...]]]:
+    """Build a conn mock whose transaction() yields a tx capturing executes."""
+    bound_tx = MagicMock()
+    bound_driver = AsyncMock()
+    executed: list[tuple[str, ...]] = []
+
+    async def _capture(sql: str, *args: Any) -> str:
+        executed.append((sql, *args))
+        return ""
+
+    bound_driver.execute = _capture
+    bound_tx._require_driver = MagicMock(return_value=bound_driver)
+
+    conn = MagicMock()
+
+    import contextlib
+
+    @contextlib.asynccontextmanager
+    async def _fake_transaction(**_: Any):  # type: ignore[misc]
+        yield bound_tx
+
+    conn.transaction = _fake_transaction
+    return conn, bound_tx, executed
+
+
+# ---------------------------------------------------------------------------
+# _validate_admin_guc
+# ---------------------------------------------------------------------------
+
+
+class TestValidateAdminGuc:
+    def test_admin_gucs_pass(self) -> None:
+        for name in ALLOWED_ADMIN_GUC_NAMES:
+            _validate_admin_guc(name)
+
+    def test_tenant_guc_rejected_as_admin(self) -> None:
+        # tenant-id GUCs are NOT admin GUCs even though they are in ALLOWED_GUC_NAMES.
+        with pytest.raises(FerrumCompileError) as exc_info:
+            _validate_admin_guc("app.team_id")
+        assert "admin allowlist" in str(exc_info.value)
+        assert exc_info.value.category == "guc_name_not_allowed"
+
+    def test_unknown_guc_rejected(self) -> None:
+        with pytest.raises(FerrumCompileError):
+            _validate_admin_guc("app.evil_admin")
+
+    def test_admin_gucs_are_subset_of_allowed(self) -> None:
+        assert ALLOWED_ADMIN_GUC_NAMES <= ALLOWED_GUC_NAMES
+
+
+# ---------------------------------------------------------------------------
+# _validate_schema_name
+# ---------------------------------------------------------------------------
+
+
+class TestValidateSchemaName:
+    def test_public_passes_default_allowlist(self) -> None:
+        _validate_schema_name("public", ALLOWED_SCHEMA_NAMES)
+
+    def test_valid_identifier_in_allowlist_passes(self) -> None:
+        allow = frozenset({"tenant_a", "public"})
+        _validate_schema_name("tenant_a", allow)
+
+    def test_injection_attempt_rejected_by_regex(self) -> None:
+        with pytest.raises(FerrumCompileError) as exc_info:
+            _validate_schema_name("public; DROP TABLE", ALLOWED_SCHEMA_NAMES)
+        assert exc_info.value.category == "invalid_identifier"
+
+    def test_quoted_identifier_rejected_by_regex(self) -> None:
+        with pytest.raises(FerrumCompileError):
+            _validate_schema_name('"public"', ALLOWED_SCHEMA_NAMES)
+
+    def test_dotted_schema_rejected_by_regex(self) -> None:
+        with pytest.raises(FerrumCompileError):
+            _validate_schema_name("public.tenant", ALLOWED_SCHEMA_NAMES)
+
+    def test_empty_rejected(self) -> None:
+        with pytest.raises(FerrumCompileError):
+            _validate_schema_name("", ALLOWED_SCHEMA_NAMES)
+
+    def test_valid_identifier_not_in_allowlist_rejected(self) -> None:
+        with pytest.raises(FerrumCompileError) as exc_info:
+            _validate_schema_name("tenant_b", ALLOWED_SCHEMA_NAMES)
+        assert exc_info.value.category == "schema_not_allowed"
+
+    def test_overlong_identifier_rejected(self) -> None:
+        with pytest.raises(FerrumCompileError):
+            _validate_schema_name("a" * 64, ALLOWED_SCHEMA_NAMES)
+
+
+# ---------------------------------------------------------------------------
+# platform_admin_transaction
+# ---------------------------------------------------------------------------
+
+
+class TestPlatformAdminTransaction:
+    @pytest.mark.asyncio
+    async def test_sets_only_admin_guc_no_tenant(self) -> None:
+        conn, _tx, executed = _make_conn_with_tx()
+
+        async with platform_admin_transaction(conn):
+            pass
+
+        # Exactly one set_config call — the admin flag. No tenant-id GUC.
+        assert len(executed) == 1
+        sql = executed[0][0]
+        assert "app.platform_admin" in sql
+        assert executed[0][1] == "true"
+        # No tenant-id GUC was set.
+        assert "app.team_id" not in sql
+        assert "ferrum.tenant_id" not in sql
+
+    @pytest.mark.asyncio
+    async def test_generic_admin_guc(self) -> None:
+        conn, _tx, executed = _make_conn_with_tx()
+
+        async with platform_admin_transaction(conn, admin_guc="ferrum.admin"):
+            pass
+
+        assert len(executed) == 1
+        assert "ferrum.admin" in executed[0][0]
+        assert executed[0][1] == "true"
+
+    @pytest.mark.asyncio
+    async def test_tenant_guc_rejected_before_transaction(self) -> None:
+        conn = MagicMock()
+        conn.transaction = AsyncMock()
+
+        with pytest.raises(FerrumCompileError) as exc_info:
+            async with platform_admin_transaction(conn, admin_guc="app.team_id"):
+                pass  # pragma: no cover
+
+        assert exc_info.value.category == "guc_name_not_allowed"
+        conn.transaction.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unknown_admin_guc_rejected_before_transaction(self) -> None:
+        conn = MagicMock()
+        conn.transaction = AsyncMock()
+
+        with pytest.raises(FerrumCompileError):
+            async with platform_admin_transaction(conn, admin_guc="app.evil"):
+                pass  # pragma: no cover
+
+        conn.transaction.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_kwargs_forwarded_to_transaction(self) -> None:
+        conn = MagicMock()
+        received: dict[str, Any] = {}
+
+        import contextlib
+
+        bound_tx = MagicMock()
+        bound_driver = AsyncMock()
+        bound_driver.execute = AsyncMock(return_value="")
+        bound_tx._require_driver = MagicMock(return_value=bound_driver)
+
+        @contextlib.asynccontextmanager
+        async def _fake_transaction(**kwargs: Any):  # type: ignore[misc]
+            received.update(kwargs)
+            yield bound_tx
+
+        conn.transaction = _fake_transaction
+
+        async with platform_admin_transaction(conn, isolation="serializable", readonly=True):
+            pass
+
+        assert received.get("isolation") == "serializable"
+        assert received.get("readonly") is True
+
+
+# ---------------------------------------------------------------------------
+# schema_transaction
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaTransaction:
+    @pytest.mark.asyncio
+    async def test_sets_search_path_via_set_config(self) -> None:
+        conn, _tx, executed = _make_conn_with_tx()
+
+        async with schema_transaction(conn, "public"):
+            pass
+
+        assert len(executed) == 1
+        sql = executed[0][0]
+        assert "search_path" in sql
+        assert executed[0][1] == "public"
+        # transaction-local (third arg true)
+        assert "true" in sql.lower()
+
+    @pytest.mark.asyncio
+    async def test_custom_allowed_schemas(self) -> None:
+        conn, _tx, executed = _make_conn_with_tx()
+
+        async with schema_transaction(
+            conn, "tenant_x", allowed_schemas=frozenset({"tenant_x", "public"})
+        ):
+            pass
+
+        assert len(executed) == 1
+        assert executed[0][1] == "tenant_x"
+
+    @pytest.mark.asyncio
+    async def test_invalid_identifier_rejected_before_transaction(self) -> None:
+        conn = MagicMock()
+        conn.transaction = AsyncMock()
+
+        with pytest.raises(FerrumCompileError) as exc_info:
+            async with schema_transaction(conn, "public; DROP TABLE"):
+                pass  # pragma: no cover
+        assert exc_info.value.category == "invalid_identifier"
+        conn.transaction.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_schema_not_in_allowlist_rejected_before_transaction(self) -> None:
+        conn = MagicMock()
+        conn.transaction = AsyncMock()
+
+        with pytest.raises(FerrumCompileError) as exc_info:
+            async with schema_transaction(conn, "tenant_y"):
+                pass  # pragma: no cover
+        assert exc_info.value.category == "schema_not_allowed"
+        conn.transaction.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_valid_identifier_not_in_custom_allowlist_rejected(self) -> None:
+        conn = MagicMock()
+        conn.transaction = AsyncMock()
+
+        with pytest.raises(FerrumCompileError):
+            async with schema_transaction(conn, "tenant_z", allowed_schemas=frozenset({"public"})):
+                pass  # pragma: no cover
+        conn.transaction.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_kwargs_forwarded_to_transaction(self) -> None:
+        conn = MagicMock()
+        received: dict[str, Any] = {}
+
+        import contextlib
+
+        bound_tx = MagicMock()
+        bound_driver = AsyncMock()
+        bound_driver.execute = AsyncMock(return_value="")
+        bound_tx._require_driver = MagicMock(return_value=bound_driver)
+
+        @contextlib.asynccontextmanager
+        async def _fake_transaction(**kwargs: Any):  # type: ignore[misc]
+            received.update(kwargs)
+            yield bound_tx
+
+        conn.transaction = _fake_transaction
+
+        async with schema_transaction(conn, "public", isolation="read_committed", readonly=True):
+            pass
+
+        assert received.get("isolation") == "read_committed"
+        assert received.get("readonly") is True

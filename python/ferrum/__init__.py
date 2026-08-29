@@ -9,6 +9,7 @@ from __future__ import annotations
 __version__ = "0.1.17"
 __all__ = [
     "Aggregate",
+    "ConnectionRegistry",
     "CreateExtension",
     "CreateFunction",
     "CreatePolicy",
@@ -40,9 +41,11 @@ __all__ = [
     "Model",
     "ModelConfig",
     "OneToOne",
+    "PoolConfig",
     "Q",
     "QuerySet",
     "RetryPolicy",
+    "ShardRouter",
     "TSVector",
     "Transaction",
     "ValuesListQuerySet",
@@ -58,7 +61,9 @@ __all__ = [
     "get_metrics",
     "get_session_config",
     "observability",
+    "platform_admin_transaction",
     "register_hook",
+    "schema_transaction",
     "session",
     "set_session_config",
     "tenant_transaction",
@@ -115,13 +120,16 @@ from ferrum.queryset import (
     ValuesListQuerySet,
     ValuesQuerySet,
 )
+from ferrum.routing import ConnectionRegistry, PoolConfig, ShardRouter
 from ferrum.runtime import RetryPolicy
 from ferrum.session import (
     current_setting as get_session_config,
 )
 from ferrum.session import (
-    set_config as set_session_config,
+    platform_admin_transaction,
+    schema_transaction,
+    tenant_transaction,
 )
 from ferrum.session import (
-    tenant_transaction,
+    set_config as set_session_config,
 )

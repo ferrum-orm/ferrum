@@ -2,8 +2,8 @@
 task_id: w1-b-transactions-retries-locks
 wave: wave-1
 owner: production-readiness-executor
-status: ready
-run_id: null
+status: in_progress
+run_id: 20260829T085649Z
 shared_path_lease: null
 dependencies:
   - w1-d-error-taxonomy
