@@ -3,17 +3,48 @@
 Register codecs on a connection before reading/writing ``vector`` columns.
 This is separate from Ferrum's DDL path and must be invoked explicitly by
 application code after ``ferrum.connect()``.
+
+Two equivalent entry points:
+
+- :func:`register_vector_codecs` — the original one-call helper. Builds a
+  :class:`PgVectorInitializer` and runs it.
+- :class:`PgVectorInitializer` — the declarative
+  :class:`~ferrum.drivers.protocol.ConnectionInitializer` implementation.
+  Consumer code that wants to compose initializers (pgvector + citext + a
+  custom codec, for example) instantiates one of each and runs them in
+  sequence against the open ``Connection``::
+
+      async with ferrum.connect(dsn) as conn:
+          await PgVectorInitializer().initialize(conn)
+          await CitextInitializer().initialize(conn)
+
+  Future ``connect(..., extensions=[pgvector])`` plumbing (not yet wired
+  through ``ferrum.connect``) will accept a list of ``ConnectionInitializer``
+  objects and run them on every new pooled connection from the pool
+  ``init`` hook, so the registration survives pool growth and failover
+  without application code calling ``register_vector_codecs`` again.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from ferrum.drivers.protocol import ConnectionLike
 from ferrum.errors import FerrumCompileError, FerrumConfigError
 
 if TYPE_CHECKING:
     from ferrum.connection import Connection
     from ferrum.models import Model
+
+# Re-export the protocol under the pgvector namespace for IDE discovery.
+# ``ConnectionLike`` is a structural alias (``Any``); the explicit aliasing
+# keeps the public pgvector surface self-documenting without importing
+# ``ferrum.connection`` here (preserves the import boundary).
+__all__ = [
+    "PgVectorInitializer",
+    "register_vector_codecs",
+    "vector_search",
+]
 
 # Metric name → (distance operator, score expression template)
 # The template placeholder ``{field}`` is replaced with the quoted column name
@@ -61,8 +92,10 @@ async def register_vector_codecs(
 ) -> None:
     """Ensure the ``vector`` extension exists and register asyncpg codecs.
 
-    The codec is installed pool-wide (every current and future connection), so
-    ``vector`` columns decode to ``list[float]`` no matter which pooled
+    Convenience wrapper around :class:`PgVectorInitializer`. Builds an
+    initializer with the supplied ``timeout`` and runs it against ``conn``.
+    The codec is installed pool-wide (every current and future connection),
+    so ``vector`` columns decode to ``list[float]`` no matter which pooled
     connection serves a query.
 
     Writing a vector does not require this call: Ferrum binds vector values as
@@ -81,46 +114,104 @@ async def register_vector_codecs(
         FerrumConfigError: If the connection is not a PostgreSQL connection, the
             pool is not open, or the driver is not the asyncpg driver.
     """
-    if conn.dialect != "postgres":
-        raise FerrumConfigError(
-            "pgvector integration requires a PostgreSQL connection. [FERR-C001]"
-        )
-    driver = conn._driver
-    pool = getattr(driver, "_pool", None)
-    if driver is None or pool is None:
-        raise FerrumConfigError("PostgreSQL pool is not open. [FERR-C001]")
+    await PgVectorInitializer(timeout=timeout).initialize(conn)
 
-    # CREATE EXTENSION — idempotent via IF NOT EXISTS; the DuplicateObjectError
-    # guard covers rare race conditions where two concurrent startup paths both
-    # attempt the DDL at the same moment.
-    try:
-        await pool.execute(
-            "CREATE EXTENSION IF NOT EXISTS vector",
-            timeout=timeout if timeout > 0 else None,
-        )
-    except Exception as exc:
-        # asyncpg raises DuplicateObjectError (SQLSTATE 42710) if another
-        # concurrent caller committed the extension between our IF NOT EXISTS
-        # check and our DDL execution.  Treat it as success.
-        exc_name = type(exc).__name__
-        if "DuplicateObject" not in exc_name:
-            raise
 
-    # Registering through the driver applies the codec from the pool's ``init``
-    # hook, so every connection — including ones the pool opens later — decodes
-    # ``vector`` columns to ``list[float]``. Registering against a single
-    # acquired connection instead made vector reads depend on which pooled
-    # connection served the query.
-    add_codec = getattr(driver, "add_type_codec", None)
-    if add_codec is None:
-        raise FerrumConfigError("pgvector integration requires the asyncpg driver. [FERR-C001]")
-    await add_codec(
-        "vector",
-        schema="public",
-        encoder=_encode_vector,
-        decoder=_decode_vector,
-        format="text",
-    )
+class PgVectorInitializer:
+    """Declarative :class:`ConnectionInitializer` for the pgvector extension.
+
+    Running ``initialize(conn)``:
+
+    1. Validates the connection is PostgreSQL and the asyncpg pool is open.
+    2. Runs ``CREATE EXTENSION IF NOT EXISTS vector`` directly against the
+       asyncpg pool (``conn._driver._pool.execute(...)``), preserving the
+       behavior of the legacy ``register_vector_codecs`` helper.
+       ``DuplicateObjectError`` (SQLSTATE 42710) from a concurrent startup
+       path is tolerated.
+    3. Registers the ``vector`` text codec pool-wide via
+       ``driver.add_type_codec(...)`` so every current and future pooled
+       connection decodes ``vector`` columns to ``list[float]``.
+
+    The initializer is idempotent. Re-running it on an already-prepared
+    connection is a no-op (the codec registration deduplicates inside
+    ``add_type_codec``; ``CREATE EXTENSION IF NOT EXISTS`` is itself
+    idempotent).
+
+    Fail-closed: if the ``vector`` contrib package is not installed on the
+    server, ``CREATE EXTENSION`` raises and ``initialize`` propagates the
+    mapped Ferrum error. A pool that silently served queries against
+    unregistered vector columns would produce non-deterministic ``DataError``
+    depending on which pooled connection served the query.
+
+    Args:
+        timeout: Timeout (seconds) for the ``CREATE EXTENSION`` DDL.
+            Defaults to 5 s. Set to ``0`` to disable the timeout guard.
+
+    Example:
+        ::
+
+            async with ferrum.connect(dsn) as conn:
+                await PgVectorInitializer().initialize(conn)
+                # vector columns now decode to list[float] on every pooled
+                # connection, including ones the pool opens later.
+    """
+
+    name = "pgvector"
+
+    def __init__(self, *, timeout: float = 5.0) -> None:
+        self._timeout = timeout
+
+    async def initialize(self, conn: ConnectionLike) -> None:
+        """Run the pgvector extension setup and codec registration on ``conn``.
+
+        Implements the :class:`~ferrum.drivers.protocol.ConnectionInitializer`
+        protocol. See the class docstring for the contract.
+        """
+        if conn.dialect != "postgres":
+            raise FerrumConfigError(
+                "pgvector integration requires a PostgreSQL connection. [FERR-C001]"
+            )
+        driver = conn._driver
+        pool = getattr(driver, "_pool", None)
+        if driver is None or pool is None:
+            raise FerrumConfigError("PostgreSQL pool is not open. [FERR-C001]")
+
+        # CREATE EXTENSION — idempotent via IF NOT EXISTS; the
+        # DuplicateObjectError guard covers rare race conditions where two
+        # concurrent startup paths both attempt the DDL at the same moment.
+        # Issued against the pool's init-time execute path (the same path
+        # ``AsyncpgDriver._init_conn`` would use if the initializer were
+        # wired through the pool ``init`` hook). The timeout guards a slow
+        # ``CREATE EXTENSION`` against an unhealthy server.
+        timeout = self._timeout
+        try:
+            await pool.execute(
+                "CREATE EXTENSION IF NOT EXISTS vector",
+                timeout=timeout if timeout > 0 else None,
+            )
+        except Exception as exc:
+            # asyncpg raises DuplicateObjectError (SQLSTATE 42710) if another
+            # concurrent caller committed the extension between our IF NOT
+            # EXISTS check and our DDL execution.  Treat it as success.
+            exc_name = type(exc).__name__
+            if "DuplicateObject" not in exc_name:
+                raise
+
+        # Registering through the driver applies the codec from the pool's
+        # ``init`` hook, so every connection — including ones the pool opens
+        # later — decodes ``vector`` columns to ``list[float]``. Registering
+        # against a single acquired connection instead made vector reads
+        # depend on which pooled connection served the query.
+        add_codec = getattr(driver, "add_type_codec", None)
+        if add_codec is None:
+            raise FerrumConfigError("pgvector integration requires the asyncpg driver. [FERR-C001]")
+        await add_codec(
+            "vector",
+            schema="public",
+            encoder=_encode_vector,
+            decoder=_decode_vector,
+            format="text",
+        )
 
 
 async def vector_search(

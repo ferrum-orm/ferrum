@@ -46,7 +46,11 @@ jobs:
 
       - uses: pypa/cibuildwheel@v4.1.0
         env:
-          CIBW_BUILD: "cp311-* cp312-* cp313-*"
+          # abi3-py311 (tool.maturin) produces a single cp311-abi3-* wheel per
+          # platform that installs on CPython 3.11+. The extra cp312/cp313/cp314
+          # build selectors exercise those toolchains in CI to catch
+          # version-specific build regressions; the output wheel tag is abi3.
+          CIBW_BUILD: "cp311-* cp312-* cp313-* cp314-*"
           # ADR-005 ships manylinux (glibc) wheels only; skip musllinux so the
           # linux artifact doesn't carry a musl wheel that pip can't install on
           # the glibc smoke-install / security-gate runners.
@@ -76,6 +80,12 @@ jobs:
           name: wheels-${{ matrix.platform }}
           path: wheelhouse/*.whl
 
+      # Generate signed build-provenance attestations for the wheel artifacts
+      # so PyPI consumers can verify artifact origin via gh attestation verify.
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: wheelhouse/*.whl
+
   # ---------------------------------------------------------------------------
   # Build sdist
   # ---------------------------------------------------------------------------
@@ -93,6 +103,11 @@ jobs:
         with:
           name: sdist
           path: dist/*.tar.gz
+
+      # Generate signed build-provenance attestation for the sdist artifact.
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/*.tar.gz
 
   # ---------------------------------------------------------------------------
   # Windows sdist smoke: Windows is sdist-only in v0.1 (ADR-005). Prove that
@@ -123,15 +138,43 @@ jobs:
           python -c "import ferrum; print(ferrum.__version__)"
 
   # ---------------------------------------------------------------------------
-  # Smoke-install each wheel
+  # Linux sdist smoke: prove `pip install` from the sdist compiles the Rust
+  # extension and imports on a clean Linux runner. Deliberate sdist test.
+  # ---------------------------------------------------------------------------
+  linux-sdist-smoke:
+    name: Linux sdist smoke
+    needs: [build-sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist/
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install from sdist (compiles the Rust extension) and import
+        run: |
+          pip install dist/*.tar.gz
+          python -c "import ferrum; print(ferrum.__version__)"
+
+  # ---------------------------------------------------------------------------
+  # Smoke-install each wheel — proves the abi3 wheel installs and imports
+  # on every supported CPython minor version WITHOUT a Rust toolchain.
+  # Fails loudly if pip silently falls back to source compilation.
   # ---------------------------------------------------------------------------
   smoke-install:
     name: Smoke install (${{ matrix.python-version }})
     needs: [build-wheels]
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -142,7 +185,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install wheels/*.whl
+      - name: Mask Rust toolchain (abi3 wheel must install without compiling)
+        run: |
+          # Create a PATH-prefix of failing stubs for cargo/rustc so any silent
+          # source-compile fallback fails loudly instead of producing a working
+          # import from a hidden toolchain. The abi3 wheel must never need Rust.
+          mkdir -p "$HOME/norust/bin"
+          cat > "$HOME/norust/bin/cargo" <<'STUB'
+          #!/usr/bin/env bash
+          echo "ERROR: cargo invoked during wheel install — abi3 wheel should not need Rust" >&2
+          exit 127
+          STUB
+          cp "$HOME/norust/bin/cargo" "$HOME/norust/bin/rustc"
+          chmod +x "$HOME/norust/bin/"*
+          echo "$HOME/norust/bin" >> "$GITHUB_PATH"
+      - name: Install wheel and fail on silent source compilation
+        run: |
+          # A path-based wheel install must never build from source. Capture
+          # the pip log and fail if it mentions the sdist-compile signature.
+          pip install --log pip-install.log wheels/*.whl
+          if grep -q "Building wheel for ferrum-orm" pip-install.log; then
+            echo "ERROR: pip silently compiled ferrum-orm from source" >&2
+            grep "Building wheel for ferrum-orm" pip-install.log >&2
+            exit 1
+          fi
       - run: python -c "import ferrum; print(ferrum.__version__)"
 
   # ---------------------------------------------------------------------------
@@ -183,11 +249,28 @@ jobs:
         run: pytest tests/python/security -m security -v
 
   # ---------------------------------------------------------------------------
+  # cargo audit: scan Rust dependency tree for known advisories. Deny warnings
+  # so any advisory fails the release. Supply chain security gate.
+  # ---------------------------------------------------------------------------
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Run cargo audit (deny advisories)
+        run: cargo audit --deny warnings
+
+  # ---------------------------------------------------------------------------
   # Publish to PyPI (manual environment gate)
   # ---------------------------------------------------------------------------
   publish:
     name: Publish to PyPI
-    needs: [security-gate-wheel, build-sdist, windows-sdist-smoke]
+    needs: [security-gate-wheel, build-sdist, windows-sdist-smoke, linux-sdist-smoke, cargo-audit]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -199,6 +282,8 @@ jobs:
           merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
+          # Generate PyPI sigstore attestations (OIDC-backed, no long-lived key).
+          attestations: true
           # The 0.1.0 wheels already uploaded before the sdist failed; skip files
           # that already exist so the re-run just adds the (now-fixed) sdist.
           skip-existing: true

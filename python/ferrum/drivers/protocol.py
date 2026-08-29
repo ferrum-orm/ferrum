@@ -89,3 +89,55 @@ class DriverProtocol(Protocol):
     async def execute(self, sql: str, *params: object) -> str: ...
     async def open(self) -> None: ...
     async def close(self) -> None: ...
+
+
+# A ``ConnectionInitializer`` consumes the Ferrum ``Connection`` surface only —
+# it must never receive a raw driver/pool connection. ``ConnectionLike`` is a
+# structural alias (duck-typed) so the protocol module does not import
+# ``ferrum.connection`` (preserves the import boundary). Implementations read
+# ``conn.dialect`` for backend validation; the canonical
+# ``PgVectorInitializer`` reaches the asyncpg pool directly
+# (``conn._driver._pool.execute``) to preserve the legacy
+# ``register_vector_codecs`` behavior, while consumer-defined initializers
+# may use ``conn._require_driver()``.
+ConnectionLike = Any
+
+
+@runtime_checkable
+class ConnectionInitializer(Protocol):
+    """Declarative hook that prepares every new pooled connection.
+
+    Connection initializers run uniformly for current and future pooled
+    connections. A driver/pool that supports initializers invokes
+    ``initialize(conn)`` from its pool ``init`` callback so the registration
+    survives pool growth, reconnect/failover, and ``expire_connections()``.
+
+    Initializers must:
+
+    - Consume the ``Connection`` surface for backend validation
+      (``conn.dialect``). The canonical ``PgVectorInitializer`` reaches the
+      asyncpg pool directly (``conn._driver._pool.execute``) to preserve the
+      legacy ``register_vector_codecs`` behavior; consumer-defined
+      initializers may use ``conn._require_driver()``. Never expose the raw
+      asyncpg/aiomysql connection to consumer code.
+    - Be idempotent: pool reconnection, concurrent startup paths, and consumer
+      re-registration must not raise. ``DuplicateObjectError`` from
+      ``CREATE EXTENSION`` and repeat codec registration are explicitly
+      tolerated by the pgvector initializer.
+    - Fail closed on permanent errors: if a required extension cannot be
+      installed (e.g. the ``vector`` contrib is absent), propagate the
+      exception. A pool that silently served queries against unregistered
+      vector columns would produce non-deterministic ``DataError`` depending
+      on which pooled connection served the query.
+
+    Consumer-defined initializers (citext, custom codecs) implement this
+    protocol. The pgvector initializer lives in
+    :mod:`ferrum.ext.pgvector` (:class:`PgVectorInitializer`).
+
+    ``name`` is a diagnostic label for logging and error messages; it is not
+    enforced by ``@runtime_checkable`` (which only verifies method presence).
+    """
+
+    name: str
+
+    async def initialize(self, conn: ConnectionLike) -> None: ...

@@ -1,5 +1,17 @@
-"""Optional Ferrum extension helpers (pgvector codecs, etc.)."""
+"""Optional Ferrum extension helpers (pgvector codecs, etc.).
 
-from ferrum.ext.pgvector import register_vector_codecs
+Extension helpers implement the
+:class:`~ferrum.drivers.protocol.ConnectionInitializer` protocol so they can
+run uniformly on every new pooled connection. See
+:class:`ferrum.ext.pgvector.PgVectorInitializer` for the declarative pgvector
+entry point.
+"""
 
-__all__ = ["register_vector_codecs"]
+from ferrum.drivers.protocol import ConnectionInitializer
+from ferrum.ext.pgvector import PgVectorInitializer, register_vector_codecs
+
+__all__ = [
+    "ConnectionInitializer",
+    "PgVectorInitializer",
+    "register_vector_codecs",
+]

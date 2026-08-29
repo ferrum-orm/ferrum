@@ -1,0 +1,53 @@
+version: 1
+task_id: w4-c-typing
+owner: production-readiness-executor
+status: complete
+phase: complete
+run_id: 20260829T093132Z
+base_revision: 87f39966d60303b30943308c9123418d9d47252e
+dependencies_checked: true
+owned_paths_checked: true
+shared_path_lease: null
+spec_complete: true
+plan_complete: true
+tasks_complete: true
+implementation_complete: true
+executor_validation: passed
+independent_verification: passed
+security_triage_complete: true
+security_surfaces:
+  sql_compilation: false
+  migration_apply: false
+  errors_redaction: false
+  auth_secrets: false
+  rls_admin_gucs: false
+  schema_selection: false
+security_review: not_required
+security_review_justification: Typing stubs and IDE contract; no security surfaces
+architecture_review: not_required
+product_review: not_required
+code_review: approved
+artifacts:
+  task_contract: .agent-work/production-readiness/tasks/w4-c-typing.md
+  latest_log: .agent-work/production-readiness/logs/w4-c-typing/20260829T093132Z.md
+  latest_verification: null
+  architecture_review: null
+  security_review: null
+  product_review: null
+  code_review: .agent-work/production-readiness/reviews/w4-c-typing/20260829T093132Z-code-reviewer.md
+changed_paths:
+  - python/ferrum/_native.pyi
+  - tests/python/unit/test_typing_contract.py
+blockers:
+  - id: pre-existing-ty-errors
+    description: "5 pre-existing ty diagnostics in unowned files (mysql.py:105,128, errors.py:56,64, ledger.py:36). These are try/except ImportError patterns for optional dependencies. Require source fixes in unowned files."
+    owned_by: unowned
+    blocks: full-ty-clean
+  - id: ci-local-blocked-by-w3a
+    description: "mise run ci-local blocked by W3-A parallel work (22 ruff errors + 10 test failures in test_migration_graph.py). Not caused by this run."
+    owned_by: w3-a-migration-graph
+    blocks: ci-local-green
+follow_ups:
+  - "queryset.py:1124 # type: ignore[return-value] suppresses dict[str, Any] vs CompiledQuery TypedDict mismatch. Future workstream could align Python runtime annotation with stub TypedDict (requires editing queryset.py — unowned)."
+next_action: Request independent verification from production-readiness-verifier
+updated_at: 2026-08-29T11:45:00Z

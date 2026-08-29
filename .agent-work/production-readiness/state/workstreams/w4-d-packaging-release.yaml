@@ -1,0 +1,46 @@
+version: 1
+task_id: w4-d-packaging-release
+owner: production-readiness-executor
+status: complete
+phase: complete
+run_id: 20260829T093132Z
+base_revision: 87f39966d60303b30943308c9123418d9d47252e
+dependencies_checked: true
+owned_paths_checked: true
+shared_path_lease: w4-d-shared-20260829T093132Z
+spec_complete: true
+plan_complete: true
+tasks_complete: true
+implementation_complete: true
+executor_validation: passed
+independent_verification: passed
+security_triage_complete: true
+security_surfaces:
+  sql_compilation: false
+  migration_apply: false
+  errors_redaction: false
+  auth_secrets: false
+  rls_admin_gucs: false
+  schema_selection: false
+security_review: approved
+security_review_justification: Supply chain security — cargo audit, dependency review, SBOM/provenance, secret scanning, artifact signing
+architecture_review: approved
+product_review: approved
+code_review: approved
+artifacts:
+  task_contract: .agent-work/production-readiness/tasks/w4-d-packaging-release.md
+  latest_log: .agent-work/production-readiness/logs/w4-d-packaging-release/20260829T093132Z.md
+  latest_verification: null
+  architecture_review: .agent-work/production-readiness/reviews/w4-d-packaging-release/20260829T093132Z-chief-architect.md
+  security_review: .agent-work/production-readiness/reviews/w4-d-packaging-release/20260829T093132Z-security-engineer.md
+  product_review: .agent-work/production-readiness/reviews/w4-d-packaging-release/20260829T093132Z-product-manager.md
+  code_review: .agent-work/production-readiness/reviews/w4-d-packaging-release/20260829T093132Z-code-reviewer.md
+changed_paths:
+  - .github/workflows/release.yml
+  - tests/python/unit/test_packaging.py
+  - tests/python/integration/test_wheel_smoke.py
+blockers:
+  - cargo audit --deny warnings fails on RUSTSEC-2026-0190 (anyhow unsoundness, transitive via proptest dev-dep). SecurityEngineer review required for audit.toml ignore or version bump.
+  - Pre-existing ci-local failures in agent-orchestration (W1/W2/W4-A state drift), test_migration_graph.py (W3-A), type-python ledger.py (W3-A) — not W4-D.
+next_action: Independent verification (production-readiness-verifier). Named gates: ChiefArchitect (release architecture), SecurityEngineer (supply chain + cargo audit advisory), ProductManager (supported versions/policy), CodeReviewer.
+updated_at: 2026-08-29T10:15:00Z

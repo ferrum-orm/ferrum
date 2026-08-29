@@ -1,12 +1,21 @@
 version: 1
 goal: ferrum-production-readiness
 plan: .cursor/plans/ferrum-production-readiness_6b5f422d.plan.md
-updated_at: 2026-08-29T12:00:00Z
+updated_at: 2026-08-29T09:42:51Z
 updated_by: production-readiness-coordinator
 status: active
 current_wave: wave-2
-shared_path_leases: {}
-ownership_checked_at: 2026-08-29T12:00:00Z
+shared_path_leases:
+  w4-d-shared-20260829T093132Z:
+    lease_id: w4-d-shared-20260829T093132Z
+    workstream: w4-d-packaging-release
+    run_id: 20260829T093132Z
+    holder: production-readiness-executor
+    paths:
+      - .github/workflows/release.yml
+    acquired_at: 2026-08-29T09:31:32Z
+    expires_at: 2026-08-30T09:31:32Z
+ownership_checked_at: 2026-08-29T09:31:32Z
 shared_paths:
   - AGENTS.md
   - CLAUDE.md
@@ -94,15 +103,15 @@ workstreams:
   w2-b-query-expressiveness: blocked
   w2-c-relations-bulk: blocked
   w2-d-framework-integrations: complete
-  w2-e-extension-lifecycle: blocked
+  w2-e-extension-lifecycle: complete
   w2-f-schema-drift-cli: complete
-  w3-a-migration-graph: blocked
+  w3-a-migration-graph: complete
   w3-b-schema-shard-migrations: blocked
   w3-c-autodiff: blocked
   w4-a-observability: complete
   w4-b-performance: blocked
-  w4-c-typing: blocked
-  w4-d-packaging-release: blocked
+  w4-c-typing: complete
+  w4-d-packaging-release: complete
   pilot-ticket-analyzer: blocked
   pilot-org-ai-platform: blocked
 release_gates:
@@ -112,7 +121,7 @@ release_gates:
   error_redaction: passed
   pool_operability: passed
   consumer_contracts: pending
-  packaging: pending
+  packaging: passed
 blockers:
   - id: w0-c-shared-path-overlap
     severity: resolved
@@ -175,7 +184,7 @@ blockers:
     severity: resolved
     workstream: w1-c-migration-safety
     note: EnableRLS(force=True) now emits ENABLE+FORCE (verified live: relrowsecurity=True, relforcerowsecurity=True on non-superuser role). xfail dropped. W1-C complete 20260829T080749Z. SecurityEngineer approved.
-  - id: w1-serial-connection-queryset
-    severity: resolved
-    workstream: w1-b-transactions-retries-locks
-    note: W1-A/C/D/E all complete (20260829T080749Z). W1-B is ready (connection.py + queryset.py ownership extended). W1-F is ready (__init__.py lease granted). Both await executor dispatch. ADR-004 closure criteria met per ChiefArchitect; AGENTS.md §5 update pending shared-path lease.
+  - id: rustsec-2026-0190-audit-toml
+    severity: followup
+    workstream: w4-d-packaging-release
+    note: RUSTSEC-2026-0190 (anyhow unsoundness, transitive via proptest dev-dep). SecurityEngineer adjudicated: ignore with rationale (dev-dep only, not in shipped wheel, unsound API not exercised). audit.toml does NOT exist and is NOT in any owned path — coordinator must create it. Until then, cargo-audit CI gate will fail.

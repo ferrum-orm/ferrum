@@ -27,7 +27,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from ferrum.errors import FerrumMigrationError
 from ferrum.migrations.ledger import (
@@ -41,7 +41,8 @@ from ferrum.migrations.ledger import (
 from ferrum.migrations.tokens import verify_token
 
 if TYPE_CHECKING:
-    from ferrum.connection import Connection
+    from ferrum.connection import Connection, ConnectionLike
+    from ferrum.migrations.loader import MigrationModule
     from ferrum.models import FieldMeta, Model, ModelMetadata
 
 
@@ -1564,3 +1565,545 @@ def migration_op_failure_from(
         op=op,
         exc=exc,
     )
+
+
+# ---------------------------------------------------------------------------
+# W3-A: Migration graph, reversibility, data migrations, offline SQL
+# ---------------------------------------------------------------------------
+# The primitives below are read-only graph views and developer-supplied
+# data-migration runners. They do NOT replace the W1-C apply path
+# (``apply()`` / ``_apply_postgres()`` / ``_apply_thin_parity()``) — the
+# graph layer is consumed by tests, audit tooling, and downstream code
+# that needs to reason about ordering, status, and recovery without a
+# live CLI run. Actual DDL application continues to flow through W1-C.
+# ---------------------------------------------------------------------------
+
+
+# Allowed transaction policies for :class:`DataMigration`.
+_DATA_MIGRATION_POLICIES: frozenset[str] = frozenset({"required", "none"})
+
+
+@dataclass
+class MigrationStatus:
+    """Per-migration status row returned by :meth:`MigrationGraph.status`.
+
+    Fields:
+        name: Migration file stem (e.g. ``"0001_create_note"``).
+        state: One of ``"applied"``, ``"pending"``, ``"checksum_mismatch"``,
+            or ``"unknown"`` (no ledger reachable).
+        digest: The on-disk content digest, or ``""`` if the file is absent.
+        stored_digest: The digest recorded in the ledger, or ``""`` if not
+            applied. Equal to ``digest`` when the on-disk file matches the
+            applied version.
+        reversible: ``True`` iff the migration declares non-empty
+            ``reverse_operations``.
+        has_destructive_reverse: ``True`` iff any reverse operation is
+            classified ``"destructive"`` (forces the ``--confirm`` gate on
+            revert).
+    """
+
+    name: str
+    state: str
+    digest: str = ""
+    stored_digest: str = ""
+    reversible: bool = False
+    has_destructive_reverse: bool = False
+
+
+class MigrationGraph:
+    """Read-only view over a migration dependency graph plus ledger state.
+
+    Wraps :func:`loader.scan` output and queries the ledger to answer:
+    - What is the deterministic topological order?
+    - Which migrations are pending / applied / checksum-mismatched?
+    - Which migrations must be applied to reach a target (upgrade plan)?
+    - Which applied migrations must be reverted to reach a target
+      (downgrade plan)?
+    - What recovery guidance applies to the current state?
+
+    The graph never acquires a connection for apply/revert — those operations
+    stay owned by W1-C (``cli/migrate_cmd.py`` / ``cli/revert_cmd.py``). The
+    graph only reads the ledger via the supplied :class:`Connection`.
+
+    Security: identifiers come from migration-file names (developer-controlled,
+    validated by :func:`loader.scan` against the ``NNNN_slug.py`` pattern).
+    No user input reaches this class.
+    """
+
+    def __init__(
+        self,
+        modules: list[MigrationModule],
+        *,
+        conn: Connection | None = None,
+    ) -> None:
+        """Build a graph from a list of migration modules.
+
+        Args:
+            modules: Migration modules in any order; the graph stores them in
+                deterministic topological order (Kahn's algorithm with
+                name-sorted tie-breaks).
+            conn: Optional open :class:`Connection`. When supplied, status /
+                upgrade / downgrade queries consult the ledger. When
+                ``None``, every migration is reported as ``"unknown"`` and
+                upgrade / downgrade plans treat all migrations as pending.
+        """
+        # Importing here avoids a circular import at module load time.
+        from ferrum.migrations.loader import topological_sort
+
+        self._modules: list[MigrationModule] = topological_sort(modules)
+        self._by_name: dict[str, MigrationModule] = {m.name: m for m in self._modules}
+        self._conn = conn
+
+    # ------------------------------------------------------------------
+    # Read-only graph views
+    # ------------------------------------------------------------------
+
+    @property
+    def modules(self) -> list[MigrationModule]:
+        """Return the modules in deterministic topological order."""
+        return list(self._modules)
+
+    def names(self) -> list[str]:
+        """Return migration names in topological order."""
+        return [m.name for m in self._modules]
+
+    def topological_order(self) -> list[str]:
+        """Alias of :meth:`names` for graph-query callers."""
+        return self.names()
+
+    def detect_cycle(self) -> list[str] | None:
+        """Return names participating in a cycle, or ``None`` if acyclic.
+
+        The constructor already raises on cycles via
+        :func:`loader.topological_sort`; this method is a defensive check
+        for callers that construct a graph from an unsorted list and want
+        to introspect without raising. In practice it always returns
+        ``None`` for a successfully constructed graph.
+        """
+        from ferrum.migrations.loader import detect_cycle as _detect_cycle
+
+        return _detect_cycle(self._modules)
+
+    def dependencies_of(self, name: str) -> list[str]:
+        """Return the declared dependencies of *name* (a copy)."""
+        self._require_known(name)
+        return list(self._by_name[name].dependencies)
+
+    def _require_known(self, name: str) -> None:
+        if name not in self._by_name:
+            raise FerrumMigrationError(f"Migration {name!r} is not in this graph. [FERR-M001]")
+
+    # ------------------------------------------------------------------
+    # Ledger-backed queries
+    # ------------------------------------------------------------------
+
+    async def _digest_for(self, module: MigrationModule) -> str:
+        """Return the on-disk content digest for *module*."""
+        # Imported here to avoid a circular import.
+        from ferrum.migrations.ledger import compute_digest
+
+        content = module.path.read_text(encoding="utf-8")
+        return compute_digest(module.name, content)
+
+    async def _applied_digests(self) -> dict[str, str]:
+        """Return ``{migration_name: stored_digest}`` for every applied row."""
+        if self._conn is None:
+            return {}
+        from ferrum.migrations.ledger import find_applied_digest_by_name
+
+        result: dict[str, str] = {}
+        for module in self._modules:
+            stored = await find_applied_digest_by_name(self._conn, module.name)
+            if stored is not None:
+                result[module.name] = stored
+        return result
+
+    async def status(self) -> list[MigrationStatus]:
+        """Return per-migration status in topological order.
+
+        Requires a connection; without one every migration is ``"unknown"``.
+        """
+        from ferrum.migrations.base import (
+            is_reversible,
+            reverse_classifications,
+        )
+
+        applied = await self._applied_digests()
+        rows: list[MigrationStatus] = []
+        for module in self._modules:
+            digest = await self._digest_for(module)
+            stored = applied.get(module.name, "")
+            if self._conn is None:
+                state = "unknown"
+            elif stored == "":
+                state = "pending"
+            elif stored != digest:
+                state = "checksum_mismatch"
+            else:
+                state = "applied"
+            rev_classifications = reverse_classifications(module.migration)
+            rows.append(
+                MigrationStatus(
+                    name=module.name,
+                    state=state,
+                    digest=digest,
+                    stored_digest=stored,
+                    reversible=is_reversible(module.migration),
+                    has_destructive_reverse=any(c == "destructive" for c in rev_classifications),
+                )
+            )
+        return rows
+
+    async def upgrade_plan(self, target: str | None = None) -> list[MigrationModule]:
+        """Return pending migrations to apply, in topological order, up to *target*.
+
+        Args:
+            target: Optional migration name. When supplied, the plan stops
+                *after* ``target`` (inclusive) — i.e. it returns every pending
+                migration whose topological position is ≤ ``target``'s.
+                When ``None`` (default) every pending migration is returned.
+
+        Raises:
+            FerrumMigrationError: if *target* is not in the graph.
+
+        The returned list is read-only — applying it still flows through the
+        W1-C CLI/``apply()`` path with advisory lock + atomic ledger.
+        """
+        if target is not None:
+            self._require_known(target)
+        applied = await self._applied_digests()
+        plan: list[MigrationModule] = []
+        for module in self._modules:
+            if module.name in applied:
+                continue
+            plan.append(module)
+            if target is not None and module.name == target:
+                break
+        if target is not None and not any(m.name == target for m in plan):
+            # Target is already applied — return an empty plan.
+            return []
+        return plan
+
+    async def downgrade_plan(self, target: str | None = None) -> list[MigrationModule]:
+        """Return applied migrations to revert, in reverse topological order.
+
+        Args:
+            target: Optional migration name. When supplied, revert every
+                applied migration *after* ``target`` (exclusive). The target
+                itself is not reverted. When ``None``, revert only the most
+                recently applied migration.
+
+        Raises:
+            FerrumMigrationError: if *target* is not in the graph, or if a
+                migration in the plan is irreversible.
+
+        Mirrors the ``--target`` semantics of ``ferrum revert``: revert
+        everything applied after the target, most recent first.
+        """
+        if target is not None:
+            self._require_known(target)
+        from ferrum.migrations.base import is_reversible
+
+        applied = await self._applied_digests()
+        # Preserve topological order while filtering to applied ones.
+        applied_in_order = [m for m in self._modules if m.name in applied]
+        if not applied_in_order:
+            return []
+        if target is None:
+            to_revert = [applied_in_order[-1]]
+        else:
+            target_idx: int | None = None
+            for i, module in enumerate(applied_in_order):
+                if module.name == target:
+                    target_idx = i
+                    break
+            if target_idx is None:
+                # Target is not applied — nothing to revert.
+                return []
+            to_revert = list(reversed(applied_in_order[target_idx + 1 :]))
+        irreversible = [m.name for m in to_revert if not is_reversible(m.migration)]
+        if irreversible:
+            raise FerrumMigrationError(
+                f"Cannot downgrade past irreversible migration(s): "
+                f"{', '.join(irreversible)}. Add reverse_operations or revert "
+                f"to a point before them. [FERR-M001]"
+            )
+        return to_revert
+
+    async def recovery_guidance(self) -> list[str]:
+        """Return human-readable recovery hints for the current graph state.
+
+        Detects:
+        - Checksum mismatches (applied migration edited on disk).
+        - Migrations applied out of order (a migration whose dependencies are
+          not all applied).
+        - Irreversible migrations among the most-recent applied set (blocks
+          ``ferrum revert``).
+
+        Each hint is a single-line actionable string. No secrets, DSNs, or
+        bound values appear in the output.
+        """
+        from ferrum.migrations.base import is_reversible
+
+        hints: list[str] = []
+        statuses = await self.status()
+        by_name = {s.name: s for s in statuses}
+        for s in statuses:
+            if s.state == "checksum_mismatch":
+                hints.append(
+                    f"Migration {s.name!r}: on-disk file was edited after apply. "
+                    "Restore the original file or revert and re-apply."
+                )
+        # Out-of-order: applied migration whose dependency is not applied.
+        applied_names = {s.name for s in statuses if s.state == "applied"}
+        for module in self._modules:
+            if module.name not in applied_names:
+                continue
+            for dep in module.dependencies:
+                dep_status = by_name.get(dep)
+                if dep_status is None:
+                    hints.append(
+                        f"Migration {module.name!r} depends on {dep!r} which is "
+                        "not in the graph (missing file or name typo)."
+                    )
+                elif dep_status.state != "applied":
+                    hints.append(
+                        f"Migration {module.name!r} is applied but its dependency "
+                        f"{dep!r} is {dep_status.state!r}. Restore the dependency "
+                        "from the ledger or revert the dependent migration."
+                    )
+        # Irreversible most-recent applied: blocks plain ``ferrum revert``.
+        applied_in_order = [
+            m for m in self._modules if by_name.get(m.name) and by_name[m.name].state == "applied"
+        ]
+        if applied_in_order:
+            head = applied_in_order[-1]
+            if not is_reversible(head.migration):
+                hints.append(
+                    f"Most-recent applied migration {head.name!r} is irreversible "
+                    "(empty reverse_operations). ``ferrum revert`` will refuse; "
+                    "add reverse_operations or restore to a known-good snapshot."
+                )
+        return hints
+
+
+# ---------------------------------------------------------------------------
+# Data migrations: developer-supplied callables with explicit tx policy
+# ---------------------------------------------------------------------------
+
+
+class DataMigration:
+    """Developer-supplied data-migration callable with an explicit transaction policy.
+
+    A data migration is a Python callback that runs alongside DDL operations
+    in a migration file. It carries an explicit ``transaction_policy`` so the
+    runner knows whether to wrap it in a transaction.
+
+    Security:
+    - Data migrations are **developer-authored code** in migration files.
+      They are never imported or executed automatically from untrusted
+      files. The :class:`DataMigration` base refuses to run when
+      ``is_trusted`` is ``False``; subclasses inherit the default ``True``.
+    - The callable receives a :class:`ConnectionLike` (Connection or
+      Transaction). It must not receive user input.
+    - The runner does not inspect or log the callable's source.
+
+    Transaction policies:
+    - ``"required"`` (default): the runner wraps the callable in
+      :meth:`Connection.transaction`. On PostgreSQL this pins one connection
+      and rolls back on any exception or cancellation. On thin-parity
+      backends (no transaction support) the runner raises
+      :class:`FerrumMigrationError` rather than silently running without
+      the requested atomicity.
+    - ``"none"``: the callable runs in autocommit on PostgreSQL (each
+      statement commits independently). Suitable for non-transactional
+      operations like ``CREATE INDEX CONCURRENTLY`` or large backfills
+      that cannot fit in one transaction. The caller is responsible for
+      idempotency; a mid-flight failure may leave partial state.
+    """
+
+    transaction_policy: ClassVar[str] = "required"
+    is_trusted: ClassVar[bool] = True
+
+    async def run(self, conn: ConnectionLike) -> None:
+        """Override with the data-migration body. Receives a Connection-like."""
+        raise NotImplementedError("DataMigration subclasses must override run(conn). [FERR-M001]")
+
+
+async def run_data_migration(
+    conn: Connection,
+    migration: DataMigration,
+) -> None:
+    """Execute a :class:`DataMigration` honoring its declared transaction policy.
+
+    The migration must be a :class:`DataMigration` subclass with
+    ``is_trusted = True``. Untrusted instances are refused — this is the
+    structural guard against automatic source-code execution from
+    untrusted files.
+
+    Args:
+        conn: An open :class:`Connection`. The runner may open a transaction
+            on it (policy ``"required"``) or use it directly (policy
+            ``"none"``).
+        migration: The :class:`DataMigration` instance to run.
+
+    Raises:
+        FerrumMigrationError: if ``migration.is_trusted`` is ``False``, the
+            transaction policy is unknown, the connection's driver does not
+            support transactions (for ``"required"``), or the callable raises.
+    """
+    if not getattr(migration, "is_trusted", False):
+        raise FerrumMigrationError(
+            "Refusing to run untrusted data migration. Data migrations must be "
+            "developer-authored subclasses of DataMigration with "
+            "is_trusted=True. [FERR-M001]"
+        )
+    policy = getattr(migration, "transaction_policy", "required")
+    if policy not in _DATA_MIGRATION_POLICIES:
+        raise FerrumMigrationError(
+            f"Unknown data-migration transaction_policy {policy!r}. Expected one "
+            f"of {sorted(_DATA_MIGRATION_POLICIES)}. [FERR-M001]"
+        )
+
+    if policy == "required":
+        # Wrap in a transaction. Connection.transaction() raises if the
+        # driver lacks transaction support (thin-parity backends).
+        async with conn.transaction() as tx:
+            try:
+                await migration.run(tx)
+            except FerrumMigrationError:
+                raise
+            except Exception as exc:
+                raise FerrumMigrationError(
+                    f"Data migration {type(migration).__name__} failed inside its "
+                    f"transaction and will be rolled back: {type(exc).__name__}. "
+                    "[FERR-M001]"
+                ) from None
+    else:  # policy == "none"
+        try:
+            await migration.run(conn)
+        except FerrumMigrationError:
+            raise
+        except Exception as exc:
+            raise FerrumMigrationError(
+                f"Data migration {type(migration).__name__} failed outside a "
+                f"transaction (policy='none'); partial state may remain: "
+                f"{type(exc).__name__}. [FERR-M001]"
+            ) from None
+
+
+# ---------------------------------------------------------------------------
+# Offline SQL generation with checksums and phase annotations
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class OfflineSqlPhase:
+    """One phase of an offline migration SQL bundle.
+
+    Attributes:
+        phase: ``"pre_tx"``, ``"tx"``, or ``"post_tx"`` (matches
+            :func:`_split_ops_by_phase`).
+        kind: The migration op kind (e.g. ``"create_index"``).
+        table: The target table when applicable, else ``""``.
+        sql: The rendered SQL statement.
+    """
+
+    phase: str
+    kind: str
+    table: str
+    sql: str
+
+
+@dataclass
+class OfflineSqlMigration:
+    """Offline SQL bundle for one migration.
+
+    Attributes:
+        name: Migration file stem.
+        digest: sha256 content digest (matches ``ledger.compute_digest``).
+        reversible: ``True`` iff the migration declares non-empty
+            ``reverse_operations``.
+        has_destructive: ``True`` iff any forward op classifies destructive.
+        phases: List of :class:`OfflineSqlPhase` for the forward operations,
+            in declared order, each tagged with its tx phase.
+    """
+
+    name: str
+    digest: str
+    reversible: bool
+    has_destructive: bool
+    phases: list[OfflineSqlPhase] = field(default_factory=list)
+
+
+@dataclass
+class OfflineSqlPlan:
+    """Offline SQL bundle for a list of migrations, with per-file checksums.
+
+    The plan contains no DB I/O and no bound values; only DDL identifiers
+    (from model-metadata allowlists, per AGENTS.md §2.9). It is safe to
+    serialize, log, or hand to an operator for review.
+
+    Attributes:
+        migrations: Per-migration bundles in topological order.
+        dialect: Dialect the SQL was rendered for.
+    """
+
+    migrations: list[OfflineSqlMigration] = field(default_factory=list)
+    dialect: str = "postgres"
+
+
+def generate_offline_sql(
+    modules: list[MigrationModule],
+    *,
+    dialect: str = "postgres",
+) -> OfflineSqlPlan:
+    """Render offline SQL for *modules* with per-file checksums and phase annotations.
+
+    Does not touch the database. The output is suitable for code review, CI
+    artifacts, or operator pre-apply audit. Each migration's digest matches
+    what the ledger would record (``ledger.compute_digest``), so an operator
+    can compare the offline bundle to the post-apply ledger.
+
+    Args:
+        modules: Migration modules in any order; they are sorted
+            topologically before rendering.
+        dialect: Target SQL dialect (default ``"postgres"``).
+
+    Returns:
+        An :class:`OfflineSqlPlan` with one :class:`OfflineSqlMigration` per
+        module, each carrying its checksum and phase-annotated SQL.
+    """
+    from ferrum.migrations.base import is_reversible
+    from ferrum.migrations.ledger import compute_digest
+    from ferrum.migrations.loader import topological_sort
+
+    ordered = topological_sort(modules)
+    plan = OfflineSqlPlan(dialect=dialect)
+    for module in ordered:
+        content = module.path.read_text(encoding="utf-8")
+        digest = compute_digest(module.name, content)
+        forward_ops = [op.to_op_dict() for op in module.migration.operations]
+        pre_ops, tx_ops, post_ops = _split_ops_by_phase(forward_ops)
+        phases: list[OfflineSqlPhase] = []
+        for phase_name, phase_ops in (
+            ("pre_tx", pre_ops),
+            ("tx", tx_ops),
+            ("post_tx", post_ops),
+        ):
+            for op in phase_ops:
+                kind = op.get("kind", "unknown")
+                table = op.get("table", "")
+                sql = _op_to_sql(op, dialect=dialect)
+                phases.append(OfflineSqlPhase(phase=phase_name, kind=kind, table=table, sql=sql))
+        has_destructive = any(_is_op_destructive(op) for op in forward_ops)
+        plan.migrations.append(
+            OfflineSqlMigration(
+                name=module.name,
+                digest=digest,
+                reversible=is_reversible(module.migration),
+                has_destructive=has_destructive,
+                phases=phases,
+            )
+        )
+    return plan

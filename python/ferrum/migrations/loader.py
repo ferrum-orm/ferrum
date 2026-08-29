@@ -118,6 +118,75 @@ def _topo_sort(modules: dict[str, MigrationModule]) -> list[MigrationModule]:
     return result
 
 
+def topological_sort(modules: list[MigrationModule]) -> list[MigrationModule]:
+    """Deterministic topological sort over a list of ``MigrationModule``.
+
+    Public wrapper around the internal Kahn's-algorithm sort. The result is
+    stable: within the same dependency level, modules are emitted in
+    name-sorted order so two runs over the same input produce identical output.
+
+    Args:
+        modules: A list of ``MigrationModule`` (typically from :func:`scan`).
+
+    Returns:
+        A new list ordered so every dependency precedes its dependents.
+
+    Raises:
+        ValueError: if a declared dependency is missing from *modules*, or a
+            dependency cycle is detected. The error message names the offending
+            migration(s).
+    """
+    by_name = {m.name: m for m in modules}
+    return _topo_sort(by_name)
+
+
+def detect_cycle(modules: list[MigrationModule]) -> list[str] | None:
+    """Return the names of migrations participating in a dependency cycle, or ``None``.
+
+    Performs a read-only cycle check (Kahn's algorithm) without raising. Useful
+    for graph introspection and recovery guidance where raising would mask the
+    specific set of offending migrations.
+
+    Args:
+        modules: A list of ``MigrationModule``.
+
+    Returns:
+        ``None`` if the dependency graph is acyclic; otherwise a name-sorted
+        list of migrations that are part of (or reachable from) a cycle.
+    """
+    by_name = {m.name: m for m in modules}
+    # Missing-dependency check first — that is a distinct error, not a cycle.
+    for _name, mod in by_name.items():
+        for dep in mod.dependencies:
+            if dep not in by_name:
+                # Treat a missing dependency as a cycle-free but broken graph.
+                # The caller (e.g. ``scan``) raises; here we return None so the
+                # cycle detector's contract stays single-purpose.
+                return None
+
+    in_degree: dict[str, int] = dict.fromkeys(by_name, 0)
+    dependents: dict[str, list[str]] = {name: [] for name in by_name}
+    for name, mod in by_name.items():
+        for dep in mod.dependencies:
+            dependents[dep].append(name)
+            in_degree[name] += 1
+
+    queue: deque[str] = deque(sorted(n for n, d in in_degree.items() if d == 0))
+    emitted: set[str] = set()
+    while queue:
+        name = queue.popleft()
+        emitted.add(name)
+        for dep in sorted(dependents[name]):
+            in_degree[dep] -= 1
+            if in_degree[dep] == 0:
+                queue.append(dep)
+
+    if len(emitted) == len(by_name):
+        return None
+    cycled = sorted(set(by_name) - emitted)
+    return cycled
+
+
 def migrations_dir_default() -> Path:
     """Return the migrations directory from project config, falling back to cwd/migrations."""
     from ferrum.config import find_project_root, load_config
