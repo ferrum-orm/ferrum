@@ -4,8 +4,8 @@ covered by ``tests/python/integration/test_ticket_analyzer_compat.py``.
 Covers manifest entries: ta-02 (platform-admin RLS bypass), ta-04/ta-05
 (CAS/update_returning lease claim over a Q()-composed unlocked predicate),
 ta-06 (JSONB ``__contains``), ta-09 (bulk_upsert batching + conflict update),
-ta-10 (``stream()`` bounded chunks), ta-12 (the ``filter(x=None)`` nullable-
-predicate defect), ta-13 (``group_by`` + ``aggregate``).
+ta-10 (``stream()`` bounded chunks), ta-12 (``filter(x=None)`` nullable-
+predicate Django-parity), ta-13 (``group_by`` + ``aggregate``).
 
 Already covered elsewhere and intentionally not re-tested here: RLS
 tenant_transaction (ta-01), composite PK (ta-03), pgvector (ta-08),
@@ -451,6 +451,100 @@ async def test_force_rls_alone_enables_and_forces_rls(
 
 
 @pytest.mark.integration
+async def test_tenant_guc_does_not_leak_after_commit(
+    pg_conn: ferrum.connection.Connection,
+    rls_contract_models: dict[str, Any],
+) -> None:
+    """Manifest ta-01/ta-02 (GUC isolation): after a ``tenant_transaction``
+    commits, the ``app.team_id`` GUC must NOT persist on the underlying pooled
+    connection — a subsequent bare query (no GUC bound) must see zero rows
+    under FORCE RLS, proving the GUC was reset to its default (empty).
+    """
+    Team = rls_contract_models["Team"]
+    Event = rls_contract_models["Event"]
+    rls_conn = rls_contract_models["rls_conn"]
+
+    team_a = await _create_team(pg_conn, Team, name="A")
+    async with tenant_transaction(rls_conn, team_a.id) as tx:
+        await Event.objects.create(
+            tx, id=uuid.uuid4(), team_id=team_a.id, dedup_key="a1", status="pending", tags={}
+        )
+        scoped = await Event.objects.all(tx)
+        assert {row.team_id for row in scoped} == {team_a.id}
+
+    # After commit, the GUC must be reset. A bare query through the same
+    # connection (which is returned to the pool on transaction exit) must see
+    # zero rows — the RLS policy matches nothing without app.team_id set.
+    leaked = await Event.objects.all(rls_conn)
+    assert leaked == []
+
+
+@pytest.mark.integration
+async def test_platform_admin_guc_does_not_leak_after_commit(
+    pg_conn: ferrum.connection.Connection,
+    rls_contract_models: dict[str, Any],
+) -> None:
+    """Manifest ta-02 (GUC isolation): after a platform-admin ``tenant_transaction``
+    with ``admin=True`` commits, the ``app.platform_admin`` GUC must NOT persist
+    on the underlying pooled connection — a subsequent bare query must see zero
+    rows (not the cross-team rows the admin bypass saw), proving the admin GUC
+    was reset.
+    """
+    Team = rls_contract_models["Team"]
+    Event = rls_contract_models["Event"]
+    rls_conn = rls_contract_models["rls_conn"]
+
+    team_a = await _create_team(pg_conn, Team, name="A")
+    team_b = await _create_team(pg_conn, Team, name="B")
+    async with tenant_transaction(rls_conn, team_a.id) as tx:
+        await Event.objects.create(
+            tx, id=uuid.uuid4(), team_id=team_a.id, dedup_key="a1", status="pending", tags={}
+        )
+    async with tenant_transaction(rls_conn, team_b.id) as tx:
+        await Event.objects.create(
+            tx, id=uuid.uuid4(), team_id=team_b.id, dedup_key="b1", status="pending", tags={}
+        )
+
+    # Admin bypass sees both teams.
+    async with tenant_transaction(rls_conn, team_a.id, admin=True) as tx:
+        all_rows = await Event.objects.all(tx)
+        assert {row.team_id for row in all_rows} == {team_a.id, team_b.id}
+
+    # After commit, admin GUC must be reset. A bare query must see zero rows
+    # (no team_id, no platform_admin) — not the cross-team view the admin saw.
+    leaked = await Event.objects.all(rls_conn)
+    assert leaked == []
+
+
+@pytest.mark.integration
+async def test_tenant_guc_does_not_leak_on_rollback(
+    pg_conn: ferrum.connection.Connection,
+    rls_contract_models: dict[str, Any],
+) -> None:
+    """Manifest ta-01 (GUC isolation on rollback): if a ``tenant_transaction``
+    rolls back (via exception or explicit rollback), the ``app.team_id`` GUC
+    must still reset — a subsequent bare query must see zero rows.
+    """
+    Team = rls_contract_models["Team"]
+    Event = rls_contract_models["Event"]
+    rls_conn = rls_contract_models["rls_conn"]
+
+    team_a = await _create_team(pg_conn, Team, name="A")
+
+    # Simulate a rollback: raise inside the tenant_transaction.
+    with pytest.raises(RuntimeError, match="rollback-test"):
+        async with tenant_transaction(rls_conn, team_a.id) as tx:
+            await Event.objects.create(
+                tx, id=uuid.uuid4(), team_id=team_a.id, dedup_key="a1", status="pending", tags={}
+            )
+            raise RuntimeError("rollback-test")
+
+    # After rollback, the GUC must be reset. A bare query must see zero rows.
+    leaked = await Event.objects.all(rls_conn)
+    assert leaked == []
+
+
+@pytest.mark.integration
 async def test_cas_update_returning_lease_claim(
     pg_conn: ferrum.connection.Connection,
     contract_models: dict[str, Any],
@@ -515,13 +609,16 @@ async def test_cas_update_returning_lease_claim(
 
 
 @pytest.mark.integration
-async def test_filter_equals_none_does_not_match_null_rows_defect(
+async def test_filter_equals_none_matches_null_rows_django_parity(
     pg_conn: ferrum.connection.Connection,
     contract_models: dict[str, Any],
 ) -> None:
-    """Manifest ta-12 (Ferrum defect): filter(x=None) binds SQL NULL to '=',
-    which never matches per three-valued logic, unlike Django's filter(x=None)
-    (which auto-translates to IS NULL). __is_null=True is required instead.
+    """Manifest ta-12 (resolved): ``filter(x=None)`` now compiles to ``IS NULL``
+    via ``_normalize_null_lookup`` (Django-parity), not ``= NULL`` (which never
+    matches per three-valued logic).  Previously a FERRUM_DEFECT; now SUPPORTED.
+
+    Both ``filter(x=None)`` and ``filter(x__is_null=True)`` find NULL rows;
+    ``exclude(x=None)`` finds non-NULL rows (IS NOT NULL).
     """
     Team = contract_models["Team"]
     Event = contract_models["Event"]
@@ -551,10 +648,16 @@ async def test_filter_equals_none_does_not_match_null_rows_defect(
     assert len(via_is_null) == 1
     assert via_is_null[0].dedup_key == "null-row"
 
-    # The defect: an equality filter against None finds nothing, even though a
-    # matching NULL row exists.
+    # The fix: filter(x=None) now auto-translates to IS NULL (Django-parity),
+    # finding the NULL row just like __is_null=True.
     via_eq_none = await Event.objects.filter(team_id=team.id, locked_until=None).all(pg_conn)
-    assert via_eq_none == []
+    assert len(via_eq_none) == 1
+    assert via_eq_none[0].dedup_key == "null-row"
+
+    # exclude(x=None) wraps the IS NULL rewrite in NOT(…) → IS NOT NULL.
+    via_exclude_none = await Event.objects.exclude(team_id=team.id, locked_until=None).all(pg_conn)
+    assert len(via_exclude_none) == 1
+    assert via_exclude_none[0].dedup_key == "non-null-row"
 
 
 @pytest.mark.integration

@@ -450,10 +450,11 @@ _TICKET_ANALYZER_ENTRIES: tuple[ParityEntry, ...] = (
         consumer=_TA,
         category="type_fidelity",
         call_summary=(
-            "Consumer code must write filter(x__is_null=True) for NULL checks; "
-            "filter(x=None) does not compile to IS NULL, an easy correctness "
-            "trap for anyone porting Django-style ORM code (Django's filter(x=None) "
-            "does emit IS NULL)."
+            "Consumer code writes filter(x__is_null=True) for NULL checks; "
+            "filter(x=None) now compiles to IS NULL (Django-parity) via "
+            "_normalize_null_lookup, so both forms find NULL rows. Previously "
+            "a FERRUM_DEFECT where filter(x=None) bound SQL NULL to '=' (which "
+            "never matches per three-valued logic); now resolved."
         ),
         citation=SourceCitation(
             repo=_TA,
@@ -462,23 +463,26 @@ _TICKET_ANALYZER_ENTRIES: tuple[ParityEntry, ...] = (
             lines="21-28",
             excerpt=("return Q(locked_until__is_null=True) | Q(locked_until__lt=now)"),
         ),
-        classification=Classification.FERRUM_DEFECT,
-        ferrum_reference="QuerySet.filter(**kwargs) / Q(**kwargs) equality-operator dispatch",
+        classification=Classification.SUPPORTED,
+        ferrum_reference=(
+            "QuerySet.filter(**kwargs) / Q(**kwargs) equality-operator dispatch "
+            "via _normalize_null_lookup (python/ferrum/queryset.py)"
+        ),
         evidence=(
-            "New contract test test_ticket_analyzer_contracts.py::"
-            "test_filter_equals_none_does_not_match_null_rows_defect reproduces "
-            "the gap live: filter(x=None) returns zero rows (binds SQL NULL as a "
-            "bound parameter to '=', which never matches per SQL three-valued "
-            "logic) even though NULL rows exist and __is_null=True finds them. "
-            "The consumer already avoids the trap by never writing filter(x=None) "
-            "in this codebase, but the divergence from common ORM (Django/SQLAlchemy) "
-            "expectations is a real Ferrum ergonomics defect worth a documented decision, "
-            "not a silent gap."
+            "Retargeted contract test test_ticket_analyzer_contracts.py::"
+            "test_filter_equals_none_matches_null_rows_django_parity proves, "
+            "live against PostgreSQL, that filter(x=None) now finds NULL rows "
+            "(emits IS NULL) and exclude(x=None) finds non-NULL rows (IS NOT "
+            "NULL), matching __is_null=True / __is_not_null=True. The "
+            "implementation in python/ferrum/queryset.py:_normalize_null_lookup "
+            "rewrites filter(field=None) / filter(field__eq=None) to is_null "
+            "and filter(field__ne=None) to is_not_null before SQL compilation."
         ),
         notes=(
-            "Recommend either a documented refusal (raise on x=None) or "
-            "Django-parity auto-IS-NULL translation for nullable columns; do "
-            "not silently no-op."
+            "Resolved: the Django-parity auto-IS-NULL translation recommended "
+            "in the original defect notes was implemented. The consumer's "
+            "existing __is_null=True usage continues to work; filter(x=None) "
+            "is now also correct for nullable columns."
         ),
     ),
     ParityEntry(
@@ -517,10 +521,11 @@ _TICKET_ANALYZER_ENTRIES: tuple[ParityEntry, ...] = (
         category="redaction",
         call_summary=(
             "llm_provider_credentials_crud.py stores AES-256-GCM ciphertext + "
-            "nonce bytea columns via raw AsyncSession.execute(text(...)) with an "
-            "explicit ON CONFLICT DO UPDATE, deliberately bypassing Ferrum "
-            "because Ferrum has no encrypted-codec field type and no upsert path "
-            "that returns the generated id without exposing plaintext."
+            "nonce bytea columns. Ferrum now supports transparent encryption via "
+            "EncryptedStringCodec / EncryptedJSONCodec (W2-A field codecs), which "
+            "encrypt string/JSON values to BYTEA storage with key-provider injection. "
+            "The consumer can also use a plain bytes field for raw BYTEA storage of "
+            "pre-encrypted ciphertext without refactor."
         ),
         citation=SourceCitation(
             repo=_TA,
@@ -543,16 +548,27 @@ _TICKET_ANALYZER_ENTRIES: tuple[ParityEntry, ...] = (
                 "                ciphertext = EXCLUDED.ciphertext,"
             ),
         ),
-        classification=Classification.MISSING_API,
+        classification=Classification.SUPPORTED,
         ferrum_reference=(
-            "No ferrum.Field(codec=...) / encrypted bytea field type exists "
-            "in python/ferrum/models.py"
+            "python/ferrum/models.py EncryptedStringCodec / EncryptedJSONCodec "
+            "(W2-A field codecs); KeyProvider for key injection; bytes -> BYTEA "
+            "for raw ciphertext storage"
         ),
         evidence=(
-            "Direct source read of python/ferrum/models.py: _SUPPORTED_TYPES maps "
-            'bytes -> "bytes"/BYTEA with no codec/encryption hook; no encrypted '
-            "field type or transparent-encryption Field kwarg exists anywhere "
-            "under python/ferrum/."
+            "Direct source read of python/ferrum/models.py: EncryptedStringCodec "
+            "(line ~899) encrypts string values to bytes (BYTEA) with "
+            "authenticated encryption (encrypt-then-MAC) and a KeyProvider for "
+            "key rotation. EncryptedJSONCodec (line ~954) serializes JSON to "
+            "BYTEA. Both are registered via register_codec_factory. The plain "
+            "bytes -> BYTEA path (_SUPPORTED_TYPES) also supports storing "
+            "pre-encrypted ciphertext without the codec layer. The upsert path "
+            "with RETURNING is supported via QuerySet.upsert(returning=True)."
+        ),
+        notes=(
+            "The consumer can migrate to either (a) EncryptedStringCodec for "
+            "transparent encryption (consumer refactors to stop pre-encrypting) "
+            "or (b) a plain bytes field for raw BYTEA storage (no refactor — "
+            "keeps pre-encryption outside the ORM). Both paths are supported."
         ),
     ),
     ParityEntry(
@@ -673,7 +689,9 @@ _ORG_AI_PLATFORM_ENTRIES: tuple[ParityEntry, ...] = (
             "ShardRegistry resolves a per-tenant SQLAlchemy engine/session using "
             "schema_translate_map to route queries to tenant_<id> schemas within "
             "a shared database (a schema-per-tenant scheme), without changing "
-            "SQL text per tenant."
+            "SQL text per tenant. Ferrum's schema_transaction() provides the "
+            "equivalent: a transaction-local search_path validated against an "
+            "allowlist, resetting on commit/rollback."
         ),
         citation=SourceCitation(
             repo=_OAI,
@@ -688,22 +706,25 @@ _ORG_AI_PLATFORM_ENTRIES: tuple[ParityEntry, ...] = (
                 "        )"
             ),
         ),
-        classification=Classification.MISSING_API,
+        classification=Classification.SUPPORTED,
         ferrum_reference=(
-            "No schema_transaction()/schema_translate_map equivalent in "
-            "python/ferrum/connection.py or session.py"
+            "ferrum.session.schema_transaction(conn, schema, allowed_schemas=...) "
+            "sets a transaction-local search_path validated against an allowlist "
+            "(python/ferrum/session.py)"
         ),
         evidence=(
-            "New contract test test_org_ai_platform_contracts.py::"
-            "test_schema_per_tenant_routing_is_not_available_missing_api asserts "
-            "ferrum.Connection/Transaction expose no schema-selection primitive "
-            "(no attribute named schema_transaction, no with_schema, no "
-            "schema_translate_map kwarg on connect/transaction); a repo-wide grep "
-            "of python/ferrum/ confirms no such symbol exists."
+            "Direct source read of python/ferrum/session.py: schema_transaction() "
+            "(line ~294) validates the schema identifier against a strict regex "
+            "AND an allowlist (ALLOWED_SCHEMA_NAMES), sets search_path via "
+            "set_config('search_path', schema, true) (transaction-local), and "
+            "resets automatically on commit/rollback. Exported from ferrum.__init__. "
+            "Contract test validation is owned by pilot-org-ai-platform "
+            "(test_org_ai_platform_contracts.py)."
         ),
         notes=(
-            "Referenced in plan as a future explicit trusted shard router; "
-            "QuerySet stays connection-explicit per AGENTS.md YAGNI constraint."
+            "Ratified W1-F contract (AGENTS.md §5a): validated schema selection "
+            "on one pinned transaction, not implicit routing. QuerySet stays "
+            "connection-explicit per AGENTS.md YAGNI constraint."
         ),
     ),
     ParityEntry(
@@ -715,7 +736,10 @@ _ORG_AI_PLATFORM_ENTRIES: tuple[ParityEntry, ...] = (
             "catalog table via raw text() SQL with ON CONFLICT (tenant_id) DO UPDATE "
             "(schema_translate_map does not rewrite text() SQL, so this table is "
             "always schema-qualified raw SQL) that a shard registry consults to "
-            "route a tenant's queries to the correct physical shard database."
+            "route a tenant's queries to the correct physical shard database. "
+            "Ferrum's ConnectionRegistry/ShardRouter provides the equivalent: a "
+            "registry of independently configured PostgreSQL pools with a "
+            "caller-supplied resolver returning a shard key."
         ),
         citation=SourceCitation(
             repo=_OAI,
@@ -730,17 +754,26 @@ _ORG_AI_PLATFORM_ENTRIES: tuple[ParityEntry, ...] = (
                 "updated_at = now()"
             ),
         ),
-        classification=Classification.MISSING_API,
+        classification=Classification.SUPPORTED,
         ferrum_reference=(
-            "No multi-DSN ConnectionRegistry/ShardRouter type anywhere under python/ferrum/"
+            "ferrum.routing.ConnectionRegistry / ShardRouter (python/ferrum/routing.py) "
+            "with PoolConfig per shard; router resolves a trusted shard key and "
+            "returns an explicit Connection/Transaction"
         ),
         evidence=(
-            "Direct source read: python/ferrum/connection.py exposes a single "
-            "Connection per DSN with no registry/router abstraction for routing "
-            "by tenant key across multiple physical databases. The catalog-table "
-            "upsert itself (ON CONFLICT DO UPDATE against a single-column key) is "
-            "independently provable as supported once schema/shard routing exists; "
-            "see oai-08 for that sub-capability tested in isolation."
+            "Direct source read of python/ferrum/routing.py: ConnectionRegistry "
+            "(line ~98) owns independently configured PostgreSQL pools keyed by "
+            "name. ShardRouter (line ~293) wraps a registry with a "
+            "caller-supplied resolver that maps a trusted shard key to a pool "
+            "name, returning an explicit Connection. Both are exported from "
+            "ferrum.__init__. Contract test validation is owned by "
+            "pilot-org-ai-platform (test_org_ai_platform_contracts.py)."
+        ),
+        notes=(
+            "Ratified W1-F contract (AGENTS.md §5a): QuerySet stays shard-unaware "
+            "and connection-explicit; the router returns whatever Connection the "
+            "caller hands off. No implicit connection selection from model "
+            "metadata, tenant id, or schema name."
         ),
     ),
     ParityEntry(
@@ -750,7 +783,9 @@ _ORG_AI_PLATFORM_ENTRIES: tuple[ParityEntry, ...] = (
         call_summary=(
             "_claim_next_processing_file()/_claim_next_deleting_file() use "
             ".with_for_update(skip_locked=True) to let multiple workers race for "
-            "queued rows without blocking on rows already locked by a peer."
+            "queued rows without blocking on rows already locked by a peer. "
+            "Ferrum's QuerySet.select_for_update(skip_locked=True) provides the "
+            "equivalent row-lock primitive."
         ),
         citation=SourceCitation(
             repo=_OAI,
@@ -765,23 +800,24 @@ _ORG_AI_PLATFORM_ENTRIES: tuple[ParityEntry, ...] = (
                 "        .with_for_update(skip_locked=True)"
             ),
         ),
-        classification=Classification.MISSING_API,
+        classification=Classification.SUPPORTED,
         ferrum_reference=(
-            "No QuerySet.select_for_update()/lock() method in python/ferrum/queryset.py"
+            "QuerySet.select_for_update(skip_locked=True, nowait=False) "
+            "(python/ferrum/queryset.py line ~1789; W1-B)"
         ),
         evidence=(
-            "New contract test test_org_ai_platform_contracts.py::"
-            "test_select_for_update_skip_locked_is_not_available_missing_api "
-            "asserts QuerySet has no select_for_update/for_update/lock method; a "
-            "repo-wide grep of python/ferrum/ for 'select_for_update' and 'FOR "
-            "UPDATE' confirms no such capability is emitted anywhere in the "
-            "SQL-compilation path."
+            "Direct source read of python/ferrum/queryset.py: select_for_update() "
+            "(line ~1789) accepts skip_locked and nowait parameters. The "
+            "_append_for_update_clause helper (line ~319) emits FOR UPDATE with "
+            "SKIP LOCKED or NOWAIT modifiers. PostgreSQL-only (rejected on other "
+            "dialects). Contract test validation is owned by pilot-org-ai-platform "
+            "(test_org_ai_platform_contracts.py)."
         ),
         notes=(
-            "Ticket Analyzer's CAS/update_returning lease pattern (ta-04) is a "
-            "viable Ferrum-native substitute for this exact row-lock use case and "
-            "should be the recommended migration path, not a new lock primitive, "
-            "absent a demonstrated need for true row blocking."
+            "Ticket Analyzer's CAS/update_returning lease pattern (ta-04) remains "
+            "a viable Ferrum-native substitute for this use case and is the "
+            "recommended migration path for optimistic-concurrency workloads. "
+            "select_for_update is the path for pessimistic row-lock workloads."
         ),
     ),
     ParityEntry(
@@ -791,7 +827,8 @@ _ORG_AI_PLATFORM_ENTRIES: tuple[ParityEntry, ...] = (
         call_summary=(
             "document.py locks a document row with .with_for_update(nowait=True) "
             "so a concurrent writer fails fast with a lock-not-available error "
-            "instead of blocking, then the caller decides how to retry."
+            "instead of blocking, then the caller decides how to retry. Ferrum's "
+            "QuerySet.select_for_update(nowait=True) provides the equivalent."
         ),
         citation=SourceCitation(
             repo=_OAI,
@@ -804,15 +841,17 @@ _ORG_AI_PLATFORM_ENTRIES: tuple[ParityEntry, ...] = (
                 "        .with_for_update(nowait=True)"
             ),
         ),
-        classification=Classification.MISSING_API,
+        classification=Classification.SUPPORTED,
         ferrum_reference=(
-            "Same missing capability as oai-03; no nowait lock variant exists either"
+            "QuerySet.select_for_update(nowait=True, skip_locked=False) "
+            "(python/ferrum/queryset.py line ~1789; W1-B)"
         ),
         evidence=(
-            "Same absence proof as oai-03 "
-            "(test_select_for_update_skip_locked_is_not_available_missing_api); "
-            "nowait and skip_locked are both FOR UPDATE row-lock modifiers "
-            "Ferrum's compiler never emits."
+            "Same implementation as oai-03: select_for_update() accepts both "
+            "nowait and skip_locked (mutually exclusive). The "
+            "_append_for_update_clause helper emits NOWAIT when nowait=True. "
+            "Contract test validation is owned by pilot-org-ai-platform "
+            "(test_org_ai_platform_contracts.py)."
         ),
     ),
     ParityEntry(
@@ -864,7 +903,9 @@ _ORG_AI_PLATFORM_ENTRIES: tuple[ParityEntry, ...] = (
             "pydantic_type.py defines a generic SQLAlchemy TypeDecorator that "
             "serializes/deserializes an arbitrary Pydantic BaseModel to/from a "
             "JSONB column, so model fields can be typed as nested Pydantic "
-            "models rather than raw dict."
+            "models rather than raw dict. Ferrum's nested_model codec (W2-A) "
+            "provides the equivalent: a field codec that serializes a Pydantic "
+            "BaseModel subclass to JSONB with PII redaction."
         ),
         citation=SourceCitation(
             repo=_OAI,
@@ -873,29 +914,25 @@ _ORG_AI_PLATFORM_ENTRIES: tuple[ParityEntry, ...] = (
             lines="9-10",
             excerpt="class PydanticType(TypeDecorator):\n    impl = JSONB",
         ),
-        classification=Classification.MISSING_API,
+        classification=Classification.SUPPORTED,
         ferrum_reference=(
-            'python/ferrum/models.py _SUPPORTED_TYPES maps only dict -> "json"; '
-            "no BaseModel-subclass annotation support"
+            "python/ferrum/models.py NestedModelCodec (codec_kind='nested_model', "
+            "maps to JSONB; W2-A field codecs)"
         ),
         evidence=(
-            "New contract test test_org_ai_platform_contracts.py::"
-            "test_nested_pydantic_model_field_falls_back_to_text_type_missing_api "
-            "reproduces the gap live: declaring a Ferrum Model field annotated "
-            "with a nested Pydantic BaseModel subclass does not raise and does "
-            "not map to JSONB — python/ferrum/models.py's "
-            '`_SUPPORTED_TYPES.get(base_type, "text")` silently falls back to '
-            "a plain TEXT column for any annotation it does not recognize, so "
-            "the failure mode is a wrong DDL type (and an eventual bind-type "
-            "error when a real BaseModel instance is written to a TEXT column), "
-            "not a documented rejection at class-definition time. There is no "
-            "equivalent to SQLAlchemy's PydanticType TypeDecorator today."
+            "Direct source read of python/ferrum/models.py: NestedModelCodec "
+            "(line ~821) serializes a Pydantic BaseModel subclass to/from JSON "
+            "(JSONB storage). Registered via register_codec_factory at "
+            "line ~1229. The codec_kind 'nested_model' maps to 'json' "
+            "storage type (line ~1095). Includes PII redaction via the redact() "
+            "method. Contract test validation is owned by pilot-org-ai-platform "
+            "(test_org_ai_platform_contracts.py)."
         ),
         notes=(
-            "The silent text-type fallback for any unrecognized annotation (not "
-            "just nested BaseModel) is worth flagging to ChiefArchitect "
-            "independently of this specific gap — an unrecognized type should "
-            "fail fast at class-definition time, not silently become TEXT."
+            "The silent text-type fallback for unrecognized annotations (the "
+            "original defect noted in the W0-B audit) may still exist for types "
+            "outside the codec registry; the nested_model codec specifically "
+            "resolves the Pydantic BaseModel use case."
         ),
     ),
     ParityEntry(
@@ -991,7 +1028,9 @@ _ORG_AI_PLATFORM_ENTRIES: tuple[ParityEntry, ...] = (
         call_summary=(
             "users.py wires fastapi_users_db_sqlalchemy.SQLAlchemyUserDatabase "
             "directly onto an AsyncSession for FastAPI-Users auth persistence "
-            "(user CRUD, password hash storage, OAuth account table)."
+            "(user CRUD, password hash storage, OAuth account table). Ferrum "
+            "now provides a FerrumUserDatabase adapter implementing the "
+            "fastapi_users BaseUserDatabase protocol (W2-D)."
         ),
         citation=SourceCitation(
             repo=_OAI,
@@ -1005,16 +1044,19 @@ _ORG_AI_PLATFORM_ENTRIES: tuple[ParityEntry, ...] = (
                 "    )"
             ),
         ),
-        classification=Classification.MISSING_API,
-        ferrum_reference="No ferrum.contrib.fastapi_users adapter under python/ferrum/",
+        classification=Classification.SUPPORTED,
+        ferrum_reference=(
+            "ferrum.contrib.fastapi.FerrumUserDatabase (python/ferrum/contrib/"
+            "fastapi.py; implements fastapi_users.db.base.BaseUserDatabase; W2-D)"
+        ),
         evidence=(
-            "Direct source read: python/ferrum has a ferrum.contrib.fastapi "
-            "lifespan/Depends helper (ferrum_lifespan, get_ferrum_conn) but no "
-            "fastapi-users SQLAlchemyUserDatabase-compatible adapter; adopting "
-            "Ferrum for this path today requires either keeping SQLAlchemy for "
-            "the auth tables only (a defensible split, matching how ticket-"
-            "analyzer-agent keeps Better Auth on Drizzle) or a new Ferrum "
-            "contrib adapter implementing fastapi_users.db.base.BaseUserDatabase."
+            "Direct source read of python/ferrum/contrib/fastapi.py: "
+            "FerrumUserDatabase (line ~387) implements the "
+            "fastapi_users.db.base.BaseUserDatabase protocol backed by Ferrum "
+            "models. Soft-imports fastapi_users at class-construction time so "
+            "ty checks without the extra. Handles user lookup/create/update/"
+            "delete and OAuth account relations. Contract test validation is "
+            "owned by pilot-org-ai-platform (test_org_ai_platform_contracts.py)."
         ),
     ),
     ParityEntry(
