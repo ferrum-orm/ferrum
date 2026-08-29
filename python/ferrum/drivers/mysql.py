@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import re
 from collections.abc import AsyncGenerator
 from typing import Any
 from urllib.parse import urlparse
 
-from ferrum.errors import FerrumConfigError, FerrumConnectionError, map_db_error
+from ferrum.errors import FerrumConfigError, FerrumConnectionError, FerrumTimeoutError, map_db_error
 
 _INSERT_TABLE_RE = re.compile(
     r"INSERT\s+INTO\s+[`\"]?(\w+)[`\"]?",
@@ -35,8 +36,11 @@ def _redacted_diag(dsn: str) -> dict[str, str]:
 
 
 def _normalize_mysql_dsn(dsn: str) -> str:
-    # asyncmy expects mysql://user:pass@host/db
     return dsn.replace("mysql+asyncmy://", "mysql://", 1)
+
+
+def _convert_placeholders(sql: str) -> str:
+    return sql.replace("?", "%s")
 
 
 class AsyncmyDriver:
@@ -54,10 +58,11 @@ class AsyncmyDriver:
         statement_timeout_ms: int | None = None,
         max_lifetime: float | None = None,
     ) -> None:
-        del acquire_timeout, statement_timeout_ms, max_lifetime
+        del statement_timeout_ms, max_lifetime
         self._dsn = _normalize_mysql_dsn(dsn)
         self._min_size = min_size
         self._max_size = max_size
+        self._acquire_timeout = acquire_timeout
         self._pool: Any = None
 
     async def open(self) -> None:
@@ -70,8 +75,13 @@ class AsyncmyDriver:
 
         diag = _redacted_diag(self._dsn)
         try:
+            parsed = urlparse(self._dsn)
             self._pool = await asyncmy.create_pool(
-                dsn=self._dsn,
+                user=parsed.username or None,
+                password=parsed.password or "",
+                host=parsed.hostname or "localhost",
+                port=parsed.port or 3306,
+                db=(parsed.path or "").lstrip("/") or None,
                 minsize=self._min_size,
                 maxsize=self._max_size,
             )
@@ -102,8 +112,8 @@ class AsyncmyDriver:
         pool = self._require_driver()
         try:
             async with pool.acquire() as conn:
-                async with conn.cursor(asyncmy.cursors.DictCursor) as cursor:
-                    await cursor.execute(sql, params)
+                async with conn.cursor(asyncmy.cursors.DictCursor) as cursor:  # type: ignore
+                    await cursor.execute(_convert_placeholders(sql), params)
                     rows = await cursor.fetchall()
                     return list(rows) if rows else []
         except Exception as exc:
@@ -125,8 +135,8 @@ class AsyncmyDriver:
         pool = self._require_driver()
         try:
             async with pool.acquire() as conn:
-                async with conn.cursor(asyncmy.cursors.DictCursor) as cursor:
-                    await cursor.execute(sql, params)
+                async with conn.cursor(asyncmy.cursors.DictCursor) as cursor:  # type: ignore
+                    await cursor.execute(_convert_placeholders(sql), params)
                     return await cursor.fetchone()
         except Exception as exc:
             raise map_db_error(exc) from None
@@ -144,7 +154,7 @@ class AsyncmyDriver:
         try:
             async with pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute(sql, params)
+                    await cursor.execute(_convert_placeholders(sql), params)
                     await conn.commit()
                     op = sql.strip().split()[0].upper()
                     return f"{op} {cursor.rowcount}"
@@ -155,8 +165,20 @@ class AsyncmyDriver:
     async def acquire(self) -> AsyncGenerator[Any, None]:
         pool = self._require_driver()
         try:
-            async with pool.acquire() as raw_conn:
+            if self._acquire_timeout is not None:
+                raw_conn = await asyncio.wait_for(pool._acquire(), timeout=self._acquire_timeout)
+            else:
+                raw_conn = await pool._acquire()
+            try:
                 yield raw_conn
+            finally:
+                pool.release(raw_conn)
+        except TimeoutError:
+            raise FerrumTimeoutError(
+                f"Timed out waiting for MySQL connection after "
+                f"{self._acquire_timeout}s [FERR-E102]",
+                category="timeout",
+            ) from None
         except Exception as exc:
             raise map_db_error(exc) from None
 

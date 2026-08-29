@@ -34,6 +34,7 @@ from ferrum.migrations.ledger import (
     ADVISORY_LOCK_KEY_1,
     ADVISORY_LOCK_KEY_2,
     advisory_lock_sql,
+    ensure_ledger,
     is_applied_on_conn,
     record_applied,
     record_applied_on_conn,
@@ -1534,6 +1535,7 @@ async def _apply_thin_parity(
         sql = _op_to_sql(op, dialect=dialect)
         await driver.execute(sql)
 
+    await ensure_ledger(conn)
     await record_applied(
         conn,
         plan_digest,

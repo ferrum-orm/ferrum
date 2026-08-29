@@ -9,10 +9,19 @@ import pytest
 
 import ferrum
 from ferrum.connection import Connection
-from ferrum.errors import FerrumTimeoutError
+from ferrum.errors import FerrumConfigError, FerrumTimeoutError
 
-from .backends import Backend
+from .backends import Backend, Capability
 from .schema import Column, transient_table
+
+
+async def _skip_if_driver_unavailable(dsn: str, backend_name: str) -> None:
+    try:
+        conn = ferrum.connect(dsn)
+        await conn.__aenter__()
+        await conn.__aexit__(None, None, None)
+    except FerrumConfigError as exc:
+        pytest.skip(f"Backend {backend_name!r} driver not available: {exc}")
 
 
 @pytest.mark.integration
@@ -25,6 +34,7 @@ async def test_pool_exhaustion_blocks_until_timeout(
 
     dsn = os.environ.get(backend.dsn_env)
     assert dsn is not None
+    await _skip_if_driver_unavailable(dsn, backend.name)
 
     conn = Connection(dsn, min_size=1, max_size=2, acquire_timeout=0.5)
     await conn.open()
@@ -38,6 +48,7 @@ async def test_pool_exhaustion_blocks_until_timeout(
 
 
 @pytest.mark.integration
+@pytest.mark.requires_capability(Capability.TRANSACTIONS)
 async def test_concurrent_queryset_counts(
     db_conn: ferrum.connection.Connection,
     backend: Backend,
@@ -75,6 +86,7 @@ async def test_concurrent_queryset_counts(
 
 
 @pytest.mark.integration
+@pytest.mark.requires_capability(Capability.TRANSACTIONS)
 async def test_concurrent_reads_return_consistent_rows(
     db_conn: ferrum.connection.Connection,
     backend: Backend,

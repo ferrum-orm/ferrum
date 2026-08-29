@@ -35,6 +35,7 @@ def mysql_dsn() -> str:
     dsn = os.environ.get("FERRUM_TEST_MYSQL_DSN")
     if not dsn:
         pytest.skip("FERRUM_TEST_MYSQL_DSN not set")
+    pytest.importorskip("asyncmy", reason="asyncmy not available")
     return dsn
 
 

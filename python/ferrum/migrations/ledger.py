@@ -80,9 +80,9 @@ def _create_ledger_sql(dialect: str) -> str:
         return f"""
 CREATE TABLE IF NOT EXISTS {LEDGER_TABLE} (
     id          BIGINT AUTO_INCREMENT PRIMARY KEY,
-    digest      TEXT        NOT NULL UNIQUE,
+    digest      VARCHAR(255) NOT NULL UNIQUE,
     applied_at  DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    environment TEXT        NOT NULL DEFAULT 'development',
+    environment VARCHAR(255) NOT NULL DEFAULT 'development',
     description TEXT
 )
 """.strip()

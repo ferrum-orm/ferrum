@@ -182,7 +182,7 @@ MYSQL: Final = Backend(
     capabilities=_MYSQL_CAPS,
     types={
         "pk_serial": "INT NOT NULL AUTO_INCREMENT PRIMARY KEY",
-        "text": "TEXT",
+        "text": "VARCHAR(255)",
         "int": "INT",
         "bool": "TINYINT(1)",
     },

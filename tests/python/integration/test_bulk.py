@@ -18,6 +18,7 @@ from .schema import Column, transient_table
 
 
 @pytest.mark.integration
+@pytest.mark.requires_capability(Capability.RETURNING)
 async def test_bulk_create_delete_round_trip(
     db_conn: ferrum.connection.Connection,
     backend: Backend,

@@ -49,6 +49,7 @@ def mssql_dsn() -> str:
     dsn = os.environ.get("FERRUM_TEST_MSSQL_DSN")
     if not dsn:
         pytest.skip("FERRUM_TEST_MSSQL_DSN not set")
+    pytest.importorskip("aioodbc", reason="aioodbc/pyodbc not available")
     return dsn
 
 

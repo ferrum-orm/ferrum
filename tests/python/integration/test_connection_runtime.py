@@ -16,9 +16,20 @@ import pytest
 import ferrum
 from ferrum.connection import Connection
 from ferrum.drivers.postgres import PoolStats
-from ferrum.errors import FerrumConnectionError, FerrumTimeoutError, map_db_error
+from ferrum.errors import FerrumConfigError, FerrumConnectionError, FerrumTimeoutError, map_db_error
 
 from .backends import Backend
+
+
+async def _skip_if_driver_unavailable(dsn: str, backend_name: str) -> None:
+    try:
+        conn = ferrum.connect(dsn)
+        await conn.__aenter__()
+        await conn.__aexit__(None, None, None)
+    except FerrumConfigError as exc:
+        pytest.skip(f"Backend {backend_name!r} driver not available: {exc}")
+    except FerrumConnectionError:
+        pass
 
 
 async def _seed_payload_rows(
@@ -53,6 +64,7 @@ async def test_query_timeout_on_live_backend(
 
     dsn = os.environ.get(backend.dsn_env)
     assert dsn is not None
+    await _skip_if_driver_unavailable(dsn, backend.name)
 
     table_name = f"ferrum_runtime_timeout_{unique_suffix}"
 
@@ -93,6 +105,7 @@ async def test_query_timeout_on_live_backend(
 async def test_graceful_shutdown_rejects_new_work(backend: Backend) -> None:
     dsn = os.environ.get(backend.dsn_env)
     assert dsn is not None
+    await _skip_if_driver_unavailable(dsn, backend.name)
 
     conn = Connection(dsn, drain_timeout=2.0)
     await conn.open()
@@ -109,6 +122,7 @@ async def test_acquire_timeout_on_exhausted_pool(backend: Backend) -> None:
 
     dsn = os.environ.get(backend.dsn_env)
     assert dsn is not None
+    await _skip_if_driver_unavailable(dsn, backend.name)
 
     conn = Connection(dsn, min_size=1, max_size=1, acquire_timeout=0.2)
     await conn.open()

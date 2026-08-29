@@ -56,6 +56,7 @@ from collections.abc import Callable
 import pytest
 
 import ferrum
+from ferrum.errors import FerrumConfigError
 
 from .backends import ALL_BACKENDS, Backend, Capability
 
@@ -273,8 +274,11 @@ async def db_conn(_backend_param: Backend | None) -> ferrum.connection.Connectio
     dsn = os.environ.get(b.dsn_env)
     if not dsn:
         pytest.skip(f"{b.dsn_env} is not set")
-    async with ferrum.connect(dsn) as conn:
-        yield conn
+    try:
+        async with ferrum.connect(dsn) as conn:
+            yield conn
+    except FerrumConfigError as exc:
+        pytest.skip(f"Backend {b.name!r} driver not available: {exc}")
 
 
 @pytest.fixture

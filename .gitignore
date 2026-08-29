@@ -263,3 +263,6 @@ secrets.json
 .claude/agents/*
 !.claude/agents/*.md
 **/*.sqlite
+
+# --- Benchmarks ---
+.bench-results/
