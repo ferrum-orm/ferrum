@@ -53,7 +53,7 @@ try:
 
     _HAS_AIOSQLITE: bool = True
 except ImportError:
-    aiosqlite = None
+    aiosqlite = None  # type: ignore
     _HAS_AIOSQLITE = False
 
 try:
@@ -61,7 +61,7 @@ try:
 
     _HAS_AIOODBC: bool = True
 except ImportError:
-    _pyodbc = None
+    _pyodbc = None  # type: ignore
     _HAS_AIOODBC = False
 
 

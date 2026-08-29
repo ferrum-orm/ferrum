@@ -33,7 +33,7 @@ try:
 
     _HAS_AIOSQLITE: bool = True
 except ImportError:
-    aiosqlite = None
+    aiosqlite = None  # type: ignore
     _HAS_AIOSQLITE = False
 
 from ferrum.errors import FerrumIntegrityError, FerrumMigrationError

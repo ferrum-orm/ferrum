@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 try:
     from starlette.requests import Request as _StarletteRequest
 except ImportError:  # pragma: no cover — exercised by import-boundary tests
-    _StarletteRequest = Any  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    _StarletteRequest = Any  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # ASGI / FastAPI structural types

@@ -20,7 +20,7 @@ from typing import Any, Literal, TextIO
 EchoLevel = Literal["off", "sql", "debug"]
 
 _GLOBAL_LEVEL: EchoLevel = "off"
-_STREAM: TextIO[str] = sys.stderr
+_STREAM: TextIO = sys.stderr
 
 
 def _parse_env_level() -> EchoLevel | None:
@@ -51,7 +51,7 @@ def resolve_echo_level(conn_echo: bool | str | None = None) -> EchoLevel:
     return _parse_env_level() or "off"
 
 
-def enable_echo(*, verbose: bool = False, stream: TextIO[str] | None = None) -> None:
+def enable_echo(*, verbose: bool = False, stream: TextIO | None = None) -> None:
     """Enable console SQL echo (SQLAlchemy-like).
 
     Args:

@@ -114,7 +114,6 @@ async def _apply(
         from ferrum.connection import Connection
 
         conn = Connection.__new__(Connection)
-        conn._pool = None  # type: ignore[attr-defined]
 
         result = await apply(
             conn, plan_json, dry_run=True, confirm=confirm, env=environment, token=token

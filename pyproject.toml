@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "ferrum-orm"
-version = "0.1.17"
+version = "0.1.18"
 description = "Next-generation async ORM for Python with a Rust-powered core"
 license = { text = "Apache-2.0" }
 readme = "README.md"
@@ -159,7 +159,7 @@ extra-paths = ["python"]
 include = ["python/ferrum"]
 
 [tool.ty.analysis]
-allowed-unresolved-imports = ["asyncpg.**", "asyncmy.**", "aiosqlite.**", "aioodbc.**", "pyodbc.**", "msgpack.**", "testcontainers.**", "opentelemetry.**"]
+allowed-unresolved-imports = ["asyncpg.**", "asyncmy.**", "aiosqlite.**", "aioodbc.**", "pyodbc.**", "msgpack.**", "testcontainers.**", "opentelemetry.**", "starlette.**"]
 
 # ---------------------------------------------------------------------------
 # pytest

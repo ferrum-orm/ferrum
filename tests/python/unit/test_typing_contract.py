@@ -5,7 +5,7 @@ This file serves a dual purpose:
 1. **Compile-time fixture (accepted use)** — The ``_ACCEPTED_FIXTURE`` block
    under ``TYPE_CHECKING`` is verified by ``ty`` when this file is explicitly
    checked:
-       uv run ty check tests/python/unit/test_typing_contract.py
+       ty check tests/python/unit/test_typing_contract.py
    Type checkers analyze ``TYPE_CHECKING`` blocks even though they are
    ``False`` at runtime. ``assert_type`` calls inside that block verify
    that the stub's declared types match expected shapes. At runtime,
@@ -236,7 +236,7 @@ class TestRejectedAPIUse:
         fixture_path = tmp_path / "_rejected_fixture.py"
         fixture_path.write_text(fixture_source)
         result = subprocess.run(  # noqa: S603 — controlled checker, not untrusted input
-            ["uv", "run", "ty", "check", str(fixture_path)],  # noqa: S607 — pinned toolchain runner
+            ["ty", "check", str(fixture_path)],  # noqa: S607 — `ty` is a pinned dev dependency
             capture_output=True,
             text=True,
             cwd=str(_REPO_ROOT),
