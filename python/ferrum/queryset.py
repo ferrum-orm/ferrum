@@ -370,11 +370,19 @@ def _parse_lookup(lookup: str) -> tuple[str, str]:
 
 
 def _normalize_null_lookup(operator: str, value: object) -> tuple[str, object]:
-    """Map Django-style ``__is_null=True/False`` onto ``is_null`` / ``is_not_null``.
+    """Map Django-style null equality onto the nullary ``is_null`` / ``is_not_null`` IR.
 
     The SQL emitter treats ``is_null`` / ``is_not_null`` as nullary operators and
-    ignores the bound value. Without this rewrite, ``field__is_null=False`` would
-    still emit ``IS NULL``.
+    ignores the bound value. Three rewrite cases:
+
+    - ``field__is_null=True``  → ``is_null``; ``field__is_null=False`` → ``is_not_null``
+    - ``field__is_not_null=True``  → ``is_not_null``; ``field__is_not_null=False`` → ``is_null``
+    - ``filter(field=None)`` / ``filter(field__eq=None)`` → ``is_null``
+      (SQL ``= NULL`` never matches; ``IS NULL`` is the only correct form).
+      ``filter(field__ne=None)`` → ``is_not_null``.
+
+    ``exclude(field=None)`` wraps the rewritten leaf in ``NOT (…)`` via ``~Q``,
+    so it emits ``NOT (col IS NULL)`` — semantically ``IS NOT NULL``.
     """
     if operator == "is_null":
         if value is False:
@@ -384,6 +392,11 @@ def _normalize_null_lookup(operator: str, value: object) -> tuple[str, object]:
         if value is False:
             return "is_null", None
         return "is_not_null", None
+    if value is None:
+        if operator == "eq":
+            return "is_null", None
+        if operator == "ne":
+            return "is_not_null", None
     return operator, value
 
 

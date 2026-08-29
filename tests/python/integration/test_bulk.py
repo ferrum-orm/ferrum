@@ -190,3 +190,126 @@ async def test_bulk_update_non_text_column_types(
         stored = await Ticket.objects.get(pg_conn, id=row.id, first_seen_at=seen_at)
         assert stored.related_ids == related
         assert stored.amount == Decimal("1.0050")
+
+
+# ---------------------------------------------------------------------------
+# W1-A: Cast matrix live round-trip — INTEGER[] / REAL / INTEGER casts
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_bulk_update_integer_array_cast_matches_ddl(
+    pg_conn: ferrum.connection.Connection,
+    require_native: None,
+    unique_suffix: str,
+) -> None:
+    """bulk_update on an INTEGER[] column must not fail with SQLSTATE 42883.
+
+    Previously ``postgres_value_cast`` emitted ``bigint[]`` for ``ArrayInt``,
+    but the DDL produces ``INTEGER[]``. The ``t.col = v.col`` join predicate
+    has no implicit cast between ``int4[]`` and ``int8[]``, so this would
+    fail with ``UndefinedFunction``.
+    """
+    table_name = f"ferrum_int_bulk_arr_int_{unique_suffix}"
+
+    class Slot(ferrum.Model):
+        id: int = 0
+        counts: list[int] = ferrum.Field(default_factory=list)
+
+        class Meta:
+            table = table_name
+
+    create_sql = f"""
+        CREATE TABLE "{table_name}" (
+            id SERIAL PRIMARY KEY,
+            counts INTEGER[] NOT NULL DEFAULT '{{}}'
+        )
+    """
+    drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
+
+    async with pg_transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
+        row = await Slot.objects.create(pg_conn, counts=[1, 2, 3])
+        row.counts = [10, 20]
+        updated = await Slot.objects.bulk_update(pg_conn, [row], ("counts",))
+        assert updated == 1
+
+        stored = await Slot.objects.get(pg_conn, id=row.id)
+        assert stored.counts == [10, 20]
+
+
+@pytest.mark.integration
+async def test_bulk_update_real_cast_matches_ddl(
+    pg_conn: ferrum.connection.Connection,
+    require_native: None,
+    unique_suffix: str,
+) -> None:
+    """bulk_update on a REAL (float4) column with a float field type.
+
+    Previously ``postgres_value_cast`` emitted ``double precision`` for
+    ``Float``, but the DDL produces ``REAL`` (float4). While PostgreSQL has
+    an implicit cast, the cast should match the DDL exactly.
+    """
+    table_name = f"ferrum_int_bulk_real_{unique_suffix}"
+
+    class Meter(ferrum.Model):
+        id: int = 0
+        reading: float = 0.0
+
+        class Meta:
+            table = table_name
+
+    create_sql = f"""
+        CREATE TABLE "{table_name}" (
+            id SERIAL PRIMARY KEY,
+            reading REAL NOT NULL DEFAULT 0.0
+        )
+    """
+    drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
+
+    async with pg_transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
+        row = await Meter.objects.create(pg_conn, reading=1.5)
+        row.reading = 2.5
+        updated = await Meter.objects.bulk_update(pg_conn, [row], ("reading",))
+        assert updated == 1
+
+        stored = await Meter.objects.get(pg_conn, id=row.id)
+        assert abs(stored.reading - 2.5) < 0.001
+
+
+@pytest.mark.integration
+async def test_bulk_update_integer_pk_cast_matches_ddl(
+    pg_conn: ferrum.connection.Connection,
+    require_native: None,
+    unique_suffix: str,
+) -> None:
+    """bulk_update on a non-PK INTEGER column with an int PK.
+
+    The PK is ``big_int`` (BIGSERIAL), but the update column ``count`` is
+    ``int`` (INTEGER). The VALUES cast for ``count`` must be ``integer``,
+    not ``bigint``.
+    """
+    table_name = f"ferrum_int_bulk_int_{unique_suffix}"
+
+    class Counter(ferrum.Model):
+        id: int = 0
+        count: int = 0
+
+        class Meta:
+            table = table_name
+
+    create_sql = f"""
+        CREATE TABLE "{table_name}" (
+            id SERIAL PRIMARY KEY,
+            count INTEGER NOT NULL DEFAULT 0
+        )
+    """
+    drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
+
+    async with pg_transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
+        row = await Counter.objects.create(pg_conn, count=5)
+        row.count = 42
+        updated = await Counter.objects.bulk_update(pg_conn, [row], ("count",))
+        assert updated == 1
+
+        stored = await Counter.objects.get(pg_conn, id=row.id)
+        assert stored.count == 42

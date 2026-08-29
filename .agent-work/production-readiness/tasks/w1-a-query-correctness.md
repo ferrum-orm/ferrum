@@ -3,7 +3,7 @@ task_id: w1-a-query-correctness
 wave: wave-1
 owner: production-readiness-executor
 status: in_progress
-run_id: 20260821T093501Z
+run_id: 20260829T080749Z
 shared_path_lease: null
 dependencies: []
 owned_paths:

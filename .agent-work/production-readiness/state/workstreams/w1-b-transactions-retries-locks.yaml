@@ -1,11 +1,11 @@
 version: 1
 task_id: w1-b-transactions-retries-locks
-owner: unassigned
-status: tasked
-phase: tasks
+owner: production-readiness-executor
+status: ready
+phase: ready
 run_id: null
-base_revision: 768ec1f3013f6d0eccd7c8b590ba36b54b12d23e
-dependencies_checked: false
+base_revision: 02d585513980ae89dbd6474196619a82faac460d
+dependencies_checked: true
 owned_paths_checked: true
 shared_path_lease: null
 spec_complete: true
@@ -37,5 +37,5 @@ artifacts:
   code_review: null
 changed_paths: []
 blockers: []
-next_action: wait for w1-d, w1-e, and w1-a verified; then coordinator extends connection.py/queryset.py and marks ready
-updated_at: 2026-08-21T09:35:00Z
+next_action: ready for executor dispatch — W1-D/E/A all complete; connection.py and queryset.py ownership extended
+updated_at: 2026-08-29T10:00:00Z

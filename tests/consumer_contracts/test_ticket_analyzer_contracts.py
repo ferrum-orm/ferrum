@@ -32,6 +32,43 @@ from ferrum.queryset import Aggregate
 from ferrum.session import tenant_transaction
 
 
+async def _create_rls_role(
+    pg_conn: ferrum.connection.Connection,
+    *,
+    role_name: str,
+    team_table: str,
+    event_table: str,
+) -> str:
+    """Create a non-superuser non-BYPASSRLS role for RLS enforcement tests (W1-C).
+
+    The role is granted all DML privileges on the test tables and USAGE on the
+    public schema. The table owner stays the superuser; FORCE RLS makes the
+    non-superuser role subject to the policies.
+    """
+    driver = pg_conn._require_driver()
+    await driver.execute(f'DROP ROLE IF EXISTS "{role_name}"')
+    await driver.execute(f"CREATE ROLE \"{role_name}\" LOGIN PASSWORD 'ferrum_rls'")
+    await driver.execute(f'GRANT ALL ON "{team_table}" TO "{role_name}"')
+    await driver.execute(f'GRANT ALL ON "{event_table}" TO "{role_name}"')
+    await driver.execute(f'GRANT USAGE ON SCHEMA public TO "{role_name}"')
+    return role_name
+
+
+async def _drop_rls_role(
+    pg_conn: ferrum.connection.Connection,
+    *,
+    role_name: str,
+    team_table: str,
+    event_table: str,
+) -> None:
+    """Revoke privileges and drop the non-superuser role (cleanup)."""
+    driver = pg_conn._require_driver()
+    await driver.execute(f'REVOKE ALL ON "{team_table}" FROM "{role_name}"')
+    await driver.execute(f'REVOKE ALL ON "{event_table}" FROM "{role_name}"')
+    await driver.execute(f'REVOKE USAGE ON SCHEMA public FROM "{role_name}"')
+    await driver.execute(f'DROP ROLE IF EXISTS "{role_name}"')
+
+
 def _plan(name: str, operations: list[Any]) -> str:
     return json.dumps(
         {
@@ -163,24 +200,17 @@ async def _apply_rls_schema(
     event_table: str,
 ) -> None:
     """Same schema as ``_apply_schema`` plus RLS, isolated into its own
-    fixture so the ta-15 EnableRLS(force=True) workaround (two ops, see
-    below) does not leak FORCE semantics onto the six non-RLS contract
-    tests, which write through the plain ``pg_conn`` with no tenant GUC
-    bound and would otherwise be blocked by the owner-inclusive FORCE
-    policy.
+    fixture so the FORCE RLS semantics do not leak onto the six non-RLS
+    contract tests, which write through the plain ``pg_conn`` with no
+    tenant GUC bound and would otherwise be blocked by the owner-inclusive
+    FORCE policy.
+
+    W1-C note: EnableRLS(force=True) now emits both ENABLE and FORCE, so
+    the separate plain EnableRLS is no longer a required workaround. Both
+    ops are kept for clarity and because the fixture predates the fix.
     """
     await _apply_schema(pg_conn, suffix=suffix, team_table=team_table, event_table=event_table)
     operations = [
-        # ta-15-migration-force-rls-never-enables (Ferrum defect): EnableRLS(
-        # force=True) alone emits *only* `FORCE ROW LEVEL SECURITY`, never
-        # `ENABLE ROW LEVEL SECURITY` — see orchestrator.py's enable_rls
-        # branch (`if op.get("force"): return ...FORCE...` with no `else`
-        # arm that also emits ENABLE). Since relrowsecurity stays false, the
-        # policies below are a silent no-op and RLS provides zero isolation
-        # — reproduced directly against live PostgreSQL by
-        # test_force_rls_without_enable_rls_grants_no_isolation_defect.
-        # Workaround: plain EnableRLS turns relrowsecurity on, and a second
-        # force=True call additionally sets relforcerowsecurity.
         ops.EnableRLS(event_table),
         ops.EnableRLS(event_table, force=True),
         ops.CreatePolicy(
@@ -216,19 +246,49 @@ async def _drop_rls_schema(
 @pytest_asyncio.fixture
 async def rls_contract_models(
     pg_conn: ferrum.connection.Connection,
+    pg_dsn: str,
     unique_suffix: str,
     require_native: None,
 ):
+    """RLS test fixture with a non-superuser connection (W1-C).
+
+    The superuser ``pg_conn`` applies the schema + RLS policies. A separate
+    non-superuser role ``ferrum_rls_<suffix>`` is created and granted DML
+    privileges. The yielded dict includes ``rls_conn`` — a Ferrum connection
+    logged in as that role — so RLS policies are actually enforced (FORCE RLS
+    does not affect superusers, only the table owner and non-bypass roles).
+    """
     Team, Event, team_table, event_table = _make_models(unique_suffix)
     await _apply_rls_schema(
         pg_conn, suffix=unique_suffix, team_table=team_table, event_table=event_table
     )
-    try:
-        yield {"Team": Team, "Event": Event, "team_table": team_table, "event_table": event_table}
-    finally:
-        await _drop_rls_schema(
-            pg_conn, suffix=unique_suffix, team_table=team_table, event_table=event_table
-        )
+    role_name = f"ferrum_rls_{unique_suffix}"
+    await _create_rls_role(
+        pg_conn, role_name=role_name, team_table=team_table, event_table=event_table
+    )
+    # Build a DSN that logs in as the non-superuser role (no password —
+    # PostgreSQL trust authentication on localhost).
+    from urllib.parse import urlparse
+
+    parsed = urlparse(pg_dsn)
+    rls_dsn = f"postgresql://{role_name}:ferrum_rls@{parsed.hostname}:{parsed.port}{parsed.path}"
+    async with ferrum.connect(rls_dsn) as rls_conn:
+        try:
+            yield {
+                "Team": Team,
+                "Event": Event,
+                "team_table": team_table,
+                "event_table": event_table,
+                "rls_conn": rls_conn,
+            }
+        finally:
+            await rls_conn.close()
+    await _drop_rls_role(
+        pg_conn, role_name=role_name, team_table=team_table, event_table=event_table
+    )
+    await _drop_rls_schema(
+        pg_conn, suffix=unique_suffix, team_table=team_table, event_table=event_table
+    )
 
 
 async def _create_team(pg_conn: ferrum.connection.Connection, team_cls: type, *, name: str) -> Any:
@@ -240,64 +300,66 @@ async def test_platform_admin_bypass_sees_all_teams(
     pg_conn: ferrum.connection.Connection,
     rls_contract_models: dict[str, Any],
 ) -> None:
-    """Manifest ta-02: admin=True on tenant_transaction() must bypass team_isolation."""
+    """Manifest ta-02: admin=True on tenant_transaction() must bypass team_isolation.
+
+    W1-C: uses a non-superuser connection (rls_conn) so FORCE RLS is actually
+    enforced. Superusers bypass RLS entirely, so the test would be a no-op
+    with the default pg_conn.
+    """
     Team = rls_contract_models["Team"]
     Event = rls_contract_models["Event"]
+    rls_conn = rls_contract_models["rls_conn"]
 
+    # Create teams and events using the superuser (pg_conn) — the non-superuser
+    # role also has INSERT privileges.
     team_a = await _create_team(pg_conn, Team, name="A")
     team_b = await _create_team(pg_conn, Team, name="B")
-    async with tenant_transaction(pg_conn, team_a.id) as tx:
+    async with tenant_transaction(rls_conn, team_a.id) as tx:
         await Event.objects.create(
             tx, id=uuid.uuid4(), team_id=team_a.id, dedup_key="a1", status="pending", tags={}
         )
-    async with tenant_transaction(pg_conn, team_b.id) as tx:
+    async with tenant_transaction(rls_conn, team_b.id) as tx:
         await Event.objects.create(
             tx, id=uuid.uuid4(), team_id=team_b.id, dedup_key="b1", status="pending", tags={}
         )
 
-    # A plain team-scoped transaction sees only its own team's row.
-    async with tenant_transaction(pg_conn, team_a.id) as tx:
+    # A plain team-scoped transaction on the non-superuser connection sees only
+    # its own team's row (RLS policy enforced because the role is non-superuser
+    # and FORCE RLS is set).
+    async with tenant_transaction(rls_conn, team_a.id) as tx:
         scoped = await Event.objects.all(tx)
         assert {row.team_id for row in scoped} == {team_a.id}
 
     # The platform-admin bypass transaction sees rows across both teams.
-    async with tenant_transaction(pg_conn, team_a.id, admin=True) as tx:
+    async with tenant_transaction(rls_conn, team_a.id, admin=True) as tx:
         all_rows = await Event.objects.all(tx)
         assert {row.team_id for row in all_rows} == {team_a.id, team_b.id}
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(
-    reason=(
-        "ta-15-migration-force-rls-never-enables (Ferrum defect): "
-        "orchestrator.py's enable_rls branch for EnableRLS(force=True) emits "
-        "only `ALTER TABLE ... FORCE ROW LEVEL SECURITY`, never the required "
-        "`ALTER TABLE ... ENABLE ROW LEVEL SECURITY`. Postgres leaves "
-        "relrowsecurity false in that state, so the team_isolation policy "
-        "below is never evaluated and every row is visible with zero tenant "
-        "GUC bound — a complete, silent RLS bypass for any consumer (e.g. "
-        "Ticket Analyzer) that calls EnableRLS(force=True) expecting it to "
-        "also enable RLS the way ENABLE + FORCE normally would."
-    ),
-    strict=True,
-)
-async def test_force_rls_without_enable_rls_grants_no_isolation_defect(
+async def test_force_rls_alone_enables_and_forces_rls(
     pg_conn: ferrum.connection.Connection,
+    pg_dsn: str,
     unique_suffix: str,
     require_native: None,
 ) -> None:
-    """Reproduces ta-15 directly: EnableRLS(force=True) alone must not leave
-    relrowsecurity off. With the defect, a query issued with *no* app.team_id
-    GUC bound at all returns rows from every team instead of zero rows.
+    """W1-C / W0-B ta-16: EnableRLS(force=True) emits ENABLE then FORCE so
+    relrowsecurity AND relforcerowsecurity are both true. A single force=True
+    op is exactly what a consumer would write, expecting it to both enable
+    and force RLS. With the fix, a query issued with *no* app.team_id GUC
+    bound at all returns zero rows (the policy matches nothing) — verified
+    on a non-superuser connection so RLS is actually enforced.
     """
+    from urllib.parse import urlparse
+
     Team, Event, team_table, event_table = _make_models(unique_suffix)
     await _apply_schema(
         pg_conn, suffix=unique_suffix, team_table=team_table, event_table=event_table
     )
+    role_name = f"ferrum_rls_force_{unique_suffix}"
     try:
-        # Deliberately omit the plain EnableRLS(event_table) op — this single
-        # force=True op is exactly what a consumer would write, expecting it
-        # to both enable and force RLS.
+        # Deliberately use only EnableRLS(force=True) — no plain EnableRLS first.
+        # With the W1-C fix, this single op emits both ENABLE and FORCE.
         force_only_ops = [
             ops.EnableRLS(event_table, force=True),
             ops.CreatePolicy(
@@ -309,21 +371,63 @@ async def test_force_rls_without_enable_rls_grants_no_isolation_defect(
         await apply(
             pg_conn, _plan(f"cc_ta_force_only_{unique_suffix}", force_only_ops), dry_run=False
         )
+
+        # Create the non-superuser role for RLS enforcement verification.
+        await _create_rls_role(
+            pg_conn, role_name=role_name, team_table=team_table, event_table=event_table
+        )
+        parsed = urlparse(pg_dsn)
+        rls_dsn = (
+            f"postgresql://{role_name}:ferrum_rls@{parsed.hostname}:{parsed.port}{parsed.path}"
+        )
+
         try:
+            # Verify pg_class flags directly: both relrowsecurity and
+            # relforcerowsecurity must be true after the single force=True op.
+            driver = pg_conn._require_driver()
+            row = await driver.fetchrow(
+                "SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = $1",
+                event_table,
+            )
+            assert row is not None, f"Table {event_table} not found in pg_class"
+            relrowsecurity = row.get("relrowsecurity", row[0]) if isinstance(row, dict) else row[0]
+            relforcerowsecurity = (
+                row.get("relforcerowsecurity", row[1]) if isinstance(row, dict) else row[1]
+            )
+            assert relrowsecurity is True, (
+                f"relrowsecurity should be true after EnableRLS(force=True), got {relrowsecurity!r}"
+            )
+            assert relforcerowsecurity is True, (
+                f"relforcerowsecurity should be true after EnableRLS(force=True), "
+                f"got {relforcerowsecurity!r}"
+            )
+
             team_a = await _create_team(pg_conn, Team, name="A")
             team_b = await _create_team(pg_conn, Team, name="B")
             await Event.objects.create(
-                pg_conn, id=uuid.uuid4(), team_id=team_a.id, dedup_key="a1", status="pending"
+                pg_conn,
+                id=uuid.uuid4(),
+                team_id=team_a.id,
+                dedup_key="a1",
+                status="pending",
+                tags={},
             )
             await Event.objects.create(
-                pg_conn, id=uuid.uuid4(), team_id=team_b.id, dedup_key="b1", status="pending"
+                pg_conn,
+                id=uuid.uuid4(),
+                team_id=team_b.id,
+                dedup_key="b1",
+                status="pending",
+                tags={},
             )
 
-            # No tenant_transaction / GUC bound at all. With RLS correctly
-            # enabled, a policy comparing team_id to an unset GUC matches
-            # nothing, so the correct, non-defective result is zero rows.
-            leaked = await Event.objects.all(pg_conn)
-            assert leaked == []
+            # Verify RLS enforcement on a non-superuser connection: with no
+            # tenant_transaction / GUC bound, the policy matches nothing, so
+            # the correct result is zero rows. Superusers bypass RLS, so we
+            # must use the non-superuser role.
+            async with ferrum.connect(rls_dsn) as rls_conn:
+                leaked = await Event.objects.all(rls_conn)
+                assert leaked == []
         finally:
             await apply(
                 pg_conn,
@@ -338,6 +442,9 @@ async def test_force_rls_without_enable_rls_grants_no_isolation_defect(
                 confirm=True,
             )
     finally:
+        await _drop_rls_role(
+            pg_conn, role_name=role_name, team_table=team_table, event_table=event_table
+        )
         await _drop_schema(
             pg_conn, suffix=unique_suffix, team_table=team_table, event_table=event_table
         )

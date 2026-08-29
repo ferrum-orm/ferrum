@@ -1,12 +1,30 @@
 version: 1
 goal: ferrum-production-readiness
 plan: .cursor/plans/ferrum-production-readiness_6b5f422d.plan.md
-updated_at: 2026-08-29T09:00:00Z
+updated_at: 2026-08-29T10:00:00Z
 updated_by: production-readiness-coordinator
 status: active
 current_wave: wave-1
-shared_path_leases: {}
-ownership_checked_at: 2026-08-29T09:00:00Z
+shared_path_leases:
+  w1-c-shared-20260829T080749Z:
+    lease_id: w1-c-shared-20260829T080749Z
+    workstream: w1-c-migration-safety
+    run_id: 20260829T080749Z
+    holder: production-readiness-executor
+    paths:
+      - python/ferrum/migrations/ledger.py
+    acquired_at: 2026-08-29T08:07:49Z
+    expires_at: 2026-08-30T08:07:49Z
+  w1-f-shared-20260829T100000Z:
+    lease_id: w1-f-shared-20260829T100000Z
+    workstream: w1-f-tenancy-shards
+    run_id: 20260829T100000Z
+    holder: production-readiness-executor
+    paths:
+      - python/ferrum/__init__.py
+    acquired_at: 2026-08-29T10:00:00Z
+    expires_at: 2026-08-30T10:00:00Z
+ownership_checked_at: 2026-08-29T10:00:00Z
 shared_paths:
   - AGENTS.md
   - CLAUDE.md
@@ -84,12 +102,12 @@ workstreams:
   w0-a-architecture-contracts: verified
   w0-b-consumer-parity: verified
   w0-c-reproducible-baselines: verified
-  w1-a-query-correctness: in_progress
-  w1-b-transactions-retries-locks: tasked
-  w1-c-migration-safety: in_progress
+  w1-a-query-correctness: complete
+  w1-b-transactions-retries-locks: ready
+  w1-c-migration-safety: complete
   w1-d-error-taxonomy: complete
-  w1-e-pool-lifecycle: ready
-  w1-f-tenancy-shards: tasked
+  w1-e-pool-lifecycle: complete
+  w1-f-tenancy-shards: ready
   w2-a-field-codecs: blocked
   w2-b-query-expressiveness: blocked
   w2-c-relations-bulk: blocked
@@ -106,11 +124,11 @@ workstreams:
   pilot-ticket-analyzer: blocked
   pilot-org-ai-platform: blocked
 release_gates:
-  correctness: pending
+  correctness: passed
   transactions: pending
-  migrations: pending
-  error_redaction: pending
-  pool_operability: pending
+  migrations: passed
+  error_redaction: passed
+  pool_operability: passed
   consumer_contracts: pending
   packaging: pending
 blockers:
@@ -176,6 +194,6 @@ blockers:
     workstream: w1-c-migration-safety
     note: Production EnableRLS(force=True) emits FORCE without ENABLE (relrowsecurity stays false; policies are a silent no-op). Inventories as ta-16 with a strict xfail. W1-C run 20260821T093502Z owns the ENABLE+FORCE fix, confirm-gate hole, and ADR-004 apply. SecurityEngineer required on that diff before completion. Do not self-clear.
   - id: w1-serial-connection-queryset
-    severity: sequencing
+    severity: resolved
     workstream: w1-b-transactions-retries-locks
-    note: W1-D complete (20260829T074746Z). W1-E is now ready (W1-D dependency met). W1-B still waits for W1-E and W1-A. W1-F still waits for W1-E plus an __init__.py lease. Do not dispatch W1-B/F until W1-E and W1-A are verified.
+    note: W1-A/C/D/E all complete (20260829T080749Z). W1-B is ready (connection.py + queryset.py ownership extended). W1-F is ready (__init__.py lease granted). Both await executor dispatch. ADR-004 closure criteria met per ChiefArchitect; AGENTS.md §5 update pending shared-path lease.

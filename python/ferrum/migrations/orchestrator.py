@@ -24,12 +24,20 @@ import dataclasses
 import datetime
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from ferrum.errors import FerrumMigrationError
-from ferrum.migrations.ledger import is_applied, record_applied
+from ferrum.migrations.ledger import (
+    ADVISORY_LOCK_KEY_1,
+    ADVISORY_LOCK_KEY_2,
+    advisory_lock_sql,
+    is_applied_on_conn,
+    record_applied,
+    record_applied_on_conn,
+)
 from ferrum.migrations.tokens import verify_token
 
 if TYPE_CHECKING:
@@ -142,6 +150,49 @@ _NON_TRANSACTIONAL_KINDS: frozenset[str] = frozenset(
         "create_function",
     }
 )
+
+
+def _is_op_destructive(op: dict[str, Any]) -> bool:
+    """Return True if *op* requires explicit destructive confirmation (MIG-2).
+
+    W1-C: ``alter_column`` is destructive when it narrows the type
+    (``sql_type`` set) or sets ``NOT NULL`` — both can fail on populated
+    columns. ``DROP NOT NULL`` / ``SET DEFAULT`` / ``DROP DEFAULT`` are safe.
+    ``add_index`` with ``concurrently=True`` is non-transactional, not
+    destructive. Other kinds use the ``_DESTRUCTIVE_KINDS`` allowlist.
+    """
+    kind = op.get("kind", "")
+    if kind in _DESTRUCTIVE_KINDS:
+        return True
+    if kind == "alter_column":
+        return op.get("not_null") is True or op.get("sql_type") is not None
+    return False
+
+
+def _is_op_non_transactional(op: dict[str, Any]) -> bool:
+    """Return True if *op* cannot run inside a transaction block (W1-C)."""
+    kind = op.get("kind", "")
+    if kind in _NON_TRANSACTIONAL_KINDS:
+        return True
+    return kind == "add_index" and op.get("concurrently", False)
+
+
+# W1-C: validated timeout strings for SET LOCAL. Only plain integers
+# (milliseconds) or ``<number><unit>`` with unit s/ms/min/h are accepted so
+# the value can never be a SQL injection vector.
+_TIMEOUT_RE: re.Pattern[str] = re.compile(r"^\d+(ms|s|min|h)?$")
+
+
+def _validate_timeout(value: str | None, name: str) -> None:
+    """Validate a SET LOCAL timeout string against a strict pattern (W1-C)."""
+    if value is None:
+        return
+    if not isinstance(value, str) or not _TIMEOUT_RE.match(value):
+        raise FerrumMigrationError(
+            f"Invalid {name}: {value!r}. Expected a number optionally followed by "
+            "ms, s, min, or h (e.g. '5s', '100ms', '30s'). [FERR-M001]"
+        )
+
 
 # SQL type allowlist — only these tokens may appear in DDL type position.
 # Prevents DDL injection if upstream metadata validation is bypassed.
@@ -563,12 +614,25 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
         using = op.get("using", "btree")
         if using not in _INDEX_USING_ALLOWLIST:
             raise FerrumMigrationError(f"Unsupported index access method {using!r}. [FERR-M001]")
+        concurrently = op.get("concurrently", False)
+        if dialect != "postgres" and concurrently:
+            raise FerrumMigrationError(
+                "CREATE INDEX CONCURRENTLY is PostgreSQL-only in Ferrum v0.1. [FERR-M001]"
+            )
         if dialect == "mssql":
             # T-SQL has no CREATE INDEX IF NOT EXISTS / USING; the ledger ensures
             # each migration runs once, so an unguarded CREATE INDEX is safe.
             sql = (
                 f"CREATE {unique_kw}INDEX {_quote_ident(name, dialect)} "
                 f"ON {_quote_ident(table, dialect)} ({cols})"
+            )
+        elif concurrently:
+            # W1-C: CREATE INDEX CONCURRENTLY cannot use IF EXISTS (PostgreSQL
+            # rejects the combination) and cannot run inside a transaction block.
+            # The ledger's replay guard prevents double-execution.
+            sql = (
+                f"CREATE {unique_kw}INDEX CONCURRENTLY {_quote_ident(name, dialect)} "
+                f"ON {_quote_ident(table, dialect)} USING {using} ({cols})"
             )
         else:
             sql = (
@@ -637,7 +701,13 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
     if kind == "enable_rls":
         table = op["table"]
         if op.get("force"):
-            return f"ALTER TABLE {_quote_ident(table, dialect)} FORCE ROW LEVEL SECURITY"
+            # W1-C / W0-B ta-16: FORCE alone leaves ``relrowsecurity`` false and
+            # makes every policy a silent no-op. Emit ENABLE then FORCE so the
+            # table is both RLS-enabled and owner-enforced in a single op.
+            return (
+                f"ALTER TABLE {_quote_ident(table, dialect)} ENABLE ROW LEVEL SECURITY; "
+                f"ALTER TABLE {_quote_ident(table, dialect)} FORCE ROW LEVEL SECURITY"
+            )
         return f"ALTER TABLE {_quote_ident(table, dialect)} ENABLE ROW LEVEL SECURITY"
 
     if kind == "disable_rls":
@@ -1156,6 +1226,77 @@ def compute_plan(
     }
 
 
+async def _lock_holder_diagnostics(raw_conn: Any) -> str:  # noqa: ANN401
+    """Return a sanitized diagnostic string about who holds the migration advisory lock.
+
+    Queries ``pg_locks`` + ``pg_stat_activity`` for granted advisory locks
+    in the Ferrum namespace. Returns only PID, application_name, and state —
+    never query text, bound values, or row data. PostgreSQL only.
+    """
+    try:
+        rows = await raw_conn.fetch(
+            "SELECT l.pid, COALESCE(a.application_name, '') AS app, a.state "
+            "FROM pg_locks l LEFT JOIN pg_stat_activity a ON a.pid = l.pid "
+            "WHERE l.locktype = 'advisory' AND l.granted = true "
+            "AND l.classid = $1 AND l.objid = $2",
+            ADVISORY_LOCK_KEY_1,
+            ADVISORY_LOCK_KEY_2,
+        )
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    parts: list[str] = []
+    for r in rows:
+        pid = r.get("pid", r[0]) if isinstance(r, dict) else r[0]
+        app = r.get("app", r[1]) if isinstance(r, dict) else r[1]
+        state = r.get("state", r[2]) if isinstance(r, dict) else r[2]
+        parts.append(f"pid={pid} app={app!r} state={state!r}")
+    return "; ".join(parts)
+
+
+def _split_ops_by_phase(
+    ops: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split ops into (pre_tx, tx, post_tx) phases (W1-C).
+
+    Non-transactional ops (CREATE EXTENSION, CREATE INDEX CONCURRENTLY) must
+    run outside the transaction block. They form contiguous pre-tx and/or
+    post-tx phases. Transactional ops form a single middle phase wrapped in
+    one transaction with the ledger write.
+
+    Raises ``FerrumMigrationError`` if non-transactional ops are interspersed
+    with transactional ops (an invalid plan structure that cannot be split
+    into contiguous phases).
+    """
+    pre: list[dict[str, Any]] = []
+    tx: list[dict[str, Any]] = []
+    post: list[dict[str, Any]] = []
+    phase = "pre"
+    for op in ops:
+        non_tx = _is_op_non_transactional(op)
+        if non_tx:
+            if phase == "pre":
+                pre.append(op)
+            elif phase == "tx":
+                # First non-tx op after tx ops starts the post phase.
+                phase = "post"
+                post.append(op)
+            else:  # post
+                post.append(op)
+        else:
+            if phase == "pre":
+                phase = "tx"
+            elif phase == "post":
+                raise FerrumMigrationError(
+                    "Invalid migration plan: transactional op after non-transactional "
+                    "op. Non-transactional ops must form contiguous pre- or post-tx "
+                    "phases, not interspersed with transactional ops. [FERR-M001]"
+                )
+            tx.append(op)
+    return pre, tx, post
+
+
 async def apply(
     conn: Connection,
     plan_json: str,
@@ -1164,8 +1305,17 @@ async def apply(
     confirm: bool = False,
     env: str = "development",
     token: str | None = None,
+    lock_timeout: str | None = None,
+    statement_timeout: str | None = None,
 ) -> MigrationResult:
     """Apply a Rust-generated migration plan JSON to the database.
+
+    W1-C: on PostgreSQL, apply acquires a transaction-scoped advisory lock,
+    checks the ledger, runs all transactional ops + the ledger write in one
+    atomic transaction on one pinned connection, then runs any
+    non-transactional ops (CREATE INDEX CONCURRENTLY, CREATE EXTENSION)
+    outside the transaction block. Non-PostgreSQL backends keep
+    best-effort autocommit-per-op.
 
     Args:
         conn: An open Ferrum ``Connection`` (pool must be open).
@@ -1182,13 +1332,21 @@ async def apply(
             ``confirm=True``, it is validated against the plan digest using
             ``verify_token``.  An invalid or mismatched token raises
             ``FerrumMigrationError`` before any SQL is executed (MIG-2).
+        lock_timeout: Optional ``lock_timeout`` (e.g. ``"5s"``) applied as
+            ``SET LOCAL`` inside the transaction. When the advisory lock
+            cannot be acquired within this budget, PostgreSQL raises
+            SQLSTATE 55P03 and Ferrum surfaces a lock-holder diagnostic.
+            PostgreSQL only.
+        statement_timeout: Optional ``statement_timeout`` (e.g. ``"30s"``)
+            applied as ``SET LOCAL`` inside the transaction. PostgreSQL only.
 
     Returns:
         ``MigrationResult`` describing what was (or would have been) applied.
 
     Raises:
         FerrumMigrationError: Safety gate not satisfied (destructive without
-            confirm, non-dev without confirm, invalid token, or unknown op kind).
+            confirm, non-dev without confirm, invalid token, unknown op kind,
+            replay guard, lock contention, or invalid plan structure).
     """
     plan = json.loads(plan_json)
     ops: list[dict[str, Any]] = plan.get("ops", [])
@@ -1202,16 +1360,14 @@ async def apply(
     # Token gate: validate the confirmation token against the plan digest before
     # any SQL is executed.  Checked before destructive/env gates so a bad token
     # is rejected immediately, regardless of what other flags are set (MIG-2).
-    if confirm and token is not None:
-        if not verify_token(plan_json, token):
-            raise FerrumMigrationError("Token validation failed. [FERR-M001]")
-        # MIG-6 replay guard: token-authenticated applies are single-use via ledger.
-        if await is_applied(conn, plan_digest):
-            raise FerrumMigrationError("Migration plan has already been applied. [FERR-M003]")
+    if confirm and token is not None and not verify_token(plan_json, token):
+        raise FerrumMigrationError("Token validation failed. [FERR-M001]")
 
     # MIG-2: destructive gate — independently scan ops, never trust the
     # `requires_confirmation` flag from plan JSON (a crafted JSON could lie).
-    is_destructive = any(op.get("kind") in _DESTRUCTIVE_KINDS for op in ops)
+    # W1-C: uses _is_op_destructive so alter_column SET NOT NULL / type
+    # narrowing also hits the confirm gate.
+    is_destructive = any(_is_op_destructive(op) for op in ops)
     if (is_destructive or plan.get("requires_confirmation")) and not confirm:
         raise FerrumMigrationError(
             "Migration requires explicit confirmation. "
@@ -1222,6 +1378,151 @@ async def apply(
     if env != "development" and not confirm:
         raise FerrumMigrationError("Non-development apply requires --confirm flag.")
 
+    dialect = conn.dialect
+    description = str(plan.get("name", ""))
+
+    if dialect == "postgres":
+        return await _apply_postgres(
+            conn,
+            ops,
+            plan_digest=plan_digest,
+            description=description,
+            env=env,
+            lock_timeout=lock_timeout,
+            statement_timeout=statement_timeout,
+        )
+
+    # Non-PostgreSQL backends: best-effort autocommit-per-op (thin parity).
+    return await _apply_thin_parity(conn, ops, plan_digest, description=description, env=env)
+
+
+async def _apply_postgres(
+    conn: Connection,
+    ops: list[dict[str, Any]],
+    *,
+    plan_digest: str,
+    description: str,
+    env: str,
+    lock_timeout: str | None,
+    statement_timeout: str | None,
+) -> MigrationResult:
+    """PostgreSQL apply: advisory-locked, transactional, atomic ledger write."""
+    pre_ops, tx_ops, post_ops = _split_ops_by_phase(ops)
+
+    # Pre-tx non-transactional phase (autocommit, no ledger yet).
+    # If a pre-tx op fails, the ledger is not written and re-running is safe.
+    driver = conn._require_driver()
+    for op in pre_ops:
+        kind = op.get("kind", "unknown")
+        table = op.get("table", "")
+        label = f"{kind} {table}".rstrip()
+        print(f"[ferrum migrate] applying (pre-tx): {label}")
+        sql = _op_to_sql(op, dialect="postgres")
+        await driver.execute(sql)
+
+    # Transactional phase: pin one connection, acquire advisory lock, check
+    # ledger, run ops, write ledger — all atomic.
+    _validate_timeout(lock_timeout, "lock_timeout")
+    _validate_timeout(statement_timeout, "statement_timeout")
+    async with conn.acquire() as raw_conn, raw_conn.transaction():
+        # Apply lock_timeout / statement_timeout as SET LOCAL (tx-scoped).
+        # Values are validated by _validate_timeout — plain number+unit only.
+        if lock_timeout is not None:
+            await raw_conn.execute(f"SET LOCAL lock_timeout = {lock_timeout}")
+        if statement_timeout is not None:
+            await raw_conn.execute(f"SET LOCAL statement_timeout = {statement_timeout}")
+
+        # Advisory lock — serializes concurrent migrators on one connection.
+        # Auto-released on commit/rollback (pg_advisory_xact_lock).
+        try:
+            await raw_conn.execute(advisory_lock_sql(), ADVISORY_LOCK_KEY_1, ADVISORY_LOCK_KEY_2)
+        except Exception as exc:
+            diag = await _lock_holder_diagnostics(raw_conn)
+            sqlstate = ""
+            if hasattr(exc, "sqlstate"):
+                sqlstate = f" (SQLSTATE {exc.sqlstate})"
+            suffix = f" — lock holder: {diag}" if diag else ""
+            raise FerrumMigrationError(
+                f"Failed to acquire migration advisory lock{sqlstate}. "
+                f"Another migrator may be running.{suffix} [FERR-M001]"
+            ) from None
+
+        # Ensure ledger table exists on this pinned connection.
+        await raw_conn.execute(
+            "CREATE TABLE IF NOT EXISTS ferrum_migrations ("
+            "id BIGSERIAL PRIMARY KEY, digest TEXT NOT NULL UNIQUE, "
+            "applied_at TIMESTAMPTZ NOT NULL DEFAULT now(), "
+            "environment TEXT NOT NULL DEFAULT 'development', description TEXT)"
+        )
+
+        # Replay guard: reject if this plan was already applied.
+        if await is_applied_on_conn(raw_conn, plan_digest, dialect="postgres"):
+            raise FerrumMigrationError("Migration plan has already been applied. [FERR-M003]")
+
+        # Run transactional ops on the pinned connection.
+        for op_index, op in enumerate(tx_ops):
+            kind = op.get("kind", "unknown")
+            table = op.get("table", "")
+            label = f"{kind} {table}".rstrip()
+            print(f"[ferrum migrate] applying: {label}")
+            sql = _op_to_sql(op, dialect="postgres")
+            try:
+                await raw_conn.execute(sql)
+            except FerrumMigrationError:
+                raise
+            except Exception as exc:
+                raise migration_op_failure_from(
+                    migration_name=description,
+                    op_index=op_index,
+                    op=op,
+                    exc=exc,
+                ) from None
+
+        # Atomic ledger write — same transaction, same connection.
+        await record_applied_on_conn(
+            raw_conn,
+            plan_digest,
+            environment=env,
+            description=description,
+            dialect="postgres",
+        )
+
+    # Post-tx non-transactional phase (autocommit, ledger already written).
+    # If a post-tx op fails, the ledger says "applied" but the op is missing —
+    # documented partial-failure semantics. Re-running skips the migration.
+    for op in post_ops:
+        kind = op.get("kind", "unknown")
+        table = op.get("table", "")
+        label = f"{kind} {table}".rstrip()
+        print(f"[ferrum migrate] applying (post-tx): {label}")
+        sql = _op_to_sql(op, dialect="postgres")
+        try:
+            await driver.execute(sql)
+        except FerrumMigrationError:
+            raise
+        except Exception as exc:
+            raise FerrumMigrationError(
+                f"Post-transaction op failed after ledger commit ({kind} {table}): "
+                f"{type(exc).__name__}. The migration is recorded as applied; "
+                f"the failed op must be reconciled manually. [FERR-M001]"
+            ) from None
+
+    return MigrationResult(applied=True, ops_count=len(ops), dry_run=False)
+
+
+async def _apply_thin_parity(
+    conn: Connection,
+    ops: list[dict[str, Any]],
+    plan_digest: str,
+    *,
+    description: str,
+    env: str,
+) -> MigrationResult:
+    """Non-PostgreSQL backends: best-effort autocommit-per-op (thin parity).
+
+    No advisory lock, no transactional wrap, no atomic ledger. Matches the
+    pre-W1-C behavior for MySQL / SQLite / MSSQL.
+    """
     driver = conn._require_driver()
     dialect = conn.dialect
     for op in ops:
@@ -1232,12 +1533,34 @@ async def apply(
         sql = _op_to_sql(op, dialect=dialect)
         await driver.execute(sql)
 
-    if confirm and token is not None:
-        await record_applied(
-            conn,
-            plan_digest,
-            environment=env,
-            description=str(plan.get("name", "")),
-        )
+    await record_applied(
+        conn,
+        plan_digest,
+        environment=env,
+        description=description,
+    )
 
     return MigrationResult(applied=True, ops_count=len(ops), dry_run=False)
+
+
+def migration_op_failure_from(
+    *,
+    migration_name: str,
+    op_index: int,
+    op: dict[str, Any],
+    exc: Exception,
+) -> FerrumMigrationError:
+    """Build a FerrumMigrationError for a failed transactional op (W1-C).
+
+    Delegates to errors.migration_op_failure for the sanitized message.
+    The transaction will be rolled back by the ``async with`` exit.
+    """
+    from ferrum.errors import migration_op_failure
+
+    return migration_op_failure(
+        action="apply",
+        migration_name=migration_name,
+        op_index=op_index,
+        op=op,
+        exc=exc,
+    )

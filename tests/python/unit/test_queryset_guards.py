@@ -231,3 +231,86 @@ class TestDangerApiGuards:
             )
         except (FerrumConfigError, NotImplementedError):
             pass  # Expected: extension not built or conn is None
+
+    # ------------------------------------------------------------------
+    # W1-A: Write-scope invariants — slice/order/limit must never widen
+    # UPDATE/DELETE scope
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_sliced_delete_with_limit_raises(self) -> None:
+        """LIMIT on a queryset must block delete() — it would be silently ignored."""
+        from ferrum.errors import FerrumCompileError
+
+        qs = QuerySet(FakeUser).filter(id=1).limit(10)
+        with pytest.raises(FerrumCompileError, match="sliced"):
+            await qs.delete(None)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_sliced_delete_with_offset_raises(self) -> None:
+        """OFFSET on a queryset must block delete() — it would be silently ignored."""
+        from ferrum.errors import FerrumCompileError
+
+        qs = QuerySet(FakeUser).filter(id=1).offset(5)
+        with pytest.raises(FerrumCompileError, match="sliced"):
+            await qs.delete(None)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_sliced_update_with_limit_raises(self) -> None:
+        """LIMIT on a queryset must block update() — it would be silently ignored."""
+        from ferrum.errors import FerrumCompileError
+
+        qs = QuerySet(FakeUser).filter(id=1).limit(10)
+        with pytest.raises(FerrumCompileError, match="sliced"):
+            await qs.update(None, email="x@example.com")  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_sliced_update_with_offset_raises(self) -> None:
+        """OFFSET on a queryset must block update() — it would be silently ignored."""
+        from ferrum.errors import FerrumCompileError
+
+        qs = QuerySet(FakeUser).filter(id=1).offset(5)
+        with pytest.raises(FerrumCompileError, match="sliced"):
+            await qs.update(None, email="x@example.com")  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_order_by_does_not_widen_delete_scope(self) -> None:
+        """order_by is cleared in _build_delete_ir but _check_write_scope still
+        permits it — the invariant is that the DELETE IR carries no ORDER BY.
+        The guard fires only for slice/join/ranking, not for order_by alone,
+        because order_by is stripped from the DELETE IR and cannot widen scope."""
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        qs = QuerySet(FakeUser).filter(id=1).order_by("-id")
+        delete_ir = qs._build_delete_ir()
+        # The DELETE IR must not carry order_by — it is stripped.
+        assert delete_ir["order_by"] == []
+        assert delete_ir["limit"] is None
+        assert delete_ir["offset"] is None
+
+    @pytest.mark.asyncio
+    async def test_order_by_does_not_widen_update_scope(self) -> None:
+        """order_by is cleared in _build_update_ir — it cannot widen UPDATE scope."""
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        qs = QuerySet(FakeUser).filter(id=1).order_by("-id")
+        update_ir = qs._build_update_ir({"email": "x@example.com"})
+        assert update_ir["order_by"] == []
+        assert update_ir["limit"] is None
+        assert update_ir["offset"] is None
+
+    @pytest.mark.asyncio
+    async def test_slice_shorthand_delete_raises(self) -> None:
+        """``qs[a:b]`` slice shorthand must also block delete()."""
+        from ferrum.errors import FerrumCompileError
+
+        qs = QuerySet(FakeUser).filter(id=1)[0:10]
+        with pytest.raises(FerrumCompileError, match="sliced"):
+            await qs.delete(None)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_slice_shorthand_update_raises(self) -> None:
+        """``qs[a:b]`` slice shorthand must also block update()."""
+        from ferrum.errors import FerrumCompileError
+
+        qs = QuerySet(FakeUser).filter(id=1)[5:10]
+        with pytest.raises(FerrumCompileError, match="sliced"):
+            await qs.update(None, email="x@example.com")  # type: ignore[arg-type]

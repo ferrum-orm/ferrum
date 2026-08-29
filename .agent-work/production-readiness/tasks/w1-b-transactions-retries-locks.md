@@ -1,8 +1,8 @@
 ---
 task_id: w1-b-transactions-retries-locks
 wave: wave-1
-owner: unassigned
-status: tasked
+owner: production-readiness-executor
+status: ready
 run_id: null
 shared_path_lease: null
 dependencies:
@@ -11,6 +11,8 @@ dependencies:
   - w1-a-query-correctness
 owned_paths:
   - python/ferrum/runtime.py
+  - python/ferrum/connection.py
+  - python/ferrum/queryset.py
   - tests/python/unit/test_runtime.py
   - tests/python/unit/test_transactions.py
   - tests/python/integration/test_transactions.py

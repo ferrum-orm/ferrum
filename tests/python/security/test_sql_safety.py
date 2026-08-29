@@ -367,3 +367,150 @@ class TestInstanceWriteFormsSafety:
         assert dispatched, "instance write must dispatch Tier A hook payloads"
         for payload in dispatched:
             assert canary not in str(payload)
+
+
+# ---------------------------------------------------------------------------
+# W1-A: Malformed input fuzz — fields, operators, sorts fail before SQL
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedInputFuzz:
+    """Fuzz of malformed fields/operators/sorts must fail before SQL emission.
+
+    These tests verify the Stage-0 Python gate and the Rust compile gate both
+    reject malformed input without producing any SQL text. The invariants:
+
+    - Unknown fields raise ``FerrumCompileError`` at ``filter()`` or ``_build_ir()``.
+    - Unsupported operators raise ``FerrumCompileError`` at ``_build_ir()``.
+    - Invalid sort directions raise ``FerrumCompileError`` at ``_build_ir()``.
+    - No SQL text is ever produced for rejected input.
+    """
+
+    @pytest.mark.parametrize(
+        "bad_field",
+        [
+            "evil_field",
+            "id; DROP TABLE users--",
+            "id' OR '1'='1",
+            "id UNION SELECT 1",
+            "id__eq__gt",  # malformed double operator
+            "__id",  # leading dunder
+            "id__",  # trailing dunder
+            "id--",
+            "1id",
+            "id ",
+            " id",
+            "id\x00",  # null byte
+            "id\x1b",  # escape byte
+            "id\t",
+            "id\n",
+            "id\r",
+            "id\x00",
+            "id\x00test",
+        ],
+        ids=lambda v: repr(v),
+    )
+    def test_unknown_field_fuzz_fails_before_sql(self, bad_field: str) -> None:
+        """Unknown field names (including injection payloads) fail before SQL."""
+        qs = QuerySet(_User)
+        with pytest.raises(FerrumCompileError):
+            qs.filter(**{bad_field: "x"})._build_ir()
+
+    @pytest.mark.parametrize(
+        "bad_op",
+        [
+            "raw_sql",
+            "exec",
+            "execute",
+            "DROP",
+            "DROP TABLE",
+            "eq; DROP TABLE users--",
+            "' OR '1'='1",
+            "eq_to_sql",
+            "LIKE",
+            "GLOB",
+            "",
+            " ",
+            "eq\0",
+            "eq\x00",
+            "eq\n",
+        ],
+        ids=lambda v: repr(v),
+    )
+    def test_unsupported_operator_fuzz_fails_before_sql(self, bad_op: str) -> None:
+        """Unsupported operators (including injection payloads) fail before SQL."""
+        qs = QuerySet(_User)
+        cloned = qs._clone()
+        cloned._filters = [{"field": "id", "operator": bad_op, "value": 1}]
+        cloned._is_filtered = True
+        with pytest.raises(FerrumCompileError):
+            cloned._build_ir()
+
+    @pytest.mark.parametrize(
+        "bad_direction",
+        [
+            "DESC; DROP TABLE users;--",
+            "ASC; DROP TABLE users;--",
+            "sideways",
+            "up",
+            "down",
+            "DROP",
+            "",
+            " ",
+            "asc\0",
+            "desc; --",
+            "asc UNION SELECT 1",
+            "ASC ",
+            " ASC",
+        ],
+        ids=lambda v: repr(v),
+    )
+    def test_invalid_sort_direction_fuzz_fails_before_sql(self, bad_direction: str) -> None:
+        """Invalid sort directions (including injection payloads) fail before SQL."""
+        qs = QuerySet(_User)
+        cloned = qs._clone()
+        cloned._order_by = [{"field": "id", "direction": bad_direction}]
+        with pytest.raises(FerrumCompileError):
+            cloned._build_ir()
+
+    @pytest.mark.parametrize(
+        "bad_order_field",
+        [
+            "evil_field",
+            "id; DROP TABLE users--",
+            "id' OR '1'='1",
+            "id UNION SELECT 1",
+            "__id",
+            "id__",
+            "1id",
+            "id\x00",
+        ],
+        ids=lambda v: repr(v),
+    )
+    def test_unknown_order_by_field_fuzz_fails_before_sql(self, bad_order_field: str) -> None:
+        """Unknown order_by fields (including injection payloads) fail before SQL."""
+        qs = QuerySet(_User)
+        cloned = qs._clone()
+        cloned._order_by = [{"field": bad_order_field, "direction": "asc"}]
+        with pytest.raises(FerrumCompileError):
+            cloned._build_ir()
+
+    def test_compile_mock_not_called_on_rejection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When the Python Stage-0 gate rejects a field, the Rust compiler is never called."""
+        compile_mock = mock.MagicMock(name="_compile")
+        qs = QuerySet(_User)
+        monkeypatch.setattr(qs, "_compile", compile_mock)
+        with pytest.raises(FerrumCompileError):
+            qs.filter(injected_field="value")._build_ir()
+        compile_mock.assert_not_called()
+
+    def test_no_sql_text_produced_for_rejected_operator(self) -> None:
+        """A rejected operator must not produce any SQL text — verify by
+        bypassing filter() and injecting a bad operator directly, then
+        confirming _build_ir() raises before _compile() is reachable."""
+        qs = QuerySet(_User)
+        cloned = qs._clone()
+        cloned._filters = [{"field": "id", "operator": "raw_sql", "value": "1"}]
+        cloned._is_filtered = True
+        with pytest.raises(FerrumCompileError):
+            cloned._build_ir()

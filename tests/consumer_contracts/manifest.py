@@ -631,35 +631,28 @@ _TICKET_ANALYZER_ENTRIES: tuple[ParityEntry, ...] = (
                 "-- is explicitly altered with FORCE ROW LEVEL SECURITY."
             ),
         ),
-        classification=Classification.FERRUM_DEFECT,
+        classification=Classification.SUPPORTED,
         ferrum_reference=(
             "python/ferrum/migrations/orchestrator.py enable_rls op-to-SQL "
             "branch (EnableRLS operation in python/ferrum/migrations/"
-            "operations.py)"
+            "operations.py) — W1-C fix: force=True now emits ENABLE then FORCE"
         ),
         evidence=(
-            "Direct source read plus a live-PostgreSQL reproduction: "
-            "orchestrator.py's enable_rls branch emits only "
-            '"ALTER TABLE ... FORCE ROW LEVEL SECURITY" when force=True and '
-            'never emits "ALTER TABLE ... ENABLE ROW LEVEL SECURITY" in that '
-            "same branch. Postgres leaves relrowsecurity=false in that state, "
-            "so every policy on the table is a silent no-op regardless of who "
-            "connects — a complete, unannounced RLS bypass, not merely a "
-            "narrower owner-bypass gap. New contract test "
+            "W1-C resolved: orchestrator.py's enable_rls branch now emits "
+            'both "ALTER TABLE ... ENABLE ROW LEVEL SECURITY" and '
+            '"ALTER TABLE ... FORCE ROW LEVEL SECURITY" when force=True, '
+            "so Postgres sets both relrowsecurity=true and "
+            "relforcerowsecurity=true. Live-PostgreSQL contract test "
             "test_ticket_analyzer_contracts.py::"
-            "test_force_rls_without_enable_rls_grants_no_isolation_defect "
-            "(xfail, strict) reproduces this: a single EnableRLS(table, "
-            "force=True) op plus a team_isolation policy leaves two "
-            "different teams' rows both visible with zero app.team_id GUC "
-            "bound, where correct RLS would return zero rows."
+            "test_force_rls_alone_enables_and_forces_rls verifies both "
+            "pg_class flags and that a no-GUC query returns zero rows."
         ),
         notes=(
-            "Security-relevant: flagged for SecurityEngineer review per "
-            "AGENTS.md SS3 (migration-apply / RLS changes must not "
-            "self-clear). The safe workaround used by this suite's own "
-            "fixtures is to always call EnableRLS(table) once, then "
-            "separately EnableRLS(table, force=True) — never force=True "
-            "alone."
+            "Security-relevant: SecurityEngineer review required per "
+            "AGENTS.md §3 (migration-apply / RLS changes must not "
+            "self-clear). W1-C closed the FORCE-only emission defect; "
+            "the two-op workaround in this suite's fixtures is now "
+            "redundant but kept for clarity."
         ),
     ),
 )

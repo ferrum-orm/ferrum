@@ -363,3 +363,190 @@ class TestBuildIrAllowlistRejection:
         qs._order_by.append({"field": "id", "direction": "sideways"})
         with pytest.raises(FerrumCompileError):
             qs._build_ir()
+
+
+# ---------------------------------------------------------------------------
+# W1-A: null-equality compilation (filter(field=None) → IS NULL)
+# ---------------------------------------------------------------------------
+
+
+class TestNullEqualityCompilation:
+    """filter(field=None) / exclude(field=None) / filter(field__ne=None).
+
+    These compile to IS NULL / IS NOT NULL. SQL ``= NULL`` never matches;
+    ``IS NULL`` is the only correct form. Django-style ``__is_null=True/False``
+    continues to work unchanged.
+    """
+
+    def test_filter_none_emits_is_null(self) -> None:
+        qs = QuerySet(Article).filter(title=None)
+        ir = qs._build_ir()
+        flt = ir["predicate"]["filter"]
+        assert flt["operator"] == "is_null"
+        assert flt["value"] == {"type": "null"}
+
+    def test_filter_none_compiles_to_is_null_sql(self) -> None:
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        sql = QuerySet(Article).filter(title=None)._compile()["sql_text"]
+        assert '"title" IS NULL' in sql
+        assert "= $" not in sql
+
+    def test_filter_none_has_no_bound_params(self) -> None:
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        compiled = QuerySet(Article).filter(title=None)._compile()
+        assert compiled["bound_params"] == []
+
+    def test_filter_eq_none_emits_is_null(self) -> None:
+        qs = QuerySet(Article).filter(title__eq=None)
+        ir = qs._build_ir()
+        assert ir["predicate"]["filter"]["operator"] == "is_null"
+
+    def test_filter_ne_none_emits_is_not_null(self) -> None:
+        qs = QuerySet(Article).filter(title__ne=None)
+        ir = qs._build_ir()
+        flt = ir["predicate"]["filter"]
+        assert flt["operator"] == "is_not_null"
+        assert flt["value"] == {"type": "null"}
+
+    def test_filter_ne_none_compiles_to_is_not_null_sql(self) -> None:
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        sql = QuerySet(Article).filter(title__ne=None)._compile()["sql_text"]
+        assert '"title" IS NOT NULL' in sql
+
+    def test_exclude_none_emits_not_is_null(self) -> None:
+        """exclude(field=None) wraps the is_null leaf in NOT (...) via ~Q."""
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        sql = QuerySet(Article).exclude(title=None)._compile()["sql_text"]
+        assert 'NOT ("title" IS NULL)' in sql
+
+    def test_exclude_ne_none_emits_not_is_not_null(self) -> None:
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        sql = QuerySet(Article).exclude(title__ne=None)._compile()["sql_text"]
+        assert 'NOT ("title" IS NOT NULL)' in sql
+
+    def test_explicit_is_null_true_still_works(self) -> None:
+        qs = QuerySet(Article).filter(title__is_null=True)
+        ir = qs._build_ir()
+        assert ir["predicate"]["filter"]["operator"] == "is_null"
+
+    def test_explicit_is_null_false_still_works(self) -> None:
+        qs = QuerySet(Article).filter(title__is_null=False)
+        ir = qs._build_ir()
+        assert ir["predicate"]["filter"]["operator"] == "is_not_null"
+
+    def test_explicit_is_not_null_true_still_works(self) -> None:
+        qs = QuerySet(Article).filter(title__is_not_null=True)
+        ir = qs._build_ir()
+        assert ir["predicate"]["filter"]["operator"] == "is_not_null"
+
+    def test_explicit_is_not_null_false_still_works(self) -> None:
+        qs = QuerySet(Article).filter(title__is_not_null=False)
+        ir = qs._build_ir()
+        assert ir["predicate"]["filter"]["operator"] == "is_null"
+
+    def test_non_none_eq_still_uses_eq(self) -> None:
+        """A non-None value must NOT be rewritten to is_null."""
+        qs = QuerySet(Article).filter(title="hello")
+        ir = qs._build_ir()
+        flt = ir["predicate"]["filter"]
+        assert flt["operator"] == "eq"
+        assert flt["value"] == {"type": "text", "value": "hello"}
+
+    def test_non_none_ne_still_uses_ne(self) -> None:
+        qs = QuerySet(Article).filter(title__ne="hello")
+        ir = qs._build_ir()
+        flt = ir["predicate"]["filter"]
+        assert flt["operator"] == "ne"
+        assert flt["value"] == {"type": "text", "value": "hello"}
+
+    def test_gt_none_not_rewritten(self) -> None:
+        """Only eq/ne with None are rewritten; gt None stays as gt."""
+        qs = QuerySet(Article).filter(id__gt=None)
+        ir = qs._build_ir()
+        flt = ir["predicate"]["filter"]
+        assert flt["operator"] == "gt"
+        assert flt["value"] == {"type": "null"}
+
+
+# ---------------------------------------------------------------------------
+# W1-A: danger_delete_all emits valid SQL (no dangling WHERE)
+# ---------------------------------------------------------------------------
+
+
+class TestDangerDeleteAllSql:
+    def test_danger_delete_all_emits_delete_from_no_where(self) -> None:
+        """danger_delete_all IR compiles to ``DELETE FROM "table"`` with no WHERE."""
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        qs = QuerySet(Article)
+        delete_ir = qs._build_delete_ir()
+        delete_ir["operation"]["danger"] = True
+        compiled = qs._compile_ir(delete_ir, dialect="postgres")
+        sql = compiled["sql_text"]
+        assert sql.startswith('DELETE FROM "article"')
+        assert "WHERE" not in sql
+        assert compiled["bound_params"] == []
+
+    def test_danger_delete_all_no_trailing_where_clause(self) -> None:
+        """The SQL must not end with a dangling WHERE keyword."""
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        qs = QuerySet(Article)
+        delete_ir = qs._build_delete_ir()
+        delete_ir["operation"]["danger"] = True
+        sql = qs._compile_ir(delete_ir, dialect="postgres")["sql_text"]
+        assert not sql.rstrip().endswith("WHERE")
+        assert not sql.rstrip().endswith("WHERE ")
+
+
+# ---------------------------------------------------------------------------
+# W1-A: Golden IR-to-SQL contract tests
+# ---------------------------------------------------------------------------
+
+
+class TestGoldenIrToSql:
+    """Golden SQL snapshots for create, filter, join, update, upsert, hydration paths."""
+
+    _SELECT_ALL = 'SELECT "id", "title", "published", "score" FROM "article"'
+
+    def test_select_all_golden(self) -> None:
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        sql = QuerySet(Article)._compile()["sql_text"]
+        assert sql == self._SELECT_ALL
+
+    def test_select_filter_eq_golden(self) -> None:
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        sql = QuerySet(Article).filter(title="x")._compile()["sql_text"]
+        assert sql == f'{self._SELECT_ALL} WHERE "title" = $1'
+
+    def test_select_filter_is_null_golden(self) -> None:
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        sql = QuerySet(Article).filter(title=None)._compile()["sql_text"]
+        assert sql == f'{self._SELECT_ALL} WHERE "title" IS NULL'
+
+    def test_select_order_by_limit_golden(self) -> None:
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        sql = QuerySet(Article).order_by("-id").limit(10)._compile()["sql_text"]
+        assert sql == (f'{self._SELECT_ALL} ORDER BY "id" DESC LIMIT $1')
+
+    def test_delete_filtered_golden(self) -> None:
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        qs = QuerySet(Article).filter(id=1)
+        sql = qs._compile_ir(qs._build_delete_ir(), dialect="postgres")["sql_text"]
+        assert sql == 'DELETE FROM "article" WHERE "id" = $1'
+
+    def test_danger_delete_all_golden(self) -> None:
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        qs = QuerySet(Article)
+        ir = qs._build_delete_ir()
+        ir["operation"]["danger"] = True
+        sql = qs._compile_ir(ir, dialect="postgres")["sql_text"]
+        assert sql == 'DELETE FROM "article"'
+
+    def test_update_filtered_golden(self) -> None:
+        pytest.importorskip("ferrum._native", reason="Rust extension not built")
+        qs = QuerySet(Article).filter(id=1)
+        ir = qs._build_update_ir({"title": "new"})
+        sql = qs._compile_ir(ir, dialect="postgres")["sql_text"]
+        assert sql == (
+            'UPDATE "article" SET "title" = $1 WHERE "id" = $2 '
+            'RETURNING "id", "title", "published", "score"'
+        )

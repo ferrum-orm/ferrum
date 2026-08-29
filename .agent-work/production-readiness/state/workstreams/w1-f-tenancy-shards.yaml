@@ -1,13 +1,13 @@
 version: 1
 task_id: w1-f-tenancy-shards
-owner: unassigned
-status: tasked
-phase: tasks
+owner: production-readiness-executor
+status: ready
+phase: ready
 run_id: null
-base_revision: 768ec1f3013f6d0eccd7c8b590ba36b54b12d23e
-dependencies_checked: false
+base_revision: 02d585513980ae89dbd6474196619a82faac460d
+dependencies_checked: true
 owned_paths_checked: true
-shared_path_lease: null
+shared_path_lease: w1-f-shared-20260829T100000Z
 spec_complete: true
 plan_complete: true
 tasks_complete: true
@@ -37,5 +37,5 @@ artifacts:
   code_review: null
 changed_paths: []
 blockers: []
-next_action: wait for w1-e-pool-lifecycle verified; then coordinator grants __init__.py lease and marks ready
-updated_at: 2026-08-21T09:35:00Z
+next_action: ready for executor dispatch — W1-E complete; __init__.py lease granted
+updated_at: 2026-08-29T10:00:00Z

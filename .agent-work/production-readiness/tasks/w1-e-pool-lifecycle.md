@@ -1,9 +1,9 @@
 ---
 task_id: w1-e-pool-lifecycle
 wave: wave-1
-owner: unassigned
-status: tasked
-run_id: null
+owner: production-readiness-executor
+status: in_progress
+run_id: 20260829T080749Z
 shared_path_lease: null
 dependencies:
   - w1-d-error-taxonomy

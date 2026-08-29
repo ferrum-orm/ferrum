@@ -18,6 +18,8 @@ import hashlib
 import json
 import os
 import pathlib
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -40,10 +42,30 @@ pytestmark = pytest.mark.security
 # ---------------------------------------------------------------------------
 
 
+class _FakeRawConn:
+    """Minimal fake asyncpg connection for transactional apply tests (W1-C)."""
+
+    def __init__(self) -> None:
+        self.execute = AsyncMock(return_value=None)
+        self.fetchrow = AsyncMock(return_value=None)  # ledger check = not applied
+        self.fetch = AsyncMock(return_value=[])
+
+    @asynccontextmanager
+    async def transaction(self, **kwargs: object) -> AsyncIterator[None]:
+        yield None
+
+
 def _make_conn() -> MagicMock:
-    """Return a mock connection whose driver.execute is an AsyncMock."""
+    """Return a mock connection supporting conn.acquire() for transactional apply."""
     conn = MagicMock()
     conn.dialect = "postgres"
+    raw = _FakeRawConn()
+
+    @asynccontextmanager
+    async def _acquire() -> AsyncIterator[_FakeRawConn]:
+        yield raw
+
+    conn.acquire = _acquire
     pool = AsyncMock()
     conn._require_driver.return_value = pool
     return conn
@@ -370,21 +392,20 @@ class TestMIG6TokenReplay:
         """MIG-6: Re-using a confirmation token after a successful apply is rejected.
 
         The ledger replay guard must fire before any second mutation attempt.
+        W1-C: the replay guard now runs inside the advisory-locked transaction
+        via ``is_applied_on_conn`` on the pinned raw connection.
         """
-        pool = AsyncMock()
-        pool.execute = AsyncMock(return_value=None)
         conn = _make_conn()
-        conn._require_driver.return_value = pool
         plan = _plan_json(_create_table_ops())
         token = _confirmation_token(plan)
 
         with (
             patch(
-                "ferrum.migrations.orchestrator.is_applied",
+                "ferrum.migrations.orchestrator.is_applied_on_conn",
                 new_callable=AsyncMock,
             ) as mock_is_applied,
             patch(
-                "ferrum.migrations.orchestrator.record_applied",
+                "ferrum.migrations.orchestrator.record_applied_on_conn",
                 new_callable=AsyncMock,
             ) as mock_record,
         ):
@@ -396,8 +417,6 @@ class TestMIG6TokenReplay:
             mock_is_applied.return_value = True
             with pytest.raises(FerrumMigrationError, match="already been applied"):
                 await apply(conn, plan, dry_run=False, confirm=True, token=token)
-
-        pool.execute.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -462,10 +481,17 @@ class TestMIG8TokenInjectionPath:
         monkeypatch.setenv("FERRUM_MIGRATION_TOKEN", token)
         monkeypatch.setenv("FERRUM_DATABASE_URL", "postgresql://ferrum:changeme@127.0.0.1/db")
 
+        raw = _FakeRawConn()
         pool = AsyncMock()
-        pool.execute = AsyncMock(return_value=None)
         mock_conn = MagicMock()
+        mock_conn.dialect = "postgres"
         mock_conn._require_driver.return_value = pool
+
+        @asynccontextmanager
+        async def _acquire() -> AsyncIterator[_FakeRawConn]:
+            yield raw
+
+        mock_conn.acquire = _acquire
         mock_cm = MagicMock()
         mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
         mock_cm.__aexit__ = AsyncMock(return_value=False)
@@ -473,18 +499,18 @@ class TestMIG8TokenInjectionPath:
         with (
             patch("ferrum.connection.connect", return_value=mock_cm),
             patch(
-                "ferrum.migrations.orchestrator.is_applied",
+                "ferrum.migrations.orchestrator.is_applied_on_conn",
                 new_callable=AsyncMock,
                 return_value=False,
             ),
             patch(
-                "ferrum.migrations.orchestrator.record_applied",
+                "ferrum.migrations.orchestrator.record_applied_on_conn",
                 new_callable=AsyncMock,
             ),
         ):
             migrations_apply(plan_file=plan_path, confirm=False, dry_run=False)
 
-        pool.execute.assert_awaited()
+        raw.execute.assert_awaited()
 
 
 # ---------------------------------------------------------------------------

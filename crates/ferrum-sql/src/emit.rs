@@ -1229,9 +1229,15 @@ fn postgres_value_cast(
     placeholder: &str,
 ) -> String {
     use ferrum_core::ir::metadata::FieldType;
+    // Casts must match the DDL column type produced by
+    // `python/ferrum/models.py::_field_type_to_sql` exactly for PK columns
+    // (the `t.pk = v.pk` join predicate allows no implicit cast) and be
+    // assignment-compatible for non-PK columns. Mismatches such as
+    // `integer[] = bigint[]` or `uuid = text` fail with SQLSTATE 42883.
     let cast = match field_type {
-        FieldType::Int | FieldType::BigInt => "bigint",
-        FieldType::Float => "double precision",
+        FieldType::Int => "integer",
+        FieldType::BigInt => "bigint",
+        FieldType::Float => "real",
         FieldType::Decimal => "numeric",
         FieldType::Text | FieldType::Enum => "text",
         FieldType::Uuid => "uuid",
@@ -1245,8 +1251,8 @@ fn postgres_value_cast(
         FieldType::Vector => "vector",
         FieldType::ArrayText => "text[]",
         FieldType::ArrayUuid => "uuid[]",
-        FieldType::ArrayInt => "bigint[]",
-        FieldType::ArrayFloat => "double precision[]",
+        FieldType::ArrayInt => "integer[]",
+        FieldType::ArrayFloat => "float8[]",
     };
     format!("{placeholder}::{cast}")
 }

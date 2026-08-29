@@ -7,6 +7,10 @@ Wraps dialect-specific async drivers with:
 - ``FERRUM_DATABASE_URL`` environment variable auto-detection, with
   ``DATABASE_URL`` fallback and optional ``[ferrum].database_url_env`` override
   via ``ferrum.toml`` (DX blocker B-5).
+- Event-based shutdown: ``close()`` drains in-flight work via an
+  ``asyncio.Event`` (not busy polling) and reports a forced drain timeout
+  without leaking connections.
+- Typed ``PoolStats`` snapshot combining pool internals with Ferrum lifecycle.
 
 This module owns the async I/O path; no SQL building or Rust calls happen here.
 """
@@ -17,11 +21,12 @@ import asyncio
 import contextlib
 import re
 from collections.abc import AsyncGenerator, AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from ferrum.config import database_url_env_hint, resolve_database_url_for_cwd
 from ferrum.drivers import get_driver_for_dsn
+from ferrum.drivers.postgres import PoolStats
 from ferrum.drivers.protocol import CompiledQuery, DriverProtocol, QueryExecutorProtocol
 from ferrum.errors import (
     FerrumConfigError,
@@ -36,8 +41,10 @@ from ferrum.runtime import (
     RuntimeConfig,
     TimedQueryExecutor,
     _LifecycleGuard,
-    drain_inflight,
 )
+
+if TYPE_CHECKING:
+    from ssl import SSLContext
 
 # PostgreSQL transaction isolation levels accepted by ``Connection.transaction``.
 # Validated as a fixed allowlist so an unknown value fails with a clear Ferrum
@@ -91,6 +98,49 @@ def _redacted_dsn_info(dsn: str) -> dict[str, str]:
         return {"host": "unknown", "port": "unknown", "database": "unknown", "username": "unknown"}
 
 
+class _EventLifecycleGuard(_LifecycleGuard):
+    """Lifecycle guard with event-based drain (no busy polling).
+
+    When in-flight operations complete (``end()`` decrements to 0), the
+    ``_drained`` event is set so ``close()`` can ``await`` it instead of
+    polling ``inflight`` in a sleep loop. This replaces the busy-poll
+    ``drain_inflight()`` from ``runtime.py`` with a deterministic event wait.
+
+    Subclasses ``_LifecycleGuard`` (from ``runtime.py``, not owned by W1-E)
+    so ``ManagedChunkStream`` and ``TimedQueryExecutor`` — which call
+    ``begin()`` / ``end()`` on the lifecycle object — transparently use the
+    event-aware implementation.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._drained = asyncio.Event()
+        self._drained.set()  # Nothing in-flight initially → drained.
+
+    def begin(self) -> None:
+        super().begin()
+        self._drained.clear()
+
+    def end(self) -> None:
+        super().end()
+        if self._inflight == 0:
+            self._drained.set()
+
+    async def wait_drained(self, *, timeout: float) -> bool:
+        """Wait for all in-flight work to complete.
+
+        Returns ``True`` if drained within ``timeout``, ``False`` on timeout.
+        This is the event-based replacement for ``drain_inflight()``.
+        """
+        if self._inflight == 0:
+            return True
+        try:
+            await asyncio.wait_for(self._drained.wait(), timeout=timeout)
+            return True
+        except TimeoutError:
+            return False
+
+
 class Connection:
     """A managed async database connection (pool or single connection).
 
@@ -103,6 +153,28 @@ class Connection:
     argument is omitted: by default ``FERRUM_DATABASE_URL``, then
     ``DATABASE_URL``. Configure ``[ferrum].database_url_env`` in
     ``ferrum.toml`` to use a different variable name.
+
+    Pool configuration (all optional):
+
+    - ``min_size`` / ``max_size``: pool sizing bounds.
+    - ``acquire_timeout``: seconds to wait for a pooled connection (enforced
+      on every acquire path — convenience ``fetch``/``execute``, transactions,
+      streams, and explicit ``acquire()``).
+    - ``query_timeout``: per-query Python-side deadline (seconds).
+    - ``statement_timeout``: server-side ``statement_timeout`` (milliseconds).
+    - ``max_lifetime``: legacy alias for ``max_idle_lifetime``.
+    - ``max_idle_lifetime``: recycle idle connections after this many seconds.
+    - ``max_connection_age``: hard max age for connections (seconds).
+    - ``command_timeout``: per-command timeout (seconds, PostgreSQL only).
+    - ``statement_cache_size``: asyncpg prepared-statement cache size.
+    - ``ssl``: SSL configuration (``True``, mode string, ``SSLContext``, or
+      ``None``). PostgreSQL only.
+    - ``server_settings``: PostgreSQL GUC overrides (``dict[str, str]``).
+    - ``application_name``: PostgreSQL ``application_name`` (folded into
+      ``server_settings``).
+    - ``retry``: explicit :class:`RetryPolicy` (default: no retries).
+    - ``drain_timeout``: seconds to wait for in-flight work on ``close()``.
+    - ``echo``: SQLAlchemy-like console logging.
     """
 
     def __init__(
@@ -115,6 +187,13 @@ class Connection:
         query_timeout: float | None = None,
         statement_timeout: int | None = None,
         max_lifetime: float | None = None,
+        max_idle_lifetime: float | None = None,
+        max_connection_age: float | None = None,
+        command_timeout: float | None = None,
+        statement_cache_size: int | None = None,
+        ssl: bool | str | SSLContext | None = None,
+        server_settings: dict[str, str] | None = None,
+        application_name: str | None = None,
         retry: RetryPolicy | None = None,
         drain_timeout: float = 30.0,
         echo: bool | str = False,
@@ -130,6 +209,13 @@ class Connection:
         self._dsn = dsn
         self._min_size = min_size
         self._max_size = max_size
+        self._max_idle_lifetime = max_idle_lifetime
+        self._max_connection_age = max_connection_age
+        self._command_timeout = command_timeout
+        self._statement_cache_size = statement_cache_size
+        self._ssl = ssl
+        self._server_settings = server_settings
+        self._application_name = application_name
         self._runtime = RuntimeConfig(
             acquire_timeout=acquire_timeout,
             query_timeout=query_timeout,
@@ -138,7 +224,7 @@ class Connection:
             retry=retry,
             drain_timeout=drain_timeout,
         )
-        self._lifecycle = _LifecycleGuard()
+        self._lifecycle = _EventLifecycleGuard()
         self._driver: DriverProtocol | None = None
         # SQLAlchemy-like console echo: False | True/"sql" | "debug"/"verbose".
         self._echo: bool | str = echo
@@ -165,7 +251,8 @@ class Connection:
             raise FerrumConnectionError(
                 "Connection is not open. "
                 "Use 'async with ferrum.connect(...) as conn:' to open it first. "
-                "[FERR-E101]"
+                "[FERR-E101]",
+                category="config",
             )
         self._lifecycle.reject_if_closing()
         return TimedQueryExecutor(
@@ -176,15 +263,31 @@ class Connection:
 
     async def open(self) -> None:
         """Open the database connection (pool or single connection)."""
-        self._lifecycle = _LifecycleGuard()
-        self._driver = get_driver_for_dsn(
-            self._dsn,
-            min_size=self._min_size,
-            max_size=self._max_size,
-            acquire_timeout=self._runtime.acquire_timeout,
-            statement_timeout_ms=self._runtime.statement_timeout_ms,
-            max_lifetime=self._runtime.max_lifetime,
-        )
+        self._lifecycle = _EventLifecycleGuard()
+
+        # Determine which kwargs the driver accepts based on dialect.
+        # Non-PostgreSQL drivers have fixed __init__ signatures and do not
+        # accept the new pool config knobs (command_timeout, ssl, etc.).
+        scheme = urlparse(self._dsn).scheme.lower()
+        driver_kwargs: dict[str, Any] = {
+            "min_size": self._min_size,
+            "max_size": self._max_size,
+            "acquire_timeout": self._runtime.acquire_timeout,
+            "statement_timeout_ms": self._runtime.statement_timeout_ms,
+            "max_lifetime": self._runtime.max_lifetime,
+        }
+        if scheme in ("postgresql", "postgres"):
+            driver_kwargs.update(
+                max_idle_lifetime=self._max_idle_lifetime,
+                max_connection_age=self._max_connection_age,
+                command_timeout=self._command_timeout,
+                statement_cache_size=self._statement_cache_size,
+                ssl=self._ssl,
+                server_settings=self._server_settings,
+                application_name=self._application_name,
+            )
+
+        self._driver = get_driver_for_dsn(self._dsn, **driver_kwargs)
         try:
             await self._driver.open()
         except FerrumError:
@@ -196,16 +299,24 @@ class Connection:
             raise FerrumConnectionError(
                 f"Failed to connect at {diag['host']}:{diag['port']} "
                 f"(database={diag['database']}, username={diag['username']}): "
-                f"{type(exc).__name__} [FERR-E101]"
+                f"{type(exc).__name__} [FERR-E101]",
+                category="connection",
             ) from None
 
     async def close(self) -> None:
-        """Gracefully close the pool: stop accepting, drain in-flight, then close."""
+        """Gracefully close the pool: stop accepting, drain in-flight, then close.
+
+        Uses an ``asyncio.Event`` (via ``_EventLifecycleGuard.wait_drained``)
+        instead of busy polling. If in-flight work does not complete within
+        ``drain_timeout``, the pool is still closed (no connection leak) and a
+        ``FerrumTimeoutError`` is raised to report the forced drain timeout.
+        """
         if self._driver is None:
             return
         self._lifecycle.stop_accepting()
         await self._lifecycle.close_streams()
-        await drain_inflight(self._lifecycle, timeout=self._runtime.drain_timeout)
+        drained = await self._lifecycle.wait_drained(timeout=self._runtime.drain_timeout)
+        abandoned = self._lifecycle.inflight if not drained else 0
         try:
             await self._driver.close()
         except FerrumError:
@@ -214,6 +325,13 @@ class Connection:
             raise map_db_error(exc) from None
         finally:
             self._driver = None
+        if not drained:
+            raise FerrumTimeoutError(
+                f"Connection pool close timed out: {abandoned} in-flight operation(s) "
+                f"did not complete within {self._runtime.drain_timeout}s and may have "
+                "been abandoned. [FERR-E102]",
+                category="timeout",
+            )
 
     async def health_check(self, *, timeout: float | None = 5.0) -> bool:
         """Run a cheap liveness probe (``SELECT 1``).
@@ -231,13 +349,31 @@ class Connection:
                 await driver.fetchval("SELECT 1")
         except TimeoutError:
             raise FerrumTimeoutError(
-                f"Health check exceeded its {timeout}s deadline. [FERR-E102]"
+                f"Health check exceeded its {timeout}s deadline. [FERR-E102]",
+                category="timeout",
             ) from None
         except FerrumError:
             raise
         except Exception as exc:
             raise map_db_error(exc) from None
         return True
+
+    def pool_stats(self) -> PoolStats | None:
+        """Return a typed snapshot of pool state, or ``None`` if unavailable.
+
+        Combines driver-level pool internals with Ferrum lifecycle state
+        (in-flight operations, accepting/closing). Returns ``None`` when the
+        pool is not open or the driver does not expose ``pool_stats()``.
+        """
+        if self._driver is None:
+            return None
+        pool_stats_fn = getattr(self._driver, "pool_stats", None)
+        if pool_stats_fn is None or not callable(pool_stats_fn):
+            return None
+        return pool_stats_fn(
+            inflight=self._lifecycle.inflight,
+            accepting=self._lifecycle.accepting,
+        )
 
     @contextlib.asynccontextmanager
     async def acquire(self) -> AsyncGenerator[Any, None]:
@@ -246,7 +382,8 @@ class Connection:
             raise FerrumConnectionError(
                 "Connection is not open. "
                 "Use 'async with ferrum.connect(...) as conn:' to open it first. "
-                "[FERR-E101]"
+                "[FERR-E101]",
+                category="config",
             )
         self._lifecycle.reject_if_closing()
         self._lifecycle.begin()
@@ -271,7 +408,8 @@ class Connection:
             raise FerrumConnectionError(
                 "Connection is not open. "
                 "Use 'async with ferrum.connect(...) as conn:' to open it first. "
-                "[FERR-E101]"
+                "[FERR-E101]",
+                category="config",
             )
         driver = self._driver
         release_fn = getattr(driver, "release", None)
@@ -356,7 +494,8 @@ class Connection:
             raise FerrumConnectionError(
                 "Connection is not open. "
                 "Use 'async with ferrum.connect(...) as conn:' to open it first. "
-                "[FERR-E101]"
+                "[FERR-E101]",
+                category="config",
             )
         self._lifecycle.reject_if_closing()
         driver = self._driver
@@ -390,7 +529,9 @@ class Connection:
                     )
         except TimeoutError:
             raise FerrumTimeoutError(
-                f"Transaction exceeded its deadline of {deadline}s and was rolled back. [FERR-E102]"
+                "Transaction exceeded its deadline of "
+                f"{deadline}s and was rolled back. [FERR-E102]",
+                category="timeout",
             ) from None
 
     async def call_function(
@@ -473,7 +614,7 @@ class Transaction:
         self._bound = bound
         self._dialect = dialect
         self._runtime = runtime or RuntimeConfig()
-        self._lifecycle = lifecycle or _LifecycleGuard()
+        self._lifecycle = lifecycle or _EventLifecycleGuard()
         self._echo: bool | str = echo
 
     @property
@@ -609,7 +750,8 @@ def _open_compiled_stream(
         raise FerrumConnectionError(
             "Connection is not open. "
             "Use 'async with ferrum.connect(...) as conn:' to open it first. "
-            "[FERR-E101]"
+            "[FERR-E101]",
+            category="config",
         )
     open_stream = getattr(driver, "open_stream", None)
     if open_stream is None or not callable(open_stream):
@@ -634,6 +776,13 @@ async def connect(
     query_timeout: float | None = None,
     statement_timeout: int | None = None,
     max_lifetime: float | None = None,
+    max_idle_lifetime: float | None = None,
+    max_connection_age: float | None = None,
+    command_timeout: float | None = None,
+    statement_cache_size: int | None = None,
+    ssl: bool | str | SSLContext | None = None,
+    server_settings: dict[str, str] | None = None,
+    application_name: str | None = None,
     retry: RetryPolicy | None = None,
     drain_timeout: float = 30.0,
     echo: bool | str = False,
@@ -647,10 +796,19 @@ async def connect(
 
     Production runtime options (all optional):
 
-    - ``acquire_timeout``: seconds to wait for a pooled connection.
+    - ``acquire_timeout``: seconds to wait for a pooled connection (enforced
+      on every acquire path).
     - ``query_timeout``: per-query Python-side deadline (seconds).
     - ``statement_timeout``: server-side ``statement_timeout`` (milliseconds).
-    - ``max_lifetime``: recycle idle connections after this many seconds.
+    - ``max_lifetime``: legacy alias for ``max_idle_lifetime``.
+    - ``max_idle_lifetime``: recycle idle connections after this many seconds.
+    - ``max_connection_age``: hard max age for connections (seconds).
+    - ``command_timeout``: per-command timeout (seconds, PostgreSQL only).
+    - ``statement_cache_size``: asyncpg prepared-statement cache size.
+    - ``ssl``: SSL configuration (``True``, mode string, ``SSLContext``, or
+      ``None``). PostgreSQL only.
+    - ``server_settings``: PostgreSQL GUC overrides (``dict[str, str]``).
+    - ``application_name``: PostgreSQL ``application_name``.
     - ``retry``: explicit :class:`RetryPolicy` (default: no retries).
     - ``drain_timeout``: seconds to wait for in-flight work on ``close()``.
     - ``echo``: SQLAlchemy-like console logging — ``True``/``"sql"`` prints
@@ -666,6 +824,13 @@ async def connect(
         query_timeout=query_timeout,
         statement_timeout=statement_timeout,
         max_lifetime=max_lifetime,
+        max_idle_lifetime=max_idle_lifetime,
+        max_connection_age=max_connection_age,
+        command_timeout=command_timeout,
+        statement_cache_size=statement_cache_size,
+        ssl=ssl,
+        server_settings=server_settings,
+        application_name=application_name,
         retry=retry,
         drain_timeout=drain_timeout,
         echo=echo,

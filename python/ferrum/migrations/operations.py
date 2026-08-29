@@ -173,8 +173,10 @@ class DropColumn(Operation):
 class AlterColumn(Operation):
     """Alter an existing column (type, nullability, or default).
 
-    Each attribute is optional; at least one must be set. Type narrowing and
-    ``SET NOT NULL`` on a populated column are classified destructive.
+    Each attribute is optional; at least one must be set. Type narrowing
+    (``sql_type`` set) and ``SET NOT NULL`` on a populated column are both
+    classified destructive — a failed apply can leave data inaccessible or
+    require a table rewrite that fails on existing rows.
     """
 
     def __init__(
@@ -212,7 +214,9 @@ class AlterColumn(Operation):
 
     @property
     def classification(self) -> str:
-        if self.not_null is True:
+        # W1-C: type narrowing and SET NOT NULL both require destructive
+        # confirmation. DROP NOT NULL / SET DEFAULT / DROP DEFAULT are safe.
+        if self.not_null is True or self.sql_type is not None:
             return "destructive"
         return "safe"
 
@@ -260,6 +264,7 @@ class AddIndex(Operation):
         using: str = "btree",
         where: str | None = None,
         opclasses: list[str] | None = None,
+        concurrently: bool = False,
     ) -> None:
         self.table_name = table_name
         self.index_name = index_name
@@ -268,6 +273,8 @@ class AddIndex(Operation):
         self.using = using
         self.where = where
         self.opclasses = list(opclasses) if opclasses is not None else None
+        # W1-C: CREATE INDEX CONCURRENTLY cannot run inside a transaction block.
+        self.concurrently = concurrently
 
     def to_op_dict(self) -> dict[str, Any]:
         op: dict[str, Any] = {
@@ -282,14 +289,21 @@ class AddIndex(Operation):
             op["where"] = self.where
         if self.opclasses is not None:
             op["opclasses"] = list(self.opclasses)
+        if self.concurrently:
+            op["concurrently"] = True
         return op
 
     @property
     def classification(self) -> str:
+        # W1-C: CREATE INDEX CONCURRENTLY is non-transactional (cannot run
+        # inside a transaction block). A plain CREATE INDEX is transactional.
+        if self.concurrently:
+            return "non_transactional"
         return "safe"
 
     def __repr__(self) -> str:
         extra = ", unique=True" if self.unique else ""
+        extra += ", concurrently=True" if self.concurrently else ""
         return f"AddIndex({self.table_name!r}, {self.index_name!r}, {self.columns!r}{extra})"
 
 

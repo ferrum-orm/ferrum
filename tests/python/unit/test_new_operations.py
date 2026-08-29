@@ -130,10 +130,14 @@ class TestEnableRLS:
         assert "FORCE" not in sql
 
     def test_sql_emission_force(self) -> None:
+        """W1-C: force=True emits ENABLE then FORCE so relrowsecurity is on."""
         op = EnableRLS("tickets", force=True)
         sql = _op_to_sql(op.to_op_dict())
+        assert "ENABLE ROW LEVEL SECURITY" in sql
         assert "FORCE ROW LEVEL SECURITY" in sql
         assert '"tickets"' in sql
+        # ENABLE must come before FORCE (order matters: relrowsecurity then relforcerowsecurity).
+        assert sql.index("ENABLE") < sql.index("FORCE")
 
 
 # ---------------------------------------------------------------------------

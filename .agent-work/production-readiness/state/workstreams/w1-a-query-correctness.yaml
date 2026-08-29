@@ -1,19 +1,19 @@
 version: 1
 task_id: w1-a-query-correctness
 owner: production-readiness-executor
-status: in_progress
-phase: implement
-run_id: 20260821T093501Z
-base_revision: 768ec1f3013f6d0eccd7c8b590ba36b54b12d23e
+status: complete
+phase: complete
+run_id: 20260829T080749Z
+base_revision: 02d585513980ae89dbd6474196619a82faac460d
 dependencies_checked: true
 owned_paths_checked: true
 shared_path_lease: null
 spec_complete: true
 plan_complete: true
 tasks_complete: true
-implementation_complete: false
-executor_validation: pending
-independent_verification: pending
+implementation_complete: true
+executor_validation: passed
+independent_verification: passed
 security_triage_complete: true
 security_surfaces:
   sql_compilation: true
@@ -22,20 +22,28 @@ security_surfaces:
   auth_secrets: false
   rls_admin_gucs: false
   schema_selection: false
-security_review: required
+security_review: approved
 security_review_justification: SQL identifier/operator emission and write-scope invariants are security-gated
 architecture_review: not_required
 product_review: not_required
-code_review: required
+code_review: approved
 artifacts:
   task_contract: .agent-work/production-readiness/tasks/w1-a-query-correctness.md
-  latest_log: null
-  latest_verification: null
+  latest_log: .agent-work/production-readiness/logs/w1-a-query-correctness/20260829T080749Z.md
+  latest_verification: .agent-work/production-readiness/verification/w1-a-query-correctness/20260829T080749Z.md
   architecture_review: null
-  security_review: null
+  security_review: .agent-work/production-readiness/reviews/w1-a-query-correctness/20260829T080749Z-security-engineer.md
   product_review: null
-  code_review: null
-changed_paths: []
+  code_review: .agent-work/production-readiness/reviews/w1-a-query-correctness/20260829T080749Z-code-reviewer.md
+changed_paths:
+  - python/ferrum/queryset.py
+  - crates/ferrum-sql/src/emit.rs
+  - tests/python/unit/test_queryset_ir.py
+  - tests/python/unit/test_queryset_guards.py
+  - tests/python/unit/test_pg_types.py
+  - tests/python/security/test_sql_safety.py
+  - tests/python/integration/test_crud.py
+  - tests/python/integration/test_bulk.py
 blockers: []
-next_action: implement query/write correctness within owned paths
-updated_at: 2026-08-21T09:35:00Z
+next_action: complete — all gates passed
+updated_at: 2026-08-29T10:00:00Z
