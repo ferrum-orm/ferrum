@@ -1,21 +1,12 @@
 version: 1
 goal: ferrum-production-readiness
 plan: .cursor/plans/ferrum-production-readiness_6b5f422d.plan.md
-updated_at: 2026-08-29T09:42:51Z
+updated_at: 2026-08-29T10:14:08Z
 updated_by: production-readiness-coordinator
 status: active
 current_wave: wave-2
-shared_path_leases:
-  w4-d-shared-20260829T093132Z:
-    lease_id: w4-d-shared-20260829T093132Z
-    workstream: w4-d-packaging-release
-    run_id: 20260829T093132Z
-    holder: production-readiness-executor
-    paths:
-      - .github/workflows/release.yml
-    acquired_at: 2026-08-29T09:31:32Z
-    expires_at: 2026-08-30T09:31:32Z
-ownership_checked_at: 2026-08-29T09:31:32Z
+shared_path_leases: {}
+ownership_checked_at: 2026-08-29T09:56:32Z
 shared_paths:
   - AGENTS.md
   - CLAUDE.md
@@ -99,17 +90,17 @@ workstreams:
   w1-d-error-taxonomy: complete
   w1-e-pool-lifecycle: complete
   w1-f-tenancy-shards: complete
-  w2-a-field-codecs: blocked
-  w2-b-query-expressiveness: blocked
+  w2-a-field-codecs: complete
+  w2-b-query-expressiveness: complete
   w2-c-relations-bulk: blocked
   w2-d-framework-integrations: complete
   w2-e-extension-lifecycle: complete
   w2-f-schema-drift-cli: complete
   w3-a-migration-graph: complete
-  w3-b-schema-shard-migrations: blocked
+  w3-b-schema-shard-migrations: complete
   w3-c-autodiff: blocked
   w4-a-observability: complete
-  w4-b-performance: blocked
+  w4-b-performance: complete
   w4-c-typing: complete
   w4-d-packaging-release: complete
   pilot-ticket-analyzer: blocked

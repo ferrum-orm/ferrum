@@ -278,6 +278,17 @@ class ConnectionRegistry:
         """
         return {name: conn.pool_stats() for name, conn in self._conns.items()}
 
+    def items(self) -> list[tuple[str, Connection]]:
+        """Return ``(name, Connection)`` pairs for every started shard, in registration order.
+
+        Additive helper (W3-B) for callers that need to iterate every shard's
+        open connection — e.g. building migration targets across all shards.
+        Raises nothing; returns an empty list before ``start()`` or after
+        ``close()``. The returned connections are the live pool handles; callers
+        must not close them individually.
+        """
+        return [(name, conn) for name, conn in self._conns.items()]
+
 
 class ShardRouter(Generic[ShardKeyT]):
     """Resolves a trusted shard key to an explicit Connection/Transaction.

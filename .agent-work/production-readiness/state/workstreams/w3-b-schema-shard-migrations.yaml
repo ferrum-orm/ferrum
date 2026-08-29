@@ -1,0 +1,45 @@
+version: 1
+task_id: w3-b-schema-shard-migrations
+owner: production-readiness-executor
+status: complete
+phase: complete
+run_id: 20260829T095632Z
+base_revision: 612f476c32fa7b1fbd38e4dc9f4c689d05b72191
+dependencies_checked: true
+owned_paths_checked: true
+shared_path_lease: null
+spec_complete: true
+plan_complete: true
+tasks_complete: true
+implementation_complete: true
+executor_validation: passed
+independent_verification: passed
+security_triage_complete: true
+security_surfaces:
+  sql_compilation: false
+  migration_apply: true
+  errors_redaction: false
+  auth_secrets: false
+  rls_admin_gucs: false
+  schema_selection: true
+security_review: approved
+security_review_justification: Cross-shard migration coordination and schema selection are security-gated
+architecture_review: approved
+product_review: not_required
+code_review: approved
+artifacts:
+  task_contract: .agent-work/production-readiness/tasks/w3-b-schema-shard-migrations.md
+  latest_log: .agent-work/production-readiness/logs/w3-b-schema-shard-migrations/20260829T095632Z.md
+  latest_verification: null
+  architecture_review: .agent-work/production-readiness/reviews/w3-b-schema-shard-migrations/20260829T095632Z-chief-architect.md
+  security_review: .agent-work/production-readiness/reviews/w3-b-schema-shard-migrations/20260829T095632Z-security-engineer.md
+  product_review: null
+  code_review: .agent-work/production-readiness/reviews/w3-b-schema-shard-migrations/20260829T095632Z-code-reviewer.md
+changed_paths:
+  - python/ferrum/routing.py
+  - python/ferrum/migrations/coordinator.py
+  - tests/python/unit/test_schema_shard_migrations.py
+  - tests/python/integration/test_schema_shard_migrations.py
+blockers: []
+next_action: independent verification (ChiefArchitect, SecurityEngineer, CodeReviewer gates)
+updated_at: 2026-08-29T10:45:00Z

@@ -1,13 +1,28 @@
-"""Model registry for resolving relationship ``to=`` targets at runtime."""
+"""Model registry for resolving relationship ``to=`` targets at runtime.
+
+Also hosts the codec factory registry (W2-A): codec kinds map to factory
+callables that construct a :class:`~ferrum.models.FieldCodec` from a
+:class:`~ferrum.models.CodecMeta` plus optional runtime context (key
+provider). The registry itself never stores key material or codec
+instances — only factory functions.
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ferrum.models import Model
+    from ferrum.models import FieldCodec, Model
 
 _REGISTRY: dict[str, type[Model]] = {}
+
+# Codec factory registry: maps codec kind → factory callable.
+# The factory signature is:
+#   factory(codec_meta: CodecMeta, *, key_provider: KeyProvider | None = None) -> FieldCodec
+# Factories are registered at import time by the models module. The registry
+# never stores key material, codec instances, or PII — only factory callables.
+_CODEC_FACTORIES: dict[str, Callable[..., Any]] = {}
 
 
 def register_model(model_cls: type[Model]) -> None:
@@ -53,3 +68,49 @@ def model_for_table(table_name: str) -> type[Model] | None:
         if cls.__ferrum_table__ == table_name:
             return cls
     return None
+
+
+# ---------------------------------------------------------------------------
+# Codec factory registry (W2-A)
+# ---------------------------------------------------------------------------
+
+
+def register_codec_factory(
+    kind: str,
+    factory: Callable[..., FieldCodec],
+) -> None:
+    """Register a codec factory for a codec kind.
+
+    The factory is called at query time (by W2-B) with a
+    :class:`~ferrum.models.CodecMeta` and optional ``key_provider`` to
+    produce a :class:`~ferrum.models.FieldCodec` instance. The factory
+    must not close over key material — it receives the key provider as
+    a parameter.
+    """
+    _CODEC_FACTORIES[kind] = factory
+
+
+def get_codec_factory(kind: str) -> Callable[..., FieldCodec]:
+    """Return the registered codec factory for a kind.
+
+    Raises a compile error when no factory is registered for the kind.
+    """
+    from ferrum.errors import FerrumCompileError
+
+    try:
+        return _CODEC_FACTORIES[kind]  # type: ignore[no-any-return]
+    except KeyError as exc:
+        raise FerrumCompileError(
+            f"Unknown codec kind {kind!r}. Register a factory with "
+            "ferrum.registry.register_codec_factory().",
+        ) from exc
+
+
+def all_codec_kinds() -> tuple[str, ...]:
+    """Return a snapshot of registered codec kinds."""
+    return tuple(_CODEC_FACTORIES.keys())
+
+
+def clear_codec_registry_for_tests() -> None:
+    """Test helper — clear all registered codec factories."""
+    _CODEC_FACTORIES.clear()

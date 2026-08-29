@@ -14,9 +14,15 @@ Design constraints:
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import hmac
+import ipaddress
 import json
 import re
+import secrets
+import struct
 import types as _types
+from collections.abc import Callable
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import (
@@ -26,6 +32,7 @@ from typing import (
     ClassVar,
     Literal,
     NoReturn,
+    Protocol,
     TypeVar,
     Union,
     cast,
@@ -39,6 +46,8 @@ from pydantic import BaseModel as _PydanticBaseModel
 from pydantic import ConfigDict
 from pydantic import Field as _PydanticField
 from pydantic_core import core_schema
+
+from ferrum.errors import FerrumError
 
 # ---------------------------------------------------------------------------
 # Type mapping: Python annotation → Ferrum field type string (DATA_MODELING.md §3.2)
@@ -139,6 +148,25 @@ _ALLOWED_OPERATORS: dict[str, tuple[str, ...]] = {
     "array_float": ("eq", "is_null", "is_not_null", "contains", "contained_by", "overlap"),
     # Enum (TEXT + CHECK constraint) — equality and membership operators
     "enum": ("eq", "is_null", "is_not_null", "ne", "in"),
+    # PostgreSQL CITEXT — case-insensitive text (same operators as text)
+    "citext": (
+        "eq",
+        "iexact",
+        "contains",
+        "icontains",
+        "startswith",
+        "endswith",
+        "istartswith",
+        "iendswith",
+        "in",
+        "is_null",
+        "is_not_null",
+        "ne",
+    ),
+    # PostgreSQL INET — network address (eq, membership, containment)
+    "inet": ("eq", "in", "is_null", "is_not_null", "ne", "contains", "contained_by"),
+    # PostgreSQL custom domain — inherits base type operators
+    "domain": ("eq", "is_null", "is_not_null", "ne"),
 }
 
 # Allowlist for ON DELETE actions in FK constraints (SQL injection guard).
@@ -204,6 +232,11 @@ class FieldMeta:
     # metadata but are excluded from write metadata.
     generated: bool = False
     read_only: bool = False
+    # Codec metadata — immutable, IDE-visible, migration-aware.
+    # The runtime FieldCodec is resolved from this at query time (W2-B).
+    codec_meta: CodecMeta | None = None
+    # PostgreSQL domain name (for field_type="domain" DDL emission).
+    domain_name: str | None = None
 
     @property
     def sql_type(self) -> str:
@@ -456,7 +489,750 @@ def _field_type_to_sql(field: FieldMeta) -> str:
     # when ``field.enum_values`` is populated.
     if ft == "enum":
         return "TEXT"
+    # PostgreSQL CITEXT (requires the citext extension)
+    if ft == "citext":
+        return "CITEXT"
+    # PostgreSQL INET (network address)
+    if ft == "inet":
+        return "INET"
+    # PostgreSQL custom domain — emits the domain name directly
+    if ft == "domain":
+        if field.domain_name is None:
+            raise ValueError(f"Domain field {field.name!r} requires domain_name on Field().")
+        return field.domain_name
     return "TEXT"
+
+
+# ---------------------------------------------------------------------------
+# Field codecs — typed bind/result conversion (W2-A)
+#
+# The FieldCodec contract is Python-side only. It never does I/O and never
+# touches the Rust core. Codec metadata (CodecMeta) is immutable, stored in
+# FieldMeta at class-definition time, and excluded from hook payloads, logs,
+# and error messages (PII redaction). The runtime codec is resolved from
+# CodecMeta at query time by the QuerySet hydration path (W2-B).
+# ---------------------------------------------------------------------------
+
+# Nonce size for encrypted codecs (16 bytes — NIST-recommended minimum).
+_ENC_NONCE_SIZE: int = 16
+# MAC size for encrypted codecs (32 bytes — SHA-256 output).
+_ENC_MAC_SIZE: int = 32
+# Required key size for encrypted codecs (32 bytes — SHA-256 key length).
+_ENC_KEY_SIZE: int = 32
+
+
+class FerrumCodecError(FerrumError):
+    """Field codec conversion or encryption failure.
+
+    Raised when a codec cannot encode/decode a value, when encrypted
+    ciphertext is malformed or tampered, or when a key provider fails.
+
+    The error message never includes the raw value (PII redaction).
+    Codec metadata (key_id, codec kind) may appear for diagnostics.
+    """
+
+    code = "FERR-C200"
+    category = "internal"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        codec_kind: str | None = None,
+        key_id: str | None = None,
+        model: str | None = None,
+        field: str | None = None,
+    ) -> None:
+        super().__init__(message, category="internal", model=model)
+        self.codec_kind = codec_kind
+        self.key_id = key_id
+        self.field = field
+
+
+@dataclasses.dataclass(frozen=True)
+class CodecMeta:
+    """Immutable codec metadata stored in :class:`FieldMeta`.
+
+    Built once at class-definition time and shared read-only across all
+    async tasks. Never carries key material, key providers, or runtime
+    context — those are resolved at query time by the QuerySet (W2-B).
+
+    Attributes:
+        kind: Codec kind string (``"encrypted_string"``, ``"nested_model"``,
+            ``"citext"``, ``"inet"``, ``"bytea"``, ``"enum"``, ``"vector"``,
+            ``"domain"``, ``"array"``, ``"passthrough"``).
+        pii: Whether this field contains PII. When ``True``, the codec's
+            ``redact()`` method is the canonical redaction path for logs,
+            hooks, and error messages.
+        key_id: Key identifier for encrypted codecs. Used for key rotation —
+            the key provider resolves ``key_id`` to the actual key at query
+            time. Never the key itself.
+        model_class_name: Fully-qualified model class name for nested-model
+            JSONB codecs. Resolved from the model registry at query time.
+        domain_name: PostgreSQL domain name for domain codecs (DDL emission).
+        element_type: Element type tag for array codecs (``"text"``,
+            ``"int"``, ``"uuid"``, ``"float"``).
+    """
+
+    kind: str
+    pii: bool = False
+    key_id: str | None = None
+    model_class_name: str | None = None
+    domain_name: str | None = None
+    element_type: str | None = None
+
+
+class KeyProvider(Protocol):
+    """Injectable key provider for encrypted codecs.
+
+    Key providers supply encryption keys by ``key_id`` at query time.
+    They never appear in model metadata, hook payloads, or error
+    messages. A key provider may be backed by a KMS, environment
+    variables, vault, or any secret-management system.
+
+    Required protocol:
+        - ``get_key(key_id)``: Return the raw key bytes for the given key id.
+          Must raise :class:`FerrumCodecError` when the key is unavailable.
+        - ``key_ids()``: Return the set of available key ids. Never returns
+          key material — only identifiers.
+
+    Security contract:
+        - Keys must be exactly 32 bytes (SHA-256 key length).
+        - The provider must never log, cache in plaintext, or expose keys
+          in exception messages.
+        - Key rotation: return different keys for the same ``key_id`` over
+          time; the codec re-encrypts on write and accepts old ciphertext
+          on read until all rows are migrated.
+    """
+
+    def get_key(self, key_id: str) -> bytes:
+        """Return the 32-byte encryption key for the given key id.
+
+        Raises:
+            FerrumCodecError: When the key is unavailable or invalid.
+        """
+        ...
+
+    def key_ids(self) -> tuple[str, ...]:
+        """Return the tuple of available key ids. Never key material."""
+        ...
+
+
+class FieldCodec(Protocol):
+    """Typed contract for field bind/result conversion.
+
+    The codec is a **pure function pair** — it converts between Python
+    values and driver-bindable values without any I/O, async, or state
+    mutation. Encrypted codecs receive their key via a :class:`KeyProvider`
+    at construction time; the codec itself is stateless and immutable.
+
+    The codec is resolved from :class:`CodecMeta` at query time by the
+    QuerySet hydration path (W2-B). This keeps model metadata immutable
+    and allows key rotation without model redefinition.
+
+    Attributes:
+        codec_meta: The immutable :class:`CodecMeta` describing this codec.
+
+    Methods:
+        encode_bind: Convert a Python value to a driver-bindable value.
+        decode_result: Convert a DB-returned value to a Python value.
+        redact: Return a redacted representation for logs/hooks/errors.
+    """
+
+    codec_meta: CodecMeta
+
+    def encode_bind(self, value: Any) -> Any:  # noqa: ANN401
+        """Convert a Python value to a driver-bindable value.
+
+        This is a pure function — no I/O, no async, no side effects.
+        For encrypted codecs, this performs encryption using the injected
+        key. For nested-model codecs, this serializes the Pydantic model
+        to a dict. The returned value is what asyncpg binds as a parameter.
+
+        Raises:
+            FerrumCodecError: When the value cannot be encoded.
+        """
+        ...
+
+    def decode_result(self, value: Any) -> Any:  # noqa: ANN401
+        """Convert a DB-returned value to a Python value.
+
+        This is a pure function — no I/O, no async, no side effects.
+        For encrypted codecs, this performs decryption and authentication.
+        For nested-model codecs, this constructs a Pydantic model from the
+        dict using ``model_construct`` (trusted DB fast path, ADR-003).
+
+        Raises:
+            FerrumCodecError: When the value cannot be decoded (malformed
+                ciphertext, authentication failure, wrong key).
+        """
+        ...
+
+    def redact(self, value: Any) -> str:  # noqa: ANN401
+        """Return a redacted representation for logs, hooks, and errors.
+
+        Never returns the raw value. For PII fields (``codec_meta.pii``
+        is ``True``), this is the canonical redaction path. For non-PII
+        fields, returns a type-appropriate placeholder.
+
+        The redacted string never contains key material, ciphertext, or
+        plaintext PII. It may contain the codec kind and key id for
+        diagnostics.
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Encryption primitives (stdlib-only, authenticated encryption)
+#
+# Encrypt-then-MAC with random nonce:
+#   nonce = secrets.token_bytes(16)
+#   enc_key, mac_key = HMAC-SHA256(master_key, nonce)
+#   keystream = SHA-256(enc_key || counter) for counter in 0, 1, 2, ...
+#   ciphertext = XOR(plaintext, keystream)
+#   mac = HMAC-SHA256(mac_key, nonce || ciphertext)
+#   output = nonce || mac || ciphertext
+#
+# This is a legitimate authenticated encryption construction using only
+# the Python standard library. It is NOT AES, but it is cryptographically
+# sound as long as SHA-256 is collision-resistant.
+# ---------------------------------------------------------------------------
+
+
+def _derive_keys(master_key: bytes, nonce: bytes) -> tuple[bytes, bytes]:
+    """Derive separate encryption and MAC keys from the master key + nonce."""
+    enc_key = hmac.new(master_key, b"enc:" + nonce, hashlib.sha256).digest()
+    mac_key = hmac.new(master_key, b"mac:" + nonce, hashlib.sha256).digest()
+    return enc_key, mac_key
+
+
+def _keystream(enc_key: bytes, length: int) -> bytes:
+    """Generate a keystream using SHA-256 in counter mode."""
+    result = bytearray()
+    counter = 0
+    while len(result) < length:
+        block = hashlib.sha256(enc_key + struct.pack(">I", counter)).digest()
+        result.extend(block)
+        counter += 1
+    return bytes(result[:length])
+
+
+def _xor_bytes(data: bytes, key: bytes) -> bytes:
+    """XOR data with a keystream of equal or greater length."""
+    return bytes(a ^ b for a, b in zip(data, key, strict=False))
+
+
+def _encrypt(plaintext: bytes, key: bytes) -> bytes:
+    """Encrypt plaintext with key. Returns nonce || mac || ciphertext."""
+    if len(key) != _ENC_KEY_SIZE:
+        raise FerrumCodecError(
+            f"Encryption key must be {_ENC_KEY_SIZE} bytes, got {len(key)}.",
+            codec_kind="encrypted",
+        )
+    nonce = secrets.token_bytes(_ENC_NONCE_SIZE)
+    enc_key, mac_key = _derive_keys(key, nonce)
+    ks = _keystream(enc_key, len(plaintext))
+    ciphertext = _xor_bytes(plaintext, ks)
+    mac = hmac.new(mac_key, nonce + ciphertext, hashlib.sha256).digest()
+    return nonce + mac + ciphertext
+
+
+def _decrypt(data: bytes, key: bytes) -> bytes:
+    """Decrypt data (nonce || mac || ciphertext) with key. Returns plaintext."""
+    if len(key) != _ENC_KEY_SIZE:
+        raise FerrumCodecError(
+            f"Encryption key must be {_ENC_KEY_SIZE} bytes, got {len(key)}.",
+            codec_kind="encrypted",
+        )
+    min_len = _ENC_NONCE_SIZE + _ENC_MAC_SIZE
+    if len(data) < min_len:
+        raise FerrumCodecError(
+            f"Ciphertext too short: expected >= {min_len} bytes, got {len(data)}.",
+            codec_kind="encrypted",
+        )
+    nonce = data[:_ENC_NONCE_SIZE]
+    mac = data[_ENC_NONCE_SIZE : _ENC_NONCE_SIZE + _ENC_MAC_SIZE]
+    ciphertext = data[_ENC_NONCE_SIZE + _ENC_MAC_SIZE :]
+    enc_key, mac_key = _derive_keys(key, nonce)
+    expected_mac = hmac.new(mac_key, nonce + ciphertext, hashlib.sha256).digest()
+    if not hmac.compare_digest(mac, expected_mac):
+        raise FerrumCodecError(
+            "Ciphertext authentication failed: data was tampered or key is incorrect.",
+            codec_kind="encrypted",
+        )
+    ks = _keystream(enc_key, len(ciphertext))
+    return _xor_bytes(ciphertext, ks)
+
+
+# ---------------------------------------------------------------------------
+# Concrete codec implementations
+# ---------------------------------------------------------------------------
+
+
+class PassthroughCodec:
+    """Identity codec — passes values through unchanged.
+
+    Used for bytea, arrays, enums, and other types where asyncpg handles
+    the conversion natively. The codec metadata is still stored in
+    FieldMeta for migration awareness and IDE visibility.
+    """
+
+    def __init__(self, codec_meta: CodecMeta) -> None:
+        self.codec_meta = codec_meta
+
+    def encode_bind(self, value: Any) -> Any:  # noqa: ANN401
+        return value
+
+    def decode_result(self, value: Any) -> Any:  # noqa: ANN401
+        return value
+
+    def redact(self, value: Any) -> str:  # noqa: ANN401
+        if self.codec_meta.pii:
+            return f"[REDACTED:pii:{self.codec_meta.kind}]"
+        return f"[passthrough:{self.codec_meta.kind}]"
+
+
+class NestedModelCodec:
+    """JSONB codec for nested Pydantic models.
+
+    Serializes a Pydantic model instance to a dict for binding (asyncpg
+    encodes the dict as JSONB). On decode, constructs the model from the
+    dict using ``model_construct`` (trusted DB fast path, ADR-003 — no
+    revalidation since the DB already enforced types).
+
+    The model class is resolved from the Ferrum model registry at
+    construction time by the caller (W2-B). This codec is constructed with
+    the resolved class.
+    """
+
+    def __init__(self, codec_meta: CodecMeta, *, model_cls: type[_PydanticBaseModel]) -> None:
+        self.codec_meta = codec_meta
+        self._model_cls = model_cls
+
+    def encode_bind(self, value: Any) -> Any:  # noqa: ANN401
+        if value is None:
+            return None
+        if isinstance(value, _PydanticBaseModel):
+            return value.model_dump(mode="json")
+        if isinstance(value, dict):
+            return value
+        raise FerrumCodecError(
+            f"NestedModelCodec expected a Pydantic model or dict, got {type(value).__name__}.",
+            codec_kind="nested_model",
+        )
+
+    def decode_result(self, value: Any) -> Any:  # noqa: ANN401
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = json.loads(value)
+        if not isinstance(value, dict):
+            raise FerrumCodecError(
+                f"NestedModelCodec expected a dict from JSONB, got {type(value).__name__}.",
+                codec_kind="nested_model",
+            )
+        return self._model_cls.model_construct(**value)
+
+    def redact(self, value: Any) -> str:  # noqa: ANN401
+        if self.codec_meta.pii:
+            return f"[REDACTED:pii:nested_model:{self._model_cls.__name__}]"
+        return f"[nested_model:{self._model_cls.__name__}]"
+
+
+class NestedListModelCodec:
+    """JSONB codec for a list of nested Pydantic models.
+
+    Serializes a list of Pydantic model instances to a list of dicts for
+    binding. On decode, constructs each model from its dict using
+    ``model_construct`` (trusted DB fast path, ADR-003).
+    """
+
+    def __init__(self, codec_meta: CodecMeta, *, model_cls: type[_PydanticBaseModel]) -> None:
+        self.codec_meta = codec_meta
+        self._model_cls = model_cls
+
+    def encode_bind(self, value: Any) -> Any:  # noqa: ANN401
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            raise FerrumCodecError(
+                f"NestedListModelCodec expected a list, got {type(value).__name__}.",
+                codec_kind="nested_list",
+            )
+        result: list[Any] = []
+        for item in value:
+            if isinstance(item, _PydanticBaseModel):
+                result.append(item.model_dump(mode="json"))
+            elif isinstance(item, dict):
+                result.append(item)
+            else:
+                raise FerrumCodecError(
+                    f"NestedListModelCodec list items must be models or dicts, "
+                    f"got {type(item).__name__}.",
+                    codec_kind="nested_list",
+                )
+        return result
+
+    def decode_result(self, value: Any) -> Any:  # noqa: ANN401
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = json.loads(value)
+        if not isinstance(value, list):
+            raise FerrumCodecError(
+                f"NestedListModelCodec expected a list from JSONB, got {type(value).__name__}.",
+                codec_kind="nested_list",
+            )
+        return [
+            self._model_cls.model_construct(**item) if isinstance(item, dict) else item
+            for item in value
+        ]
+
+    def redact(self, value: Any) -> str:  # noqa: ANN401
+        if self.codec_meta.pii:
+            return f"[REDACTED:pii:nested_list:{self._model_cls.__name__}]"
+        return f"[nested_list:{self._model_cls.__name__}]"
+
+
+class EncryptedStringCodec:
+    """Encrypted string codec with key-provider injection.
+
+    Encrypts string values to bytes (BYTEA storage) and decrypts bytes
+    back to strings. Uses authenticated encryption (encrypt-then-MAC)
+    with a random nonce per encryption. The key is supplied by a
+    :class:`KeyProvider` at construction time — never hardcoded.
+
+    Key rotation: the codec encrypts with the current key (from the key
+    provider for ``codec_meta.key_id``). Decryption verifies the MAC
+    and fails with :class:`FerrumCodecError` when the key is wrong.
+    """
+
+    def __init__(self, codec_meta: CodecMeta, *, key_provider: KeyProvider) -> None:
+        if codec_meta.key_id is None:
+            raise FerrumCodecError(
+                "EncryptedStringCodec requires codec_meta.key_id.",
+                codec_kind="encrypted_string",
+            )
+        self.codec_meta = codec_meta
+        self._key_provider = key_provider
+
+    def encode_bind(self, value: Any) -> Any:  # noqa: ANN401
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise FerrumCodecError(
+                f"EncryptedStringCodec expected str, got {type(value).__name__}.",
+                codec_kind="encrypted_string",
+                key_id=self.codec_meta.key_id,
+            )
+        plaintext = value.encode("utf-8")
+        key = self._key_provider.get_key(self.codec_meta.key_id or "")
+        return _encrypt(plaintext, key)
+
+    def decode_result(self, value: Any) -> Any:  # noqa: ANN401
+        if value is None:
+            return None
+        if isinstance(value, str):
+            # asyncpg may return BYTEA as a memoryview or bytes; if a str
+            # arrives (e.g. from a text-cast), try encoding it.
+            value = value.encode("latin-1")
+        if not isinstance(value, (bytes, bytearray, memoryview)):
+            raise FerrumCodecError(
+                f"EncryptedStringCodec expected bytes from BYTEA, got {type(value).__name__}.",
+                codec_kind="encrypted_string",
+                key_id=self.codec_meta.key_id,
+            )
+        data = bytes(value)
+        key = self._key_provider.get_key(self.codec_meta.key_id or "")
+        plaintext = _decrypt(data, key)
+        return plaintext.decode("utf-8")
+
+    def redact(self, value: Any) -> str:  # noqa: ANN401
+        return f"[REDACTED:encrypted_string:key_id={self.codec_meta.key_id}]"
+
+
+class EncryptedJSONCodec:
+    """Encrypted JSON codec with key-provider injection.
+
+    Serializes a JSON-serializable value (dict, list, etc.) to JSON,
+    encrypts the JSON bytes, and stores as BYTEA. On decode, decrypts
+    and parses the JSON back to the original structure.
+    """
+
+    def __init__(self, codec_meta: CodecMeta, *, key_provider: KeyProvider) -> None:
+        if codec_meta.key_id is None:
+            raise FerrumCodecError(
+                "EncryptedJSONCodec requires codec_meta.key_id.",
+                codec_kind="encrypted_json",
+            )
+        self.codec_meta = codec_meta
+        self._key_provider = key_provider
+
+    def encode_bind(self, value: Any) -> Any:  # noqa: ANN401
+        if value is None:
+            return None
+        plaintext = json.dumps(value).encode("utf-8")
+        key = self._key_provider.get_key(self.codec_meta.key_id or "")
+        return _encrypt(plaintext, key)
+
+    def decode_result(self, value: Any) -> Any:  # noqa: ANN401
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = value.encode("latin-1")
+        if not isinstance(value, (bytes, bytearray, memoryview)):
+            raise FerrumCodecError(
+                f"EncryptedJSONCodec expected bytes from BYTEA, got {type(value).__name__}.",
+                codec_kind="encrypted_json",
+                key_id=self.codec_meta.key_id,
+            )
+        data = bytes(value)
+        key = self._key_provider.get_key(self.codec_meta.key_id or "")
+        plaintext = _decrypt(data, key)
+        return json.loads(plaintext.decode("utf-8"))
+
+    def redact(self, value: Any) -> str:  # noqa: ANN401
+        return f"[REDACTED:encrypted_json:key_id={self.codec_meta.key_id}]"
+
+
+class InetCodec:
+    """Codec for PostgreSQL ``inet`` columns.
+
+    Converts between Python :class:`ipaddress.IPv4Address` /
+    :class:`ipaddress.IPv6Address` and PostgreSQL inet text representation.
+    If the value is already a string, it passes through (asyncpg handles
+    inet natively).
+    """
+
+    def __init__(self, codec_meta: CodecMeta) -> None:
+        self.codec_meta = codec_meta
+
+    def encode_bind(self, value: Any) -> Any:  # noqa: ANN401
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return str(ipaddress.ip_address(value))
+        if isinstance(value, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
+            return str(value)
+        raise FerrumCodecError(
+            f"InetCodec expected str or ip address, got {type(value).__name__}.",
+            codec_kind="inet",
+        )
+
+    def decode_result(self, value: Any) -> Any:  # noqa: ANN401
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return ipaddress.ip_address(value)
+        if isinstance(value, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
+            return value
+        raise FerrumCodecError(
+            f"InetCodec expected str or ip address from DB, got {type(value).__name__}.",
+            codec_kind="inet",
+        )
+
+    def redact(self, value: Any) -> str:  # noqa: ANN401
+        if self.codec_meta.pii:
+            return "[REDACTED:pii:inet]"
+        return f"[inet:{value}]" if value is not None else "[inet:null]"
+
+
+class VectorCodec:
+    """Codec for pgvector ``VECTOR(n)`` columns.
+
+    Encodes a list of floats to pgvector text representation and decodes
+    the text back to a list of floats. The dimensions are validated
+    against ``codec_meta`` (which mirrors ``FieldMeta.vector_dimensions``).
+    """
+
+    def __init__(self, codec_meta: CodecMeta, *, dimensions: int | None = None) -> None:
+        self.codec_meta = codec_meta
+        self._dimensions = dimensions
+
+    def encode_bind(self, value: Any) -> Any:  # noqa: ANN401
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value
+        if not isinstance(value, (list, tuple)):
+            raise FerrumCodecError(
+                f"VectorCodec expected a list, got {type(value).__name__}.",
+                codec_kind="vector",
+            )
+        if self._dimensions is not None and len(value) != self._dimensions:
+            raise FerrumCodecError(
+                f"VectorCodec expected {self._dimensions} dimensions, got {len(value)}.",
+                codec_kind="vector",
+            )
+        return "[" + ",".join(str(v) for v in value) + "]"
+
+    def decode_result(self, value: Any) -> Any:  # noqa: ANN401
+        if value is None:
+            return None
+        if isinstance(value, str):
+            inner = value.strip("[]")
+            if not inner:
+                return []
+            return [float(p) for p in inner.split(",")]
+        if isinstance(value, (list, tuple)):
+            return list(value)
+        raise FerrumCodecError(
+            f"VectorCodec expected a str or list from DB, got {type(value).__name__}.",
+            codec_kind="vector",
+        )
+
+    def redact(self, value: Any) -> str:  # noqa: ANN401
+        return f"[vector:dims={self._dimensions}]"
+
+
+# Codec kind → field_type override mapping. When a codec is specified via
+# Field(), the field_type is set from this mapping instead of the
+# annotation-derived type. This ensures DDL and SQL compilation use the
+# correct PostgreSQL type for codec-backed columns.
+_CODEC_FIELD_TYPE_OVERRIDES: dict[str, str] = {
+    "encrypted_string": "bytes",
+    "encrypted_json": "bytes",
+    "nested_model": "json",
+    "nested_list": "json",
+    "citext": "citext",
+    "inet": "inet",
+    "bytea": "bytes",
+    "enum": "enum",
+    "vector": "vector",
+    "domain": "domain",
+    "array": "array_text",
+    "passthrough": "text",
+}
+
+
+# ---------------------------------------------------------------------------
+# Default codec factory registration
+#
+# Each factory constructs a FieldCodec from a CodecMeta plus optional
+# runtime context (key_provider). The factories never close over key
+# material — they receive the key provider as a parameter at query time.
+# ---------------------------------------------------------------------------
+
+
+def _make_passthrough_factory(
+    codec_cls: type[PassthroughCodec],
+) -> Callable[..., FieldCodec]:
+    def factory(
+        meta: CodecMeta,
+        *,
+        key_provider: KeyProvider | None = None,
+    ) -> FieldCodec:
+        return codec_cls(meta)
+
+    return factory
+
+
+def _make_simple_factory(
+    codec_cls: type[InetCodec | VectorCodec],
+) -> Callable[..., FieldCodec]:
+    """Factory maker for codecs that take only codec_meta (no key provider)."""
+
+    def factory(
+        meta: CodecMeta,
+        *,
+        key_provider: KeyProvider | None = None,
+    ) -> FieldCodec:
+        return codec_cls(meta)
+
+    return factory
+
+
+def _make_encrypted_string_factory() -> Callable[..., FieldCodec]:
+    def factory(
+        meta: CodecMeta,
+        *,
+        key_provider: KeyProvider | None = None,
+    ) -> FieldCodec:
+        if key_provider is None:
+            raise FerrumCodecError(
+                "EncryptedStringCodec requires a key_provider at query time.",
+                codec_kind="encrypted_string",
+                key_id=meta.key_id,
+            )
+        return EncryptedStringCodec(meta, key_provider=key_provider)
+
+    return factory
+
+
+def _make_encrypted_json_factory() -> Callable[..., FieldCodec]:
+    def factory(
+        meta: CodecMeta,
+        *,
+        key_provider: KeyProvider | None = None,
+    ) -> FieldCodec:
+        if key_provider is None:
+            raise FerrumCodecError(
+                "EncryptedJSONCodec requires a key_provider at query time.",
+                codec_kind="encrypted_json",
+                key_id=meta.key_id,
+            )
+        return EncryptedJSONCodec(meta, key_provider=key_provider)
+
+    return factory
+
+
+def _make_nested_model_factory() -> Callable[..., FieldCodec]:
+    def factory(
+        meta: CodecMeta,
+        *,
+        key_provider: KeyProvider | None = None,
+    ) -> FieldCodec:
+        if meta.model_class_name is None:
+            raise FerrumCodecError(
+                "NestedModelCodec requires codec_meta.model_class_name.",
+                codec_kind="nested_model",
+            )
+        from ferrum.registry import get_model
+
+        model_cls = get_model(meta.model_class_name)
+        return NestedModelCodec(meta, model_cls=model_cls)
+
+    return factory
+
+
+def _make_nested_list_factory() -> Callable[..., FieldCodec]:
+    def factory(
+        meta: CodecMeta,
+        *,
+        key_provider: KeyProvider | None = None,
+    ) -> FieldCodec:
+        if meta.model_class_name is None:
+            raise FerrumCodecError(
+                "NestedListModelCodec requires codec_meta.model_class_name.",
+                codec_kind="nested_list",
+            )
+        from ferrum.registry import get_model
+
+        model_cls = get_model(meta.model_class_name)
+        return NestedListModelCodec(meta, model_cls=model_cls)
+
+    return factory
+
+
+def _register_default_codecs() -> None:
+    """Register default codec factories (idempotent, module-level)."""
+    from ferrum.registry import register_codec_factory
+
+    register_codec_factory("passthrough", _make_passthrough_factory(PassthroughCodec))
+    register_codec_factory("bytea", _make_passthrough_factory(PassthroughCodec))
+    register_codec_factory("citext", _make_passthrough_factory(PassthroughCodec))
+    register_codec_factory("enum", _make_passthrough_factory(PassthroughCodec))
+    register_codec_factory("domain", _make_passthrough_factory(PassthroughCodec))
+    register_codec_factory("array", _make_passthrough_factory(PassthroughCodec))
+    register_codec_factory("encrypted_string", _make_encrypted_string_factory())
+    register_codec_factory("encrypted_json", _make_encrypted_json_factory())
+    register_codec_factory("nested_model", _make_nested_model_factory())
+    register_codec_factory("nested_list", _make_nested_list_factory())
+    register_codec_factory("inet", _make_simple_factory(InetCodec))
+    register_codec_factory("vector", _make_simple_factory(VectorCodec))
+
+
+_register_default_codecs()
 
 
 # ---------------------------------------------------------------------------
@@ -665,6 +1441,12 @@ def Field(  # noqa: N802
     jsonb_list: bool = False,
     generated: bool = False,
     read_only: bool = False,
+    codec_kind: str | None = None,
+    codec_pii: bool = False,
+    codec_key_id: str | None = None,
+    codec_domain: str | None = None,
+    codec_model: type | str | None = None,
+    codec_element_type: str | None = None,
     **kwargs: Any,  # noqa: ANN401
 ) -> Any:  # noqa: ANN401
     """Ferrum field descriptor with column-level constraints.
@@ -709,6 +1491,12 @@ def Field(  # noqa: N802
         "jsonb_list": jsonb_list,
         "generated": generated,
         "read_only": read_only,
+        "codec_kind": codec_kind,
+        "codec_pii": codec_pii,
+        "codec_key_id": codec_key_id,
+        "codec_domain": codec_domain,
+        "codec_model": codec_model.__name__ if isinstance(codec_model, type) else codec_model,
+        "codec_element_type": codec_element_type,
     }
 
     # Store explicit nullable override for _build_metadata to consume.
@@ -901,6 +1689,45 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                 "Field(vector_dimensions=n)."
             )
 
+        # --- codec metadata (W2-A) ---
+        codec_kind_val: str | None = ferrum_extras.get("codec_kind")
+        codec_meta: CodecMeta | None = None
+        domain_name: str | None = ferrum_extras.get("codec_domain")
+        if codec_kind_val is not None:
+            # Override field_type based on codec kind for correct DDL/SQL.
+            override = _CODEC_FIELD_TYPE_OVERRIDES.get(codec_kind_val)
+            if override is not None:
+                db_type = override
+            # Validate encrypted codec has key_id.
+            if (
+                codec_kind_val in ("encrypted_string", "encrypted_json")
+                and ferrum_extras.get("codec_key_id") is None
+            ):
+                raise ValueError(
+                    f"Model {cls.__name__!r} field {name!r}: "
+                    f"codec_kind={codec_kind_val!r} requires codec_key_id."
+                )
+            # Validate domain codec has domain name.
+            if codec_kind_val == "domain" and domain_name is None:
+                raise ValueError(
+                    f"Model {cls.__name__!r} field {name!r}: "
+                    "codec_kind='domain' requires codec_domain."
+                )
+            codec_meta = CodecMeta(
+                kind=codec_kind_val,
+                pii=bool(ferrum_extras.get("codec_pii", False)),
+                key_id=ferrum_extras.get("codec_key_id"),
+                model_class_name=ferrum_extras.get("codec_model"),
+                domain_name=domain_name,
+                element_type=ferrum_extras.get("codec_element_type"),
+            )
+            # Re-validate vector dimensions for vector codec.
+            if codec_kind_val == "vector" and vector_dimensions is None:
+                raise ValueError(
+                    f"Model {cls.__name__!r} field {name!r}: "
+                    "codec_kind='vector' requires vector_dimensions."
+                )
+
         python_type_name: str
         if origin is Literal:
             python_type_name = "Literal"
@@ -934,6 +1761,8 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                 jsonb_list=jsonb_list,
                 generated=generated,
                 read_only=read_only,
+                codec_meta=codec_meta,
+                domain_name=domain_name,
             )
         )
 

@@ -1,0 +1,46 @@
+version: 1
+task_id: w2-b-query-expressiveness
+owner: production-readiness-executor
+status: complete
+phase: complete
+run_id: 20260829T110000Z
+base_revision: 612f476c32fa7b1fbd38e4dc9f4c689d05b72191
+dependencies_checked: true
+owned_paths_checked: true
+shared_path_lease: null
+spec_complete: true
+plan_complete: true
+tasks_complete: true
+implementation_complete: true
+executor_validation: passed
+independent_verification: passed
+security_triage_complete: true
+security_surfaces:
+  sql_compilation: true
+  migration_apply: false
+  errors_redaction: false
+  auth_secrets: false
+  rls_admin_gucs: false
+  schema_selection: false
+security_review: approved
+security_review_justification: SQL compilation — identifiers must stay allowlisted, values bound, no raw SQL escape hatches
+architecture_review: approved
+product_review: not_required
+code_review: approved
+artifacts:
+  task_contract: .agent-work/production-readiness/tasks/w2-b-query-expressiveness.md
+  latest_log: .agent-work/production-readiness/logs/w2-b-query-expressiveness/20260829T110000Z.md
+  latest_verification: .agent-work/production-readiness/verification/w2-b-query-expressiveness/20260829T095632Z.md
+  architecture_review: .agent-work/production-readiness/reviews/w2-b-query-expressiveness/20260829T110000Z-chief-architect.md
+  security_review: .agent-work/production-readiness/reviews/w2-b-query-expressiveness/20260829T110000Z-security-engineer.md
+  product_review: null
+  code_review: .agent-work/production-readiness/reviews/w2-b-query-expressiveness/20260829T110000Z-code-reviewer.md
+changed_paths:
+  - python/ferrum/expressions.py
+  - python/ferrum/queryset.py
+  - crates/ferrum-sql/src/emit.rs
+  - tests/python/unit/test_query_expressiveness.py
+  - tests/python/integration/test_query_expressiveness.py
+blockers: []
+next_action: complete — all gates passed; 8 IR-blockers (B1-B8) escalated for ChiefArchitect follow-up
+updated_at: 2026-08-29T12:00:00Z

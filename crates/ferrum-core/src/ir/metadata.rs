@@ -109,6 +109,12 @@ pub enum FieldType {
     ArrayFloat,
     /// Enum stored as TEXT with a CHECK constraint.
     Enum,
+    /// `PostgreSQL` CITEXT column (case-insensitive text, requires citext extension).
+    Citext,
+    /// `PostgreSQL` INET column (network address).
+    Inet,
+    /// `PostgreSQL` custom domain type (domain name stored in Python-side `FieldMeta`).
+    Domain,
 }
 
 impl ModelMetadata {

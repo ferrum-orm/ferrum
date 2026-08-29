@@ -39,7 +39,7 @@ from ferrum.errors import (
     map_db_error,
     map_native_error,
 )
-from ferrum.expressions import Q, args_to_q
+from ferrum.expressions import F, Q, Star, args_to_q, resolve_field_name
 
 if TYPE_CHECKING:
     from ferrum.connection import Connection, Transaction
@@ -68,6 +68,25 @@ AggregateFunction = Literal["count", "sum", "avg", "min", "max"]
 DateTruncGranularity = Literal["minute", "hour", "day", "week", "month", "quarter", "year"]
 HavingOperator = Literal["eq", "ne", "gt", "gte", "lt", "lte"]
 
+# ---------------------------------------------------------------------------
+# Query-plan safety guards (W2-B)
+#
+# These constants enforce deterministic limits that prevent accidental N+1
+# queries, unbounded materialization, and overly complex join plans.  They
+# are deliberately conservative; consumers with legitimate needs should
+# escalate to the coordinator for a review.
+# ---------------------------------------------------------------------------
+
+# Maximum number of relations in a single ``select_related()`` call chain.
+# Each relation adds a JOIN; more than this likely indicates an unbounded
+# traversal that should use ``prefetch_related()`` or explicit queries.
+_MAX_SELECT_RELATED_DEPTH: int = 5
+
+# Maximum total JOINs (``select_related`` + relation-filter) in one compiled
+# query.  Prevents accidental Cartesian-product explosions from deeply
+# nested relation-filter lookups combined with eager loading.
+_MAX_TOTAL_JOINS: int = 12
+
 
 @dataclass(frozen=True, slots=True)
 class Aggregate:
@@ -75,6 +94,14 @@ class Aggregate:
 
     Field and filter references are resolved through model metadata; this object
     cannot carry SQL fragments or output identifiers.
+
+    Accepts ``F`` expressions for typed field references and ``Star`` for
+    explicit ``COUNT(*)`` intent::
+
+        from ferrum.expressions import F, Star
+
+        qs.aggregate(conn, total=Aggregate.count(Star()))
+        qs.aggregate(conn, total=Aggregate.sum(F("amount")))
     """
 
     function: AggregateFunction
@@ -83,25 +110,32 @@ class Aggregate:
 
     @classmethod
     def count(
-        cls, field: str | None = None, *, filter: Q | dict[str, Any] | None = None
+        cls,
+        field: str | F | Star | None = None,
+        *,
+        filter: Q | dict[str, Any] | None = None,
     ) -> Aggregate:
+        if isinstance(field, Star):
+            field = None
+        elif isinstance(field, F):
+            field = field.name
         return cls("count", field, filter)
 
     @classmethod
-    def sum(cls, field: str, *, filter: Q | dict[str, Any] | None = None) -> Aggregate:
-        return cls("sum", field, filter)
+    def sum(cls, field: str | F, *, filter: Q | dict[str, Any] | None = None) -> Aggregate:
+        return cls("sum", resolve_field_name(field), filter)
 
     @classmethod
-    def avg(cls, field: str, *, filter: Q | dict[str, Any] | None = None) -> Aggregate:
-        return cls("avg", field, filter)
+    def avg(cls, field: str | F, *, filter: Q | dict[str, Any] | None = None) -> Aggregate:
+        return cls("avg", resolve_field_name(field), filter)
 
     @classmethod
-    def min(cls, field: str, *, filter: Q | dict[str, Any] | None = None) -> Aggregate:
-        return cls("min", field, filter)
+    def min(cls, field: str | F, *, filter: Q | dict[str, Any] | None = None) -> Aggregate:
+        return cls("min", resolve_field_name(field), filter)
 
     @classmethod
-    def max(cls, field: str, *, filter: Q | dict[str, Any] | None = None) -> Aggregate:
-        return cls("max", field, filter)
+    def max(cls, field: str | F, *, filter: Q | dict[str, Any] | None = None) -> Aggregate:
+        return cls("max", resolve_field_name(field), filter)
 
 
 # Maps QuerySet ``mode=`` kwargs to filter lookup operators and IR ``TextSearchMode`` tags.
@@ -810,11 +844,13 @@ class _QuerySetBase(Generic[_R]):
         msg = "QuerySet indices must be slices."
         raise TypeError(msg)
 
-    def order_by(self, *fields: str) -> Self:
+    def order_by(self, *fields: str | F) -> Self:
         """Set ORDER BY. Prefix field with '-' for DESC. Returns a new QuerySet."""
         qs = self._clone()
         for f in fields:
-            if f.startswith("-"):
+            if isinstance(f, F):
+                qs._order_by.append({"field": f.name, "direction": "asc"})
+            elif f.startswith("-"):
                 qs._order_by.append({"field": f[1:], "direction": "desc"})
             else:
                 qs._order_by.append({"field": f, "direction": "asc"})
@@ -832,7 +868,7 @@ class _QuerySetBase(Generic[_R]):
         qs._offset = count
         return qs
 
-    def group_by(self, *fields: str) -> Self:
+    def group_by(self, *fields: str | F) -> Self:
         """Add metadata-allowlisted fields to an aggregate GROUP BY."""
         metadata = self._get_metadata()
         if metadata is None:
@@ -844,6 +880,7 @@ class _QuerySetBase(Generic[_R]):
         qs = self._clone()
         used_labels = {group["label"] for group in qs._aggregate_groups}
         for field in fields:
+            field = resolve_field_name(field)
             if field not in field_names:
                 raise FerrumCompileError(
                     f"Unknown field {field!r} on model {metadata.model_name!r}.",
@@ -862,12 +899,13 @@ class _QuerySetBase(Generic[_R]):
 
     def date_trunc(
         self,
-        field: str,
+        field: str | F,
         granularity: DateTruncGranularity,
         *,
         alias: str = "bucket",
     ) -> Self:
         """Add a fixed DATE_TRUNC bucket to an aggregate GROUP BY."""
+        field = resolve_field_name(field)
         metadata = self._get_metadata()
         if metadata is None:
             raise FerrumCompileError(
@@ -1053,6 +1091,13 @@ class _QuerySetBase(Generic[_R]):
                 )
             )
         ir["joins"] = joins
+        if len(joins) > _MAX_TOTAL_JOINS:
+            raise FerrumCompileError(
+                f"Total JOIN count {len(joins)} exceeds limit {_MAX_TOTAL_JOINS}; "
+                f"reduce select_related() or relation-filter lookups, or use "
+                f"prefetch_related() for to-many relations.",
+                model=metadata.model_name,
+            )
         if self._vector_order_by is not None:
             ir["vector_order_by"] = self._vector_order_by
         if self._text_rank_by is not None:
@@ -1580,10 +1625,20 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
     # ------------------------------------------------------------------
 
     def select_related(self, *relations: str) -> QuerySet[_M]:
-        """Eager-load to-one relations via JOIN (ForeignKey / OneToOne)."""
+        """Eager-load to-one relations via JOIN (ForeignKey / OneToOne).
+
+        Enforces cycle/depth limits to prevent accidental N+1 and unbounded
+        join plans:
+
+        - Duplicate relation names are rejected (cycle prevention).
+        - Total ``select_related`` depth is capped at ``_MAX_SELECT_RELATED_DEPTH``.
+        - Combined with relation-filter joins, total JOINs per query are capped
+          at ``_MAX_TOTAL_JOINS`` (checked in ``_build_ir()``).
+        """
         qs = self._clone()
         metadata = self._get_metadata()
         if metadata is not None:
+            existing = set(qs._select_related)
             for name in relations:
                 from ferrum.relations import resolve_relation
 
@@ -1595,6 +1650,22 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                         model=metadata.model_name,
                         field=name,
                     )
+                if name in existing:
+                    raise FerrumCompileError(
+                        f"Duplicate relation {name!r} in select_related(); "
+                        f"each relation may only appear once (cycle prevention).",
+                        model=metadata.model_name,
+                        field=name,
+                    )
+                existing.add(name)
+            new_depth = len(qs._select_related) + len(relations)
+            if new_depth > _MAX_SELECT_RELATED_DEPTH:
+                raise FerrumCompileError(
+                    f"select_related() depth {new_depth} exceeds limit "
+                    f"{_MAX_SELECT_RELATED_DEPTH}; use prefetch_related() or "
+                    f"split into separate queries.",
+                    model=metadata.model_name,
+                )
         qs._select_related = qs._select_related + relations
         return qs
 

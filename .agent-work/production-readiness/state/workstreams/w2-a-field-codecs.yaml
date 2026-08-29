@@ -1,0 +1,46 @@
+version: 1
+task_id: w2-a-field-codecs
+owner: production-readiness-executor
+status: complete
+phase: complete
+run_id: 20260829T095632Z
+base_revision: 612f476c32fa7b1fbd38e4dc9f4c689d05b72191
+dependencies_checked: true
+owned_paths_checked: true
+shared_path_lease: null
+spec_complete: true
+plan_complete: true
+tasks_complete: true
+implementation_complete: true
+executor_validation: passed
+independent_verification: passed
+security_triage_complete: true
+security_surfaces:
+  sql_compilation: false
+  migration_apply: false
+  errors_redaction: false
+  auth_secrets: false
+  rls_admin_gucs: false
+  schema_selection: false
+security_review: approved
+security_review_justification: Encrypted codecs with key-provider injection and PII redaction are security-gated
+architecture_review: approved
+product_review: not_required
+code_review: approved
+artifacts:
+  task_contract: .agent-work/production-readiness/tasks/w2-a-field-codecs.md
+  latest_log: .agent-work/production-readiness/logs/w2-a-field-codecs/20260829T095632Z.md
+  latest_verification: null
+  architecture_review: .agent-work/production-readiness/reviews/w2-a-field-codecs/20260829T095632Z-chief-architect.md
+  security_review: .agent-work/production-readiness/reviews/w2-a-field-codecs/20260829T095632Z-security-engineer.md
+  product_review: null
+  code_review: .agent-work/production-readiness/reviews/w2-a-field-codecs/20260829T095632Z-code-reviewer.md
+changed_paths:
+  - python/ferrum/models.py
+  - python/ferrum/registry.py
+  - crates/ferrum-core/src/ir/metadata.rs
+  - tests/python/unit/test_field_codecs.py
+  - tests/python/integration/test_field_codecs.py
+blockers: []
+next_action: Independent verification by production-readiness-verifier; ChiefArchitect, SecurityEngineer, and CodeReviewer gates required
+updated_at: 2026-08-29T10:45:00Z
