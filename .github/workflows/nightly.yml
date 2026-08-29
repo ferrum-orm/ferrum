@@ -31,6 +31,7 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://ferrum_test:ferrum_test@localhost:5432/ferrum_test
+      FERRUM_TEST_DSN: postgresql://ferrum_test:ferrum_test@localhost:5432/ferrum_test
 
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +57,101 @@ jobs:
         run: |
           . .venv/bin/activate
           pytest tests/python/ -m "not benchmark" -v
+
+  integration-matrix:
+    name: Integration (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [postgres, mysql, sqlite, mssql]
+    env:
+      FERRUM_TEST_DSN: ${{ matrix.backend == 'postgres' && 'postgresql://ferrum_test:ferrum_test@localhost:5432/ferrum_test' || '' }}
+      FERRUM_TEST_MYSQL_DSN: ${{ matrix.backend == 'mysql' && 'mysql://ferrum_test:ferrum_test@127.0.0.1:3306/ferrum_test' || '' }}
+      FERRUM_TEST_MSSQL_DSN: ${{ matrix.backend == 'mssql' && 'mssql://ferrum_test:FerrumTest123@localhost:1433/ferrum_test?TrustServerCertificate=yes' || '' }}
+      FERRUM_TEST_REQUIRE_BACKENDS: ${{ matrix.backend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Start PostgreSQL
+        if: matrix.backend == 'postgres'
+        run: |
+          docker run -d --name ferrum-postgres \
+            -e POSTGRES_DB=ferrum_test \
+            -e POSTGRES_USER=ferrum_test \
+            -e POSTGRES_PASSWORD=ferrum_test \
+            -p 5432:5432 \
+            pgvector/pgvector:pg18
+          timeout 120 bash -c \
+            'until docker exec ferrum-postgres pg_isready -U ferrum_test -d ferrum_test; do sleep 2; done'
+
+      - name: Start MySQL
+        if: matrix.backend == 'mysql'
+        run: |
+          docker run -d --name ferrum-mysql \
+            -e MYSQL_ROOT_PASSWORD=root \
+            -e MYSQL_DATABASE=ferrum_test \
+            -e MYSQL_USER=ferrum_test \
+            -e MYSQL_PASSWORD=ferrum_test \
+            -p 3306:3306 \
+            mysql:9.0
+          timeout 180 bash -c \
+            'until docker exec ferrum-mysql mysqladmin ping -h localhost -u ferrum_test -pferrum_test --silent; do sleep 2; done'
+
+      - name: Install SQL Server ODBC tools
+        if: matrix.backend == 'mssql'
+        run: |
+          curl -sSL -O "https://packages.microsoft.com/config/ubuntu/$(. /etc/os-release && echo "$VERSION_ID")/packages-microsoft-prod.deb"
+          sudo dpkg -i packages-microsoft-prod.deb
+          rm packages-microsoft-prod.deb
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 mssql-tools18 unixodbc-dev
+          echo "/opt/mssql-tools18/bin" >> "$GITHUB_PATH"
+
+      - name: Start SQL Server
+        if: matrix.backend == 'mssql'
+        run: |
+          docker run -d --name ferrum-mssql \
+            -e ACCEPT_EULA=Y \
+            -e MSSQL_PID=Express \
+            -e MSSQL_SA_PASSWORD=FerrumTest123 \
+            -p 1433:1433 \
+            mcr.microsoft.com/mssql/server:2025-latest
+          timeout 240 bash -c \
+            'until /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P FerrumTest123 -C -Q "SELECT 1" >/dev/null 2>&1; do sleep 3; done'
+          /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P FerrumTest123 -C \
+            -Q "IF DB_ID(N'ferrum_test') IS NULL EXEC(N'CREATE DATABASE [ferrum_test]')"
+          /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P FerrumTest123 -C \
+            -Q "IF SUSER_ID(N'ferrum_test') IS NULL CREATE LOGIN [ferrum_test] WITH PASSWORD=N'FerrumTest123'"
+          /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P FerrumTest123 -C \
+            -d ferrum_test \
+            -Q "IF DATABASE_PRINCIPAL_ID(N'ferrum_test') IS NULL CREATE USER [ferrum_test] FOR LOGIN [ferrum_test]; ALTER ROLE [db_owner] ADD MEMBER [ferrum_test]"
+
+      - name: Create virtualenv and install dependencies
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install maturin
+          pip install -e ".[dev]"
+
+      - name: Build extension
+        run: |
+          . .venv/bin/activate
+          maturin develop
+
+      - name: Run backend integration tests
+        env:
+          FERRUM_TEST_SQLITE_DSN: ${{ matrix.backend == 'sqlite' && format('sqlite:///{0}/ferrum_test.db', runner.temp) || '' }}
+        run: |
+          . .venv/bin/activate
+          pytest tests/python/integration -m integration -v
 
   # macOS full matrix — service containers are Linux-only (no Docker on macOS
   # runners), so no postgres here; build the extension and run unit/property
@@ -168,3 +264,61 @@ jobs:
           path: |
             bench-rust.txt
             bench-python.json
+
+  # Reproducible baseline (non-blocking): runs the mise harness added by
+  # w0-c-reproducible-baselines end to end (consumer contracts, wheel smoke,
+  # Rust+Python benchmarks, aggregated p50/p95/p99 report) and uploads
+  # benchmarks/latest/ for trend inspection. Separate from the `benchmarks`
+  # job above (kept as-is) because this one exercises the `mise run baseline`
+  # composite task and the wheel-install smoke test, not raw cargo/pytest.
+  # Only smoke-wheel is a real gate for this job; bench-rust/bench-python/
+  # baseline run with continue-on-error so benchmark noise or the still-open
+  # external blockers recorded in
+  # .agent-work/production-readiness/logs/w0-c-reproducible-baselines/ never
+  # fail the (already non-blocking, cron/workflow_dispatch-only) workflow.
+  reproducible-baseline:
+    name: Reproducible baseline
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ferrum_test
+          POSTGRES_USER: ferrum_test
+          POSTGRES_DB: ferrum_test
+        ports:
+          - 5432:5432
+    env:
+      FERRUM_TEST_DSN: postgresql://ferrum_test:ferrum_test@localhost:5432/ferrum_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: jdx/mise-action@v2
+
+      - name: Wheel-install smoke test (compiler-free install)
+        run: mise run smoke-wheel
+
+      - name: Rust criterion benchmarks
+        run: mise run bench-rust
+        continue-on-error: true
+
+      - name: Python pytest-benchmark suite
+        run: mise run bench-python
+        continue-on-error: true
+
+      - name: Aggregate reproducible baseline report
+        run: mise run baseline
+        continue-on-error: true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reproducible-baseline
+          path: benchmarks/latest/
+          if-no-files-found: warn

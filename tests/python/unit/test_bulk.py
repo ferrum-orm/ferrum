@@ -91,3 +91,24 @@ class TestBulkWithoutExtension:
         assert result == []
         called_ir = json.loads(mock_ext.compile_query.call_args[0][1])
         assert called_ir["operation"]["kind"] == "bulk_insert"
+
+    @pytest.mark.asyncio
+    async def test_bulk_create_coerces_sqlite_integer_booleans(self) -> None:
+        qs: QuerySet[Widget] = QuerySet(Widget)
+        mock_ext = MagicMock()
+        mock_ext.compile_query.return_value = {
+            "sql_text": "INSERT INTO widget ... RETURNING *",
+            "bound_params": [],
+            "fingerprint": "fp",
+            "operation": "bulk_insert",
+        }
+        mock_conn = MagicMock()
+        mock_conn.dialect = "sqlite"
+        mock_driver = MagicMock()
+        mock_driver.fetch = AsyncMock(return_value=[{"id": 1, "name": "a", "active": 1}])
+        mock_conn._require_driver.return_value = mock_driver
+
+        with patch("ferrum.queryset._native_ext", mock_ext):
+            result = await qs.bulk_create(mock_conn, [{"name": "a"}])
+
+        assert result[0].active is True

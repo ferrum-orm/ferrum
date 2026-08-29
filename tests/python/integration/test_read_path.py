@@ -4,13 +4,13 @@
 | # | Name | Marker | Requires |
 |---|------|--------|----------|
 | 1 | test_compile_query_returns_valid_sql | (none) | ferrum._native |
-| 2 | test_queryset_all_returns_model_instances | integration | live PG + _native |
-| 3 | test_queryset_get_raises_not_found | integration | live PG + _native |
-| 4 | test_queryset_count | integration | live PG + _native |
-| 5 | test_cancellation_at_python_await | integration | live PG + _native |
+| 2 | test_queryset_all_returns_model_instances | integration | live DB + _native |
+| 3 | test_queryset_get_raises_not_found | integration | live DB + _native |
+| 4 | test_queryset_count | integration | live DB + _native |
+| 5 | test_cancellation_at_python_await | integration | live DB + _native |
 
 Tests 2-5 are deselected by default unless ``-m integration`` is passed and
-``FERRUM_TEST_DSN`` is set in the environment.
+at least one ``FERRUM_TEST_*_DSN`` is set.
 
 Test 1 is always collected but skipped when the Rust extension has not been
 built (``maturin develop`` not yet run).
@@ -22,6 +22,8 @@ Security invariants verified here:
   (``asyncio.TimeoutError``), not as a Rust-level hang (ARCHITECTURE §6.2).
 """
 
+# ruff: noqa: S608 — table identifiers are test-controlled suffixes, not user input.
+
 from __future__ import annotations
 
 import asyncio
@@ -32,7 +34,13 @@ import pytest
 import ferrum
 from ferrum.errors import FerrumNotFoundError
 
-from .helpers import raw_pool
+from .backends import Backend
+from .schema import Column, transient_table
+
+
+def _bool_default(backend: Backend) -> str:
+    return "TRUE" if backend.name == "postgres" else "1"
+
 
 # ---------------------------------------------------------------------------
 # Test 1 — native compile round-trip (no live DB required)
@@ -100,21 +108,29 @@ def test_compile_query_returns_valid_sql() -> None:
     )
 
 
+def _widget_columns(backend: Backend) -> list[Column]:
+    return [
+        Column("id", "pk_serial"),
+        Column("name", "text", null=False),
+        Column("active", "bool", null=False, default=_bool_default(backend)),
+    ]
+
+
 # ---------------------------------------------------------------------------
-# Tests 2-5 — live PostgreSQL round-trip (integration marker)
+# Tests 2-5 — live round-trip (integration marker)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
-async def test_queryset_all_returns_model_instances(pg_conn: ferrum.connection.Connection) -> None:
-    """Fetch all rows and assert results are model instances with correct field values.
+async def test_queryset_all_returns_model_instances(
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
+    unique_suffix: str,
+) -> None:
+    """Fetch all rows and assert results are model instances with correct field values."""
+    pytest.importorskip("ferrum._native", reason="Rust extension not built — run `maturin develop`")
 
-    Setup: creates a transient ``ferrum_test_widget`` table, inserts two rows,
-    issues ``qs.all(pg_conn)``, then drops the table in teardown.
-    """
-    _native = pytest.importorskip(
-        "ferrum._native", reason="Rust extension not built — run `maturin develop`"
-    )
+    table_name = f"ferrum_test_widget_{unique_suffix}"
 
     class Widget(ferrum.Model):
         id: int = 0
@@ -122,123 +138,105 @@ async def test_queryset_all_returns_model_instances(pg_conn: ferrum.connection.C
         active: bool = True
 
         class Meta:
-            table = "ferrum_test_widget"
+            table = table_name
 
-    pool = raw_pool(pg_conn)
-    assert pool is not None
+    async with transient_table(
+        db_conn, table_name, backend=backend, columns=_widget_columns(backend)
+    ):
+        await Widget.objects.create(db_conn, name="alpha", active=True)
+        await Widget.objects.create(db_conn, name="beta", active=False)
+        results = await Widget.objects.all(db_conn)
 
-    async with pool.acquire() as raw_conn:
-        await raw_conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ferrum_test_widget (
-                id SERIAL PRIMARY KEY,
-                name TEXT NOT NULL,
-                active BOOLEAN NOT NULL DEFAULT TRUE
+        assert isinstance(results, list), "all() must return a list"
+        assert len(results) == 2, f"expected 2 rows, got {len(results)}"
+        for row in results:
+            assert isinstance(row, Widget), (
+                f"each result must be a Widget instance, got {type(row)}"
             )
-            """
-        )
-        try:
-            await raw_conn.execute(
-                "INSERT INTO ferrum_test_widget (name, active) VALUES ($1, $2), ($3, $4)",
-                "alpha",
-                True,
-                "beta",
-                False,
-            )
-            results = await Widget.objects.all(pg_conn)
-
-            assert isinstance(results, list), "all() must return a list"
-            assert len(results) == 2, f"expected 2 rows, got {len(results)}"
-            for row in results:
-                assert isinstance(row, Widget), (
-                    f"each result must be a Widget instance, got {type(row)}"
-                )
-            names = {r.name for r in results}
-            assert names == {"alpha", "beta"}, f"unexpected names: {names}"
-        finally:
-            await raw_conn.execute("DROP TABLE IF EXISTS ferrum_test_widget")
+        names = {r.name for r in results}
+        assert names == {"alpha", "beta"}, f"unexpected names: {names}"
 
 
 @pytest.mark.integration
-async def test_queryset_get_raises_not_found(pg_conn: ferrum.connection.Connection) -> None:
+async def test_queryset_get_raises_not_found(
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
+    unique_suffix: str,
+) -> None:
     """get() with no matching row raises FerrumNotFoundError (not a DB exception).
 
-    Gate: the error taxonomy (ERR-1) maps asyncpg NoResultFound to a sanitized
-    Ferrum exception — no raw PG DETAIL/HINT surfaces.
+    Gate: the error taxonomy (ERR-1) maps driver no-row errors to a sanitized
+    Ferrum exception — no raw DB DETAIL/HINT surfaces.
     """
     pytest.importorskip("ferrum._native", reason="Rust extension not built — run `maturin develop`")
+
+    table_name = f"ferrum_test_item_{unique_suffix}"
 
     class Item(ferrum.Model):
         id: int = 0
         label: str = ""
 
         class Meta:
-            table = "ferrum_test_item"
+            table = table_name
 
-    pool = raw_pool(pg_conn)
-    assert pool is not None
-
-    async with pool.acquire() as raw_conn:
-        await raw_conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ferrum_test_item (
-                id SERIAL PRIMARY KEY,
-                label TEXT NOT NULL
-            )
-            """
-        )
-        try:
-            with pytest.raises(FerrumNotFoundError):
-                await Item.objects.filter(id=9999).get(pg_conn)
-        finally:
-            await raw_conn.execute("DROP TABLE IF EXISTS ferrum_test_item")
+    async with transient_table(
+        db_conn,
+        table_name,
+        backend=backend,
+        columns=[
+            Column("id", "pk_serial"),
+            Column("label", "text", null=False),
+        ],
+    ):
+        with pytest.raises(FerrumNotFoundError):
+            await Item.objects.filter(id=9999).get(db_conn)
 
 
 @pytest.mark.integration
-async def test_queryset_count(pg_conn: ferrum.connection.Connection) -> None:
+async def test_queryset_count(
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
+    unique_suffix: str,
+) -> None:
     """count() returns a non-negative integer matching the actual row count."""
     pytest.importorskip("ferrum._native", reason="Rust extension not built — run `maturin develop`")
+
+    table_name = f"ferrum_test_counter_{unique_suffix}"
 
     class Counter(ferrum.Model):
         id: int = 0
         val: int = 0
 
         class Meta:
-            table = "ferrum_test_counter"
+            table = table_name
 
-    pool = raw_pool(pg_conn)
-    assert pool is not None
-
-    async with pool.acquire() as raw_conn:
-        await raw_conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ferrum_test_counter (
-                id SERIAL PRIMARY KEY,
-                val INT NOT NULL
-            )
-            """
-        )
-        try:
-            await raw_conn.execute(
-                "INSERT INTO ferrum_test_counter (val) VALUES ($1), ($2), ($3)",
-                10,
-                20,
-                30,
-            )
-            n = await Counter.objects.count(pg_conn)
-            assert isinstance(n, int), f"count() must return int, got {type(n)}"
-            assert n == 3, f"expected 3 rows, got {n}"
-        finally:
-            await raw_conn.execute("DROP TABLE IF EXISTS ferrum_test_counter")
+    async with transient_table(
+        db_conn,
+        table_name,
+        backend=backend,
+        columns=[
+            Column("id", "pk_serial"),
+            Column("val", "int", null=False),
+        ],
+    ):
+        for val in (10, 20, 30):
+            await Counter.objects.create(db_conn, val=val)
+        n = await Counter.objects.count(db_conn)
+        assert isinstance(n, int), f"count() must return int, got {type(n)}"
+        assert n == 3, f"expected 3 rows, got {n}"
 
 
 @pytest.mark.integration
-async def test_cancellation_at_python_await(pg_conn: ferrum.connection.Connection) -> None:
+async def test_cancellation_at_python_await(
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
+    unique_suffix: str,
+) -> None:
     """asyncio.wait_for() at the Python await point raises TimeoutError, not a Rust hang.
 
     Invariant (ARCHITECTURE §6.2): all cancellation/timeout handling lives in Python
     at the driver await point. The Rust compile path is synchronous and sub-millisecond;
-    it cannot be cancelled. The asyncpg I/O path is cancelled via standard asyncio
+    it cannot be cancelled. The driver I/O path is cancelled via standard asyncio
     cooperative cancellation.
 
     A 1 ms timeout on a real query is chosen to be far shorter than any real DB round
@@ -246,31 +244,30 @@ async def test_cancellation_at_python_await(pg_conn: ferrum.connection.Connectio
     """
     pytest.importorskip("ferrum._native", reason="Rust extension not built — run `maturin develop`")
 
+    table_name = f"ferrum_test_task_{unique_suffix}"
+
     class Task(ferrum.Model):
         id: int = 0
         payload: str = ""
 
         class Meta:
-            table = "ferrum_test_task"
+            table = table_name
 
-    pool = raw_pool(pg_conn)
-    assert pool is not None
-
-    async with pool.acquire() as raw_conn:
-        await raw_conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ferrum_test_task (
-                id SERIAL PRIMARY KEY,
-                payload TEXT NOT NULL
+    async with transient_table(
+        db_conn,
+        table_name,
+        backend=backend,
+        columns=[
+            Column("id", "pk_serial"),
+            Column("payload", "text", null=False),
+        ],
+    ):
+        driver = db_conn._require_driver()
+        q = backend.quote
+        values_sql = ", ".join(f"('row-{i}')" for i in range(5000))
+        await driver.execute(f"INSERT INTO {q(table_name)} (payload) VALUES {values_sql}")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                Task.objects.all(db_conn),
+                timeout=0,
             )
-            """
-        )
-        try:
-            # 1 ms is far shorter than any real DB round trip.
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(
-                    Task.objects.all(pg_conn),
-                    timeout=0.001,
-                )
-        finally:
-            await raw_conn.execute("DROP TABLE IF EXISTS ferrum_test_task")

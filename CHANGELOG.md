@@ -3,7 +3,12 @@
 All notable changes to Ferrum are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
-Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Ferrum versions as 0.x under [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
+with SemVer's unstable-major rule: **0.x has no compatibility guarantee**. MINOR and
+PATCH may both break. After the first 1.0 release, removing or breaking a documented
+public Python API or the migration file/ops format requires a deprecation window of at
+least one minor release and 90 days, whichever is longer, recorded here and in
+`README.md`. Generated SQL is never a compatibility surface.
 
 ---
 
@@ -11,9 +16,31 @@ Ferrum uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Live multi-driver integration coverage for PostgreSQL, MySQL, SQLite, and SQL
+  Server, with PostgreSQL + SQLite required on pull requests and an independent
+  four-backend nightly matrix.
+
 ### Changed
 
+- Local database tooling now starts health-checked PostgreSQL, MySQL, and SQL
+  Server test services with the same `ferrum_test` credentials used by CI.
+- Backend support is documented and tested as an explicit capability matrix
+  matching the integration registry: PostgreSQL has full coverage; MySQL and
+  SQL Server claim FTS and composite primary keys only; SQLite additionally
+  claims `RETURNING`. Transactions, aggregates, and upsert are PostgreSQL-only.
+- Compatibility policy: 0.x carries no guarantee (MINOR and PATCH may both break);
+  1.0 starts a deprecation window of one minor + 90 days for public API and
+  migration-ops. Generated SQL remains a non-compatibility surface.
+
 ### Fixed
+
+- Upsert attempts on MySQL, SQLite, and SQL Server now fail early with a typed
+  Ferrum configuration error instead of sending PostgreSQL `ON CONFLICT` SQL to
+  an unsupported backend.
+- SQLite now drains `RETURNING` cursors before commit, cleans up cancelled
+  operations, and hydrates integer-backed boolean columns as `bool`. Relation
+  prefetch SQL now uses each driver's identifier quoting and parameter style
+  instead of PostgreSQL-only syntax.
 
 ---
 

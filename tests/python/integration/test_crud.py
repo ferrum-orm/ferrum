@@ -1,4 +1,4 @@
-"""Integration tests for QuerySet CRUD terminals against live PostgreSQL.
+"""Integration tests for QuerySet CRUD terminals against live backends.
 
 Invariants:
 - create() inserts via compiled INSERT … RETURNING and hydrates a model instance.
@@ -13,12 +13,18 @@ import pytest
 import ferrum
 from ferrum.errors import FerrumDangerApiError
 
-from .helpers import raw_pool, seed_int_rows, transient_table
+from .backends import Backend
+from .schema import Column, transient_table
+
+
+def _bool_default(backend: Backend) -> str:
+    return "FALSE" if backend.name == "postgres" else "0"
 
 
 @pytest.mark.integration
 async def test_create_returns_hydrated_instance(
-    pg_conn: ferrum.connection.Connection,
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
     require_native: None,
     unique_suffix: str,
 ) -> None:
@@ -32,17 +38,17 @@ async def test_create_returns_hydrated_instance(
         class Meta:
             table = table_name
 
-    create_sql = f"""
-        CREATE TABLE "{table_name}" (
-            id SERIAL PRIMARY KEY,
-            title TEXT NOT NULL,
-            published BOOLEAN NOT NULL DEFAULT FALSE
-        )
-    """
-    drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
-
-    async with transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
-        row = await Article.objects.create(pg_conn, title="hello", published=True)
+    async with transient_table(
+        db_conn,
+        table_name,
+        backend=backend,
+        columns=[
+            Column("id", "pk_serial"),
+            Column("title", "text", null=False),
+            Column("published", "bool", null=False, default=_bool_default(backend)),
+        ],
+    ) as conn:
+        row = await Article.objects.create(conn, title="hello", published=True)
 
         assert isinstance(row, Article)
         assert row.title == "hello"
@@ -52,7 +58,8 @@ async def test_create_returns_hydrated_instance(
 
 @pytest.mark.integration
 async def test_update_and_delete_scoped_mutations(
-    pg_conn: ferrum.connection.Connection,
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
     require_native: None,
     unique_suffix: str,
 ) -> None:
@@ -66,39 +73,44 @@ async def test_update_and_delete_scoped_mutations(
         class Meta:
             table = table_name
 
-    create_sql = f"""
-        CREATE TABLE "{table_name}" (
-            id SERIAL PRIMARY KEY,
-            label TEXT NOT NULL,
-            active BOOLEAN NOT NULL DEFAULT TRUE
-        )
-    """
-    drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
+    async with transient_table(
+        db_conn,
+        table_name,
+        backend=backend,
+        columns=[
+            Column("id", "pk_serial"),
+            Column("label", "text", null=False),
+            Column(
+                "active",
+                "bool",
+                null=False,
+                default="TRUE" if backend.name == "postgres" else "1",
+            ),
+        ],
+    ) as conn:
+        await Tag.objects.create(conn, label="keep", active=True)
+        await Tag.objects.create(conn, label="drop-me", active=False)
 
-    async with transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
-        await Tag.objects.create(pg_conn, label="keep", active=True)
-        await Tag.objects.create(pg_conn, label="drop-me", active=False)
-
-        updated = await Tag.objects.filter(active=False).update(pg_conn, label="archived")
+        updated = await Tag.objects.filter(active=False).update(conn, label="archived")
         assert updated == 1
 
-        deleted = await Tag.objects.filter(label="archived").delete(pg_conn)
+        deleted = await Tag.objects.filter(label="archived").delete(conn)
         assert deleted == 1
 
-        remaining = await Tag.objects.count(pg_conn)
+        remaining = await Tag.objects.count(conn)
         assert remaining == 1
 
 
 @pytest.mark.integration
 async def test_unscoped_delete_requires_danger_api(
-    pg_conn: ferrum.connection.Connection,
+    db_conn: ferrum.connection.Connection,
     require_native: None,
 ) -> None:
     class Ephemeral(ferrum.Model):
         id: int = 0
 
     with pytest.raises(FerrumDangerApiError, match="danger_delete_all"):
-        await Ephemeral.objects.delete(pg_conn)
+        await Ephemeral.objects.delete(db_conn)
 
 
 @pytest.mark.integration
@@ -107,7 +119,8 @@ async def test_unscoped_delete_requires_danger_api(
     strict=False,
 )
 async def test_danger_delete_all_clears_table(
-    pg_conn: ferrum.connection.Connection,
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
     require_native: None,
     unique_suffix: str,
 ) -> None:
@@ -120,26 +133,27 @@ async def test_danger_delete_all_clears_table(
         class Meta:
             table = table_name
 
-    create_sql = f"""
-        CREATE TABLE "{table_name}" (
-            id SERIAL PRIMARY KEY,
-            val INT NOT NULL
-        )
-    """
-    drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
+    async with transient_table(
+        db_conn,
+        table_name,
+        backend=backend,
+        columns=[
+            Column("id", "pk_serial"),
+            Column("val", "int", null=False),
+        ],
+    ) as conn:
+        await Row.objects.create(conn, val=1)
+        await Row.objects.create(conn, val=2)
 
-    async with transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
-        pool = raw_pool(pg_conn)
-        await seed_int_rows(pool, table_name, 1, 2)
-
-        deleted = await Row.objects.danger_delete_all(pg_conn)
+        deleted = await Row.objects.danger_delete_all(conn)
         assert deleted == 2
-        assert await Row.objects.count(pg_conn) == 0
+        assert await Row.objects.count(conn) == 0
 
 
 @pytest.mark.integration
 async def test_create_from_instance_round_trip(
-    pg_conn: ferrum.connection.Connection,
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
     require_native: None,
     unique_suffix: str,
 ) -> None:
@@ -153,18 +167,18 @@ async def test_create_from_instance_round_trip(
         class Meta:
             table = table_name
 
-    create_sql = f"""
-        CREATE TABLE "{table_name}" (
-            id SERIAL PRIMARY KEY,
-            body TEXT NOT NULL,
-            pinned BOOLEAN NOT NULL DEFAULT FALSE
-        )
-    """
-    drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
-
-    async with transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
+    async with transient_table(
+        db_conn,
+        table_name,
+        backend=backend,
+        columns=[
+            Column("id", "pk_serial"),
+            Column("body", "text", null=False),
+            Column("pinned", "bool", null=False, default=_bool_default(backend)),
+        ],
+    ) as conn:
         note = Note(body="hello", pinned=True)
-        created = await Note.objects.create(pg_conn, note)
+        created = await Note.objects.create(conn, note)
 
         assert isinstance(created, Note)
         assert created is not note
@@ -176,7 +190,8 @@ async def test_create_from_instance_round_trip(
 
 @pytest.mark.integration
 async def test_update_instance_persists_and_detects_stale(
-    pg_conn: ferrum.connection.Connection,
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
     require_native: None,
     unique_suffix: str,
 ) -> None:
@@ -190,27 +205,27 @@ async def test_update_instance_persists_and_detects_stale(
         class Meta:
             table = table_name
 
-    create_sql = f"""
-        CREATE TABLE "{table_name}" (
-            id SERIAL PRIMARY KEY,
-            title TEXT NOT NULL,
-            done BOOLEAN NOT NULL DEFAULT FALSE
-        )
-    """
-    drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
-
-    async with transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
-        task = await Task.objects.create(pg_conn, Task(title="todo"))
+    async with transient_table(
+        db_conn,
+        table_name,
+        backend=backend,
+        columns=[
+            Column("id", "pk_serial"),
+            Column("title", "text", null=False),
+            Column("done", "bool", null=False, default=_bool_default(backend)),
+        ],
+    ) as conn:
+        task = await Task.objects.create(conn, Task(title="todo"))
 
         edited = task.model_copy(update={"done": True})
-        count = await Task.objects.update_instance(pg_conn, edited, fields=["done"])
+        count = await Task.objects.update_instance(conn, edited, fields=["done"])
         assert count == 1
 
-        reloaded = await Task.objects.filter(id=task.id).first(pg_conn)
+        reloaded = await Task.objects.filter(id=task.id).first(conn)
         assert reloaded is not None
         assert reloaded.done is True
         assert reloaded.title == "todo", "fields=[...] must not touch other columns"
 
-        await Task.objects.filter(id=task.id).delete(pg_conn)
-        stale = await Task.objects.update_instance(pg_conn, edited, fields=["title"])
+        await Task.objects.filter(id=task.id).delete(conn)
+        stale = await Task.objects.update_instance(conn, edited, fields=["title"])
         assert stale == 0, "0 rows signals a missing/stale instance"

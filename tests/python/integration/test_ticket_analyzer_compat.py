@@ -20,8 +20,6 @@ from ferrum.migrations import apply
 from ferrum.migrations import operations as ops
 from ferrum.session import current_setting, tenant_transaction
 
-from .helpers import raw_pool
-
 
 def _plan(name: str, operations: list) -> str:
     return json.dumps(
@@ -360,17 +358,16 @@ async def test_vector_search_returns_score_column(
     team = await _create_team(pg_conn, Team, name="team")
     seen = datetime(2024, 6, 2, tzinfo=UTC)
     ticket_table = Ticket.get_metadata().table_name
-    pool = raw_pool(pg_conn)
-    async with pool.acquire() as raw:
-        await raw.execute(
-            f'INSERT INTO "{ticket_table}" '
-            f"(id, first_seen_at, team_id, helpshift_id, summary, summary_embedding) "
-            f"VALUES ($1, $2, $3, '', 'near', $4::vector)",
-            1,
-            seen,
-            team.id,
-            "[1,0,0,0,0,0,0,0]",
-        )
+    driver = pg_conn._require_driver()
+    await driver.execute(
+        f'INSERT INTO "{ticket_table}" '
+        f"(id, first_seen_at, team_id, helpshift_id, summary, summary_embedding) "
+        f"VALUES ($1, $2, $3, '', 'near', $4::vector)",
+        1,
+        seen,
+        team.id,
+        "[1,0,0,0,0,0,0,0]",
+    )
     rows = await vector_search(
         pg_conn,
         Ticket,
@@ -405,13 +402,12 @@ async def test_vector_writes_round_trip_through_orm(
     upserted = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
 
     async def stored(ticket_id: int) -> str:
-        pool = raw_pool(pg_conn)
         table = Ticket.get_metadata().table_name
-        async with pool.acquire() as raw:
-            return await raw.fetchval(
-                f'SELECT summary_embedding::text FROM "{table}" WHERE id = $1',
-                ticket_id,
-            )
+        value = await pg_conn._require_driver().fetchval(
+            f'SELECT summary_embedding::text FROM "{table}" WHERE id = $1',
+            ticket_id,
+        )
+        return str(value)
 
     await Ticket.objects.create(
         pg_conn,
@@ -523,17 +519,15 @@ async def test_alert_uuid_array_and_jsonb_round_trip(
     alert_id = uuid.uuid4()
     payload = {"channel": "C123", "ok": True}
     alert_table = Alert.get_metadata().table_name
-    pool = raw_pool(pg_conn)
-    async with pool.acquire() as raw:
-        await raw.execute(
-            f'INSERT INTO "{alert_table}" (id, team_id, title, ticket_ids, slack_delivery) '
-            f"VALUES ($1, $2, $3, $4::uuid[], $5::jsonb)",
-            alert_id,
-            team.id,
-            "alert",
-            [tid],
-            json.dumps(payload),
-        )
+    await pg_conn._require_driver().execute(
+        f'INSERT INTO "{alert_table}" (id, team_id, title, ticket_ids, slack_delivery) '
+        f"VALUES ($1, $2, $3, $4::uuid[], $5::jsonb)",
+        alert_id,
+        team.id,
+        "alert",
+        [tid],
+        json.dumps(payload),
+    )
     fetched = await Alert.objects.filter(id=alert_id).get(pg_conn)
     assert list(fetched.ticket_ids) == [tid]
     assert fetched.slack_delivery == payload

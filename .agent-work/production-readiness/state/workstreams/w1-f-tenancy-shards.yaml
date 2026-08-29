@@ -1,0 +1,41 @@
+version: 1
+task_id: w1-f-tenancy-shards
+owner: unassigned
+status: tasked
+phase: tasks
+run_id: null
+base_revision: 768ec1f3013f6d0eccd7c8b590ba36b54b12d23e
+dependencies_checked: false
+owned_paths_checked: true
+shared_path_lease: null
+spec_complete: true
+plan_complete: true
+tasks_complete: true
+implementation_complete: false
+executor_validation: pending
+independent_verification: pending
+security_triage_complete: true
+security_surfaces:
+  sql_compilation: false
+  migration_apply: false
+  errors_redaction: false
+  auth_secrets: false
+  rls_admin_gucs: true
+  schema_selection: true
+security_review: required
+security_review_justification: admin GUCs, search_path schema selection, and shard routing are security-gated
+architecture_review: required
+product_review: not_required
+code_review: required
+artifacts:
+  task_contract: .agent-work/production-readiness/tasks/w1-f-tenancy-shards.md
+  latest_log: null
+  latest_verification: null
+  architecture_review: null
+  security_review: null
+  product_review: null
+  code_review: null
+changed_paths: []
+blockers: []
+next_action: wait for w1-e-pool-lifecycle verified; then coordinator grants __init__.py lease and marks ready
+updated_at: 2026-08-21T09:35:00Z

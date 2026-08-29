@@ -1,0 +1,55 @@
+version: 1
+task_id: w0-a-architecture-contracts
+owner: production-readiness-executor
+status: verified
+phase: implement
+run_id: 20260821T085200Z
+base_revision: 768ec1f3013f6d0eccd7c8b590ba36b54b12d23e
+dependencies_checked: true
+owned_paths_checked: true
+shared_path_lease: null
+spec_complete: true
+plan_complete: true
+tasks_complete: true
+implementation_complete: true
+executor_validation: pass_owned_docs_unowned_ci
+independent_verification: verified
+security_triage_complete: true
+security_surfaces:
+  sql_compilation: false
+  migration_apply: true
+  errors_redaction: true
+  auth_secrets: false
+  rls_admin_gucs: true
+  schema_selection: true
+security_review: required
+security_review_justification: contract changes cover migration, redaction, tenancy GUC, and schema routing
+architecture_review: required
+product_review: required
+code_review: required
+artifacts:
+  task_contract: .agent-work/production-readiness/tasks/w0-a-architecture-contracts.md
+  latest_log: .agent-work/production-readiness/logs/w0-a-architecture-contracts/20260821T085200Z.md
+  latest_verification: .agent-work/production-readiness/verification/w0-a-architecture-contracts/20260821T085200Z.md
+  preexisting_logs:
+    - .agent-work/production-readiness/logs/orchestration-bootstrap/20260821T073100Z.md
+    - .agent-work/production-readiness/logs/orchestration-bootstrap/20260821T074435Z.md
+    - .agent-work/production-readiness/logs/orchestration-bootstrap/20260821T074737Z.md
+    - .agent-work/production-readiness/logs/orchestration-bootstrap/20260821T075533Z.md
+    - .agent-work/production-readiness/logs/orchestration-wave0-assign/20260821T075740Z.md
+    - .agent-work/production-readiness/logs/w0-a-architecture-contracts/20260821T075800Z.md
+    - .agent-work/production-readiness/logs/w0-a-architecture-contracts/20260821T082329Z.md
+  architecture_review: .agent-work/production-readiness/reviews/w0-a-architecture-contracts/20260821T082329Z-chief-architect.md
+  security_review: .agent-work/production-readiness/reviews/w0-a-architecture-contracts/20260821T082329Z-security-engineer.md
+  product_review: .agent-work/production-readiness/reviews/w0-a-architecture-contracts/20260821T075800Z-product-manager.md
+  code_review: .agent-work/production-readiness/reviews/w0-a-architecture-contracts/20260821T082329Z-code-reviewer.md
+changed_paths:
+  - AGENTS.md
+  - CLAUDE.md
+  - README.md
+  - .agent-work/production-readiness/state/workstreams/w0-a-architecture-contracts.yaml
+  - .agent-work/production-readiness/logs/w0-a-architecture-contracts/20260821T085200Z.md
+blockers:
+  - Unowned ci-local failures remain outside this workstream
+next_action: No further W0-A implementation. Wave 1 waits for W0-B and W0-C. Residual docs/architecture.md and wave-0-backlog.md are unowned follow-up.
+updated_at: 2026-08-21T08:57:00Z

@@ -1,0 +1,49 @@
+version: 1
+task_id: w1-d-error-taxonomy
+owner: production-readiness-executor
+status: complete
+phase: complete
+run_id: 20260829T074746Z
+base_revision: 768ec1f3013f6d0eccd7c8b590ba36b54b12d23e
+dependencies_checked: true
+owned_paths_checked: true
+shared_path_lease: null
+spec_complete: true
+plan_complete: true
+tasks_complete: true
+implementation_complete: true
+executor_validation: passed
+independent_verification: passed
+security_triage_complete: true
+security_surfaces:
+  sql_compilation: false
+  migration_apply: false
+  errors_redaction: true
+  auth_secrets: false
+  rls_admin_gucs: false
+  schema_selection: false
+security_review: approved
+security_review_justification: exception fields and hook payloads must not leak DETAIL/HINT/secrets/row data
+architecture_review: approved
+product_review: not_required
+code_review: approved
+artifacts:
+  task_contract: .agent-work/production-readiness/tasks/w1-d-error-taxonomy.md
+  latest_log: .agent-work/production-readiness/logs/w1-d-error-taxonomy/20260829T074746Z.md
+  latest_verification: .agent-work/production-readiness/verification/w1-d-error-taxonomy/20260829T074746Z.md
+  architecture_review: .agent-work/production-readiness/reviews/w1-d-error-taxonomy/20260829T074746Z-chief-architect.md
+  security_review: .agent-work/production-readiness/reviews/w1-d-error-taxonomy/20260829T074746Z-security-engineer.md
+  product_review: null
+  code_review: .agent-work/production-readiness/reviews/w1-d-error-taxonomy/20260829T074746Z-code-reviewer.md
+changed_paths:
+  - python/ferrum/errors.py
+  - python/ferrum/hooks.py
+  - tests/python/unit/test_errors.py
+  - tests/python/unit/test_hooks.py
+  - tests/python/unit/test_boundary.py
+  - tests/python/security/test_credential_safety.py
+  - tests/python/integration/test_constraints.py
+  - tests/python/integration/test_hooks_integration.py
+blockers: []
+next_action: complete — all gates passed
+updated_at: 2026-08-29T09:00:00Z

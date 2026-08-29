@@ -10,8 +10,9 @@ Reviewing a diff/PR for Ferrum before it merges.
 
 Review this change as a senior Ferrum engineer. Check, in order:
 
-1. **Contract fit.** Does it serve a stated requirement and respect the PRD/architecture review?
-   Does it pre-empt an undecided ADR (001..006)? If so, request changes.
+1. **Contract fit.** Does it serve approved scope and respect `AGENTS.md` and
+   named reviews? Does it contradict a resolved ADR or pre-empt reopened ADR-004
+   or a new ADR? If so, request changes.
 2. **Boundary discipline.** Python stays async/ergonomic/I/O; Rust stays pure/sync/stateless. No
    SQL strings in Python; no async/I/O/mutable-state in Rust.
 3. **SQL safety.** No user input in identifier/value positions; identifiers allowlisted; values
@@ -31,5 +32,6 @@ Cite design lenses by name where relevant (Blast Radius, Schema Evolution, Least
 
 ## Output
 
-A review verdict (approve / request changes) with specific, actionable findings tied to the
-constraints above. Flag any auth/secrets/SQL/migration change for SecurityEngineer.
+A review verdict (approve / request changes) with specific, actionable findings.
+Require SecurityEngineer approval for SQL compilation, migration apply,
+errors/redaction, auth/secrets, RLS/admin GUCs, or schema selection.

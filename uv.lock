@@ -363,6 +363,9 @@ cli = [
     { name = "typer" },
 ]
 dev = [
+    { name = "aioodbc" },
+    { name = "aiosqlite" },
+    { name = "asyncmy" },
     { name = "asyncpg" },
     { name = "fastapi" },
     { name = "hypothesis" },
@@ -417,7 +420,7 @@ requires-dist = [
     { name = "ferrum-orm", extras = ["mssql"], marker = "extra == 'all'" },
     { name = "ferrum-orm", extras = ["mysql"], marker = "extra == 'all'" },
     { name = "ferrum-orm", extras = ["pg"], marker = "extra == 'all'" },
-    { name = "ferrum-orm", extras = ["pg", "cli", "dotenv"], marker = "extra == 'dev'" },
+    { name = "ferrum-orm", extras = ["pg", "mysql", "sqlite", "mssql", "cli", "dotenv"], marker = "extra == 'dev'" },
     { name = "ferrum-orm", extras = ["sqlite"], marker = "extra == 'all'" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.100" },
     { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2" },

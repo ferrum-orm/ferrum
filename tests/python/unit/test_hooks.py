@@ -368,3 +368,199 @@ class TestTierAEnforcement:
             )
         finally:
             unregister_hook(fn)
+
+
+# ---------------------------------------------------------------------------
+# §5a: category in Tier-A hook payloads (closed-enum error category)
+# ---------------------------------------------------------------------------
+
+
+class TestCategoryInTierA:
+    """Tier-A hooks receive category (closed-enum) without bound values (§5a)."""
+
+    def test_category_is_tier_a_key(self) -> None:
+        """The 'category' key is in _TIER_A_KEYS (survives default redaction)."""
+        assert "category" in _TIER_A_KEYS
+
+    def test_category_survives_tier_a_redaction(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A payload with 'category' must survive Tier A redaction."""
+        monkeypatch.setenv("FERRUM_OBS", "A")
+        received: list[HookPayload] = []
+        register_hook("*", received.append)
+        try:
+            dispatch(
+                {
+                    "event": "query_failure",
+                    "fingerprint": "fp:User:insert",
+                    "failure_category": "FerrumIntegrityError",
+                    "category": "unique_violation",
+                    "status": "error",
+                    # Non-Tier-A keys — must be stripped.
+                    "bound_params": ["secret_value"],
+                    "sql_text": "INSERT INTO users VALUES ($1)",
+                }
+            )
+            assert len(received) == 1
+            payload = received[0]
+            assert payload.get("category") == "unique_violation"
+            assert "bound_params" not in payload
+            assert "sql_text" not in payload
+        finally:
+            clear_hooks()
+
+    def test_category_absent_when_not_provided(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When category is not provided, it is simply absent from the payload."""
+        monkeypatch.setenv("FERRUM_OBS", "A")
+        received: list[HookPayload] = []
+        register_hook("*", received.append)
+        try:
+            dispatch(
+                {
+                    "event": "query_failure",
+                    "fingerprint": "fp:User:insert",
+                    "failure_category": "FerrumIntegrityError",
+                    "status": "error",
+                }
+            )
+            assert len(received) == 1
+            payload = received[0]
+            assert "category" not in payload
+        finally:
+            clear_hooks()
+
+    def test_query_failure_with_category(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """query_failure() dispatches category as a Tier-A key."""
+        monkeypatch.setenv("FERRUM_OBS", "A")
+        received: list[HookPayload] = []
+        register_hook("query_failure", received.append)
+        try:
+            from ferrum.hooks import query_failure
+
+            query_failure(
+                fingerprint="fp:User:insert",
+                duration_ms=1.5,
+                failure_category="FerrumIntegrityError",
+                category="unique_violation",
+            )
+            assert len(received) == 1
+            payload = received[0]
+            assert payload["category"] == "unique_violation"
+            assert payload["failure_category"] == "FerrumIntegrityError"
+        finally:
+            clear_hooks()
+
+    def test_query_failure_without_category(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """query_failure() without category omits it from the payload (backward compat)."""
+        monkeypatch.setenv("FERRUM_OBS", "A")
+        received: list[HookPayload] = []
+        register_hook("query_failure", received.append)
+        try:
+            from ferrum.hooks import query_failure
+
+            query_failure(
+                fingerprint="fp:User:insert",
+                duration_ms=1.5,
+                failure_category="FerrumIntegrityError",
+            )
+            assert len(received) == 1
+            payload = received[0]
+            assert "category" not in payload
+            assert payload["failure_category"] == "FerrumIntegrityError"
+        finally:
+            clear_hooks()
+
+    def test_hydration_failure_with_category(self) -> None:
+        """hydration_failure() dispatches category as a Tier-A key."""
+        from ferrum.hooks import hydration_failure
+
+        received: list[HookPayload] = []
+        register_hook("hydration_failure", received.append)
+        try:
+            hydration_failure(
+                fingerprint="fp:Post:select",
+                failure_category="FerrumHydrationError",
+                model="Post",
+                category="hydration",
+            )
+            assert len(received) == 1
+            payload = received[0]
+            assert payload["category"] == "hydration"
+        finally:
+            clear_hooks()
+
+    def test_category_does_not_carry_bound_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Even if someone tries to inject a bound value as 'category', Tier A redaction
+        still strips all other keys. The category value itself is a closed-enum string,
+        never user input."""
+        monkeypatch.setenv("FERRUM_OBS", "A")
+        received: list[HookPayload] = []
+        register_hook("*", received.append)
+        try:
+            dispatch(
+                {
+                    "event": "query_failure",
+                    "fingerprint": "fp",
+                    "failure_category": "FerrumDatabaseError",
+                    "category": "deadlock",
+                    "status": "error",
+                    # These must be stripped even when category is present.
+                    "bound_params": ["secret_pw_leaked"],
+                    "dsn": "postgresql://user:secret@host/db",
+                }
+            )
+            assert len(received) == 1
+            payload = received[0]
+            payload_str = str(payload)
+            assert "secret_pw_leaked" not in payload_str
+            assert "secret" not in payload_str
+            assert "bound_params" not in payload
+            assert "dsn" not in payload
+            assert payload["category"] == "deadlock"
+        finally:
+            clear_hooks()
+
+    def test_query_timer_extracts_category_from_ferrum_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """QueryTimer.__exit__ extracts category from a FerrumError exception."""
+        from ferrum.errors import FerrumIntegrityError
+        from ferrum.hooks import QueryTimer
+
+        monkeypatch.setenv("FERRUM_OBS", "A")
+        received: list[HookPayload] = []
+        register_hook("*", received.append)
+        try:
+            timer = QueryTimer(model="User", table="users", operation="insert")
+            with pytest.raises(FerrumIntegrityError), timer:
+                raise FerrumIntegrityError(
+                    "unique violation",
+                    constraint="uk_email",
+                    category="unique_violation",
+                    sqlstate="23505",
+                )
+            assert len(received) == 1
+            payload = received[0]
+            assert payload["category"] == "unique_violation"
+            assert payload["failure_category"] == "FerrumIntegrityError"
+        finally:
+            clear_hooks()
+
+    def test_query_timer_no_category_for_non_ferrum_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """QueryTimer.__exit__ does not add category for non-FerrumError exceptions."""
+        from ferrum.hooks import QueryTimer
+
+        monkeypatch.setenv("FERRUM_OBS", "A")
+        received: list[HookPayload] = []
+        register_hook("*", received.append)
+        try:
+            timer = QueryTimer(model="User", table="users", operation="select")
+            with pytest.raises(ValueError), timer:
+                raise ValueError("plain error")
+            assert len(received) == 1
+            payload = received[0]
+            assert "category" not in payload
+            assert payload["failure_category"] == "ValueError"
+        finally:
+            clear_hooks()

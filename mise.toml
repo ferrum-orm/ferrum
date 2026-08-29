@@ -39,6 +39,18 @@ description = "Build and install the extension (release)"
 run = "uv run maturin develop --release"
 
 # ---------------------------------------------------------------------------
+# Integration databases
+# ---------------------------------------------------------------------------
+
+[tasks.db-up]
+description = "Start PostgreSQL, MySQL, and SQL Server test databases"
+run = "docker compose -f compose.tests.yaml up -d --wait"
+
+[tasks.db-down]
+description = "Stop test databases and remove their volumes"
+run = "docker compose -f compose.tests.yaml down --volumes --remove-orphans"
+
+# ---------------------------------------------------------------------------
 # Linting
 # ---------------------------------------------------------------------------
 
@@ -97,9 +109,53 @@ description = "Run Python unit and property tests"
 run = "uv run pytest tests/python/unit tests/python/property -v"
 
 [tasks.test-integration]
-description = "Run integration tests (requires PostgreSQL)"
+description = "Alias for the PostgreSQL integration suite"
+depends = ["test-integration-pg"]
+run = "true"
+
+[tasks.test-integration-pg]
+description = "Run PostgreSQL integration tests"
+depends = ["dev", "db-up"]
+run = "FERRUM_TEST_DSN=postgresql://ferrum_test:ferrum_test@localhost:5432/ferrum_test FERRUM_TEST_REQUIRE_BACKENDS=postgres uv run pytest tests/python/integration -m integration -v"
+
+[tasks.test-integration-mysql]
+description = "Run MySQL integration tests"
+depends = ["dev", "db-up"]
+run = "FERRUM_TEST_MYSQL_DSN=mysql://ferrum_test:ferrum_test@127.0.0.1:3306/ferrum_test FERRUM_TEST_REQUIRE_BACKENDS=mysql uv run pytest tests/python/integration -m integration -v"
+
+[tasks.test-integration-sqlite]
+description = "Run SQLite integration tests"
 depends = ["dev"]
-run = "uv run pytest tests/python/integration -m integration -v"
+run = """
+rm -f .ferrum_test.db
+trap 'rm -f .ferrum_test.db' EXIT
+FERRUM_TEST_SQLITE_DSN=sqlite:///.ferrum_test.db \
+  FERRUM_TEST_REQUIRE_BACKENDS=sqlite \
+  uv run pytest tests/python/integration -m integration -v
+"""
+
+[tasks.test-integration-mssql]
+description = "Run SQL Server integration tests"
+depends = ["dev", "db-up"]
+run = "FERRUM_TEST_MSSQL_DSN='mssql://ferrum_test:FerrumTest123@localhost:1433/ferrum_test?TrustServerCertificate=yes' FERRUM_TEST_REQUIRE_BACKENDS=mssql uv run pytest tests/python/integration -m integration -v"
+
+[tasks.test-integration-all]
+description = "Run integration tests against every supported backend, then stop test databases"
+depends = ["dev", "db-up"]
+run = """
+rm -f .ferrum_test.db
+cleanup() {
+  rm -f .ferrum_test.db
+  docker compose -f compose.tests.yaml down --volumes --remove-orphans
+}
+trap cleanup EXIT
+FERRUM_TEST_DSN=postgresql://ferrum_test:ferrum_test@localhost:5432/ferrum_test \
+  FERRUM_TEST_MYSQL_DSN=mysql://ferrum_test:ferrum_test@127.0.0.1:3306/ferrum_test \
+  FERRUM_TEST_SQLITE_DSN=sqlite:///.ferrum_test.db \
+  FERRUM_TEST_MSSQL_DSN='mssql://ferrum_test:FerrumTest123@localhost:1433/ferrum_test?TrustServerCertificate=yes' \
+  FERRUM_TEST_REQUIRE_BACKENDS=postgres,mysql,sqlite,mssql \
+  uv run pytest tests/python/integration -m integration -v
+"""
 
 [tasks.test-security]
 description = "Run security qualification tests"
@@ -111,8 +167,8 @@ description = "Run property-based tests only"
 run = "uv run pytest tests/python/property -m property -v"
 
 [tasks.all-tests]
-description = "dev + rust + python unit + security tests"
-depends = ["dev", "test-rust", "test-python-unit", "test-security"]
+description = "dev + rust + python unit + integration + security tests"
+depends = ["dev", "test-rust", "test-python-unit", "test-integration-all", "test-security"]
 run = "true"
 
 # ---------------------------------------------------------------------------
@@ -122,6 +178,61 @@ run = "true"
 [tasks.import-boundary]
 description = "Enforce Python import boundaries (import-linter)"
 run = "uv run lint-imports"
+
+[tasks.agent-orchestration]
+description = "Validate Cursor/Claude production-readiness orchestration mirrors"
+run = "python3 .agent-work/production-readiness/scripts/check_orchestration.py"
+
+# ---------------------------------------------------------------------------
+# Reproducible baselines (correctness, latency, compiler-free install)
+#
+# Kept out of ci-local/all-tests: each needs a live PostgreSQL and/or a
+# release build, mirroring how test-integration is already excluded. Nightly
+# CI (.github/workflows/nightly.yml) runs the bench-* pair; `baseline` is the
+# one local command that runs everything and assembles a single report.
+# ---------------------------------------------------------------------------
+
+[tasks.test-consumer-contracts]
+description = "Live-PostgreSQL consumer-contract compatibility tests (requires FERRUM_TEST_DSN)"
+depends = ["dev"]
+run = [
+  "mkdir -p benchmarks/latest",
+  "uv run pytest tests/python/integration -m integration -k compat -v --junitxml=benchmarks/latest/consumer-contracts.xml",
+]
+
+[tasks.smoke-wheel]
+description = "Build a wheel and smoke-test it in a fresh venv (proves compiler-free install)"
+run = "bash benchmarks/smoke_wheel.sh"
+
+[tasks.bench-rust]
+description = "Rust criterion benchmarks (writes target/criterion/**)"
+run = "cargo bench --workspace"
+
+[tasks.bench-python]
+description = "Python pytest-benchmark suite against a release build (requires FERRUM_TEST_DSN for DB-backed cases)"
+depends = ["dev-release"]
+run = [
+  "mkdir -p benchmarks/latest",
+  "uv run pytest tests/python/ -m benchmark --benchmark-json=benchmarks/latest/bench-python.json -v",
+]
+
+[tasks.baseline]
+description = "Run consumer contracts, wheel smoke, and benchmarks; write one reproducible baseline report"
+depends = ["test-consumer-contracts", "smoke-wheel", "bench-rust", "bench-python"]
+run = """
+python3 benchmarks/collect_baseline.py \
+  --out benchmarks/latest/baseline.json \
+  --label "$(date -u +%Y%m%dT%H%M%SZ)" \
+  --python-benchmark-json benchmarks/latest/bench-python.json \
+  --criterion-dir target/criterion \
+  --junit benchmarks/latest/consumer-contracts.xml \
+  --junit benchmarks/latest/smoke-wheel.xml \
+  --timing-json benchmarks/latest/smoke-wheel-timing.json
+"""
+
+[tasks.test-benchmarks-harness]
+description = "Unit tests for the baseline-collection harness itself (no DB, no native build)"
+run = "uv run pytest tests/benchmarks -v"
 
 # ---------------------------------------------------------------------------
 # Full local CI parity
@@ -136,6 +247,7 @@ depends = [
   "test-rust",
   "type-python",
   "import-boundary",
+  "agent-orchestration",
   "all-tests",
 ]
 run = "true"

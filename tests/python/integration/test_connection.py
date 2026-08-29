@@ -1,5 +1,7 @@
 """Integration tests for connection failure, closed pool, and timeout semantics."""
 
+# ruff: noqa: S608 — table identifiers are test-controlled suffixes, not user input.
+
 from __future__ import annotations
 
 import asyncio
@@ -10,22 +12,38 @@ import ferrum
 from ferrum.connection import Connection
 from ferrum.errors import FerrumConnectionError
 
-from .helpers import raw_pool, seed_bulk_text_rows, transient_table
+from .backends import Backend
+from .schema import Column, transient_table
 
 
 @pytest.mark.integration
-async def test_connection_failure_redacts_dsn() -> None:
+@pytest.mark.parametrize(
+    ("dsn", "secret"),
+    [
+        ("postgresql://ferrum_test_user:supersecret@127.0.0.1:59999/nodb", "supersecret"),
+        ("mysql://ferrum_test_user:supersecret@127.0.0.1:59999/nodb", "supersecret"),
+        (
+            "mssql://ferrum_test_user:supersecret@127.0.0.1:59999/nodb"
+            "?driver=ODBC+Driver+18+for+SQL+Server",
+            "supersecret",
+        ),
+    ],
+)
+async def test_connection_failure_redacts_dsn(dsn: str, secret: str) -> None:
     """Bad host/port must raise FerrumConnectionError without leaking the DSN."""
-    bad_dsn = "postgresql://ferrum_test_user:supersecret@127.0.0.1:59999/nodb"
+    if dsn.startswith("mysql://"):
+        pytest.importorskip("asyncmy")
+    elif dsn.startswith("mssql://"):
+        pytest.importorskip("aioodbc")
 
-    conn = Connection(bad_dsn)
+    conn = Connection(dsn)
     with pytest.raises(FerrumConnectionError) as exc_info:
         await conn.open()
 
     message = str(exc_info.value)
     assert "FERR-E101" in message
-    assert "supersecret" not in message.lower()
-    assert "postgresql://" not in message
+    assert secret not in message.lower()
+    assert "://" not in message
 
 
 @pytest.mark.integration
@@ -38,9 +56,27 @@ async def test_query_on_unopened_pool_raises_connection_error() -> None:
         await Widget.objects.count(conn)
 
 
+async def _seed_payload_rows(
+    conn: ferrum.connection.Connection,
+    backend: Backend,
+    table_name: str,
+    *,
+    rows: int = 5000,
+) -> None:
+    """Portable batched INSERT for stress/cancellation tests."""
+    driver = conn._require_driver()
+    q = backend.quote
+    chunk_size = 500
+    for chunk_start in range(0, rows, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, rows)
+        values_sql = ", ".join(f"('row-{i}')" for i in range(chunk_start, chunk_end))
+        await driver.execute(f"INSERT INTO {q(table_name)} (payload) VALUES {values_sql}")
+
+
 @pytest.mark.integration
 async def test_asyncio_timeout_at_python_await(
-    pg_conn: ferrum.connection.Connection,
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
     require_native: None,
     unique_suffix: str,
 ) -> None:
@@ -54,25 +90,25 @@ async def test_asyncio_timeout_at_python_await(
         class Meta:
             table = table_name
 
-    create_sql = f"""
-        CREATE TABLE "{table_name}" (
-            id SERIAL PRIMARY KEY,
-            payload TEXT NOT NULL
-        )
-    """
-    drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
-
-    async with transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
-        pool = raw_pool(pg_conn)
-        await seed_bulk_text_rows(pool, table_name)
+    async with transient_table(
+        db_conn,
+        table_name,
+        backend=backend,
+        columns=[
+            Column("id", "pk_serial"),
+            Column("payload", "text", null=False),
+        ],
+    ) as conn:
+        await _seed_payload_rows(conn, backend, table_name)
 
         with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(Slow.objects.all(pg_conn), timeout=0)
+            await asyncio.wait_for(Slow.objects.all(conn), timeout=0)
 
 
 @pytest.mark.integration
 async def test_cancellation_propagates_from_await(
-    pg_conn: ferrum.connection.Connection,
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
     require_native: None,
     unique_suffix: str,
 ) -> None:
@@ -85,19 +121,18 @@ async def test_cancellation_propagates_from_await(
         class Meta:
             table = table_name
 
-    create_sql = f"""
-        CREATE TABLE "{table_name}" (
-            id SERIAL PRIMARY KEY,
-            payload TEXT NOT NULL
-        )
-    """
-    drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
+    async with transient_table(
+        db_conn,
+        table_name,
+        backend=backend,
+        columns=[
+            Column("id", "pk_serial"),
+            Column("payload", "text", null=False),
+        ],
+    ) as conn:
+        await _seed_payload_rows(conn, backend, table_name)
 
-    async with transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
-        pool = raw_pool(pg_conn)
-        await seed_bulk_text_rows(pool, table_name)
-
-        task = asyncio.create_task(Task.objects.all(pg_conn))
+        task = asyncio.create_task(Task.objects.all(conn))
         await asyncio.sleep(0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

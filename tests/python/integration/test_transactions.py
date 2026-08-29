@@ -1,4 +1,4 @@
-"""Integration tests for ``Connection.transaction`` against live PostgreSQL.
+"""Integration tests for ``Connection.transaction`` against live backends.
 
 Invariants:
 - terminals run *inside* a transaction sharing one pinned connection,
@@ -7,19 +7,23 @@ Invariants:
 - cancellation mid-transaction rolls back and leaves the pool usable,
 - isolation modifiers are accepted by the server.
 
-Skipped unless ``FERRUM_TEST_DSN`` is set and the Rust extension is built.
+Skipped unless the active backend declares ``TRANSACTIONS`` / ``SAVEPOINTS``.
 """
+
+# ruff: noqa: S608 — table identifiers are test-controlled suffixes, not user input.
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 
 import pytest
 
 import ferrum
 from ferrum.errors import FerrumTimeoutError
 
-from .helpers import raw_pool, transient_table
+from .backends import Backend, Capability
+from .schema import Column, transient_table
 
 
 def _model(table_name: str) -> type[ferrum.Model]:
@@ -34,66 +38,80 @@ def _model(table_name: str) -> type[ferrum.Model]:
     return Account
 
 
-_CREATE = """
-    CREATE TABLE "{t}" (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        balance INTEGER NOT NULL DEFAULT 0
-    )
-"""
+def _account_columns() -> list[Column]:
+    return [
+        Column("id", "pk_serial"),
+        Column("name", "text", null=False),
+        Column("balance", "int", null=False, default="0"),
+    ]
 
 
-async def _row_count(pg_conn: ferrum.connection.Connection, table_name: str) -> int:
-    pool = raw_pool(pg_conn)
-    async with pool.acquire() as raw:
-        return await raw.fetchval(f'SELECT count(*) FROM "{table_name}"')  # noqa: S608
+async def _row_count(
+    conn: ferrum.connection.Connection,
+    backend: Backend,
+    table_name: str,
+) -> int:
+    q = backend.quote
+    return int(await conn._require_driver().fetchval(f"SELECT count(*) FROM {q(table_name)}"))
 
 
 @pytest.mark.integration
 async def test_commit_persists_multiple_terminals(
-    pg_conn: ferrum.connection.Connection, require_native: None, unique_suffix: str
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
+    requires: Callable[[Capability], None],
+    require_native: None,
+    unique_suffix: str,
 ) -> None:
+    requires(Capability.TRANSACTIONS)
+
     table = f"ferrum_int_tx_commit_{unique_suffix}"
     model = _model(table)
-    async with transient_table(
-        pg_conn, create_sql=_CREATE.format(t=table), drop_sql=f'DROP TABLE "{table}"'
-    ):
-        async with pg_conn.transaction() as tx:
+    async with transient_table(db_conn, table, backend=backend, columns=_account_columns()):
+        async with db_conn.transaction() as tx:
             a = await model.objects.create(tx, name="alice", balance=100)
             await model.objects.create(tx, name="bob", balance=50)
             # Visible within the same transaction before commit.
             assert await model.objects.count(tx) == 2
             assert a.id > 0
         # Both rows survive the commit.
-        assert await _row_count(pg_conn, table) == 2
+        assert await _row_count(db_conn, backend, table) == 2
 
 
 @pytest.mark.integration
 async def test_rollback_on_exception_discards_all(
-    pg_conn: ferrum.connection.Connection, require_native: None, unique_suffix: str
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
+    requires: Callable[[Capability], None],
+    require_native: None,
+    unique_suffix: str,
 ) -> None:
+    requires(Capability.TRANSACTIONS)
+
     table = f"ferrum_int_tx_rollback_{unique_suffix}"
     model = _model(table)
-    async with transient_table(
-        pg_conn, create_sql=_CREATE.format(t=table), drop_sql=f'DROP TABLE "{table}"'
-    ):
+    async with transient_table(db_conn, table, backend=backend, columns=_account_columns()):
         with pytest.raises(RuntimeError, match="boom"):
-            async with pg_conn.transaction() as tx:
+            async with db_conn.transaction() as tx:
                 await model.objects.create(tx, name="alice", balance=100)
                 raise RuntimeError("boom")
-        assert await _row_count(pg_conn, table) == 0
+        assert await _row_count(db_conn, backend, table) == 0
 
 
 @pytest.mark.integration
 async def test_savepoint_rolls_back_independently(
-    pg_conn: ferrum.connection.Connection, require_native: None, unique_suffix: str
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
+    requires: Callable[[Capability], None],
+    require_native: None,
+    unique_suffix: str,
 ) -> None:
+    requires(Capability.SAVEPOINTS)
+
     table = f"ferrum_int_tx_savepoint_{unique_suffix}"
     model = _model(table)
-    async with transient_table(
-        pg_conn, create_sql=_CREATE.format(t=table), drop_sql=f'DROP TABLE "{table}"'
-    ):
-        async with pg_conn.transaction() as tx:
+    async with transient_table(db_conn, table, backend=backend, columns=_account_columns()):
+        async with db_conn.transaction() as tx:
             await model.objects.create(tx, name="outer", balance=1)
             with pytest.raises(RuntimeError, match="inner"):
                 async with tx.savepoint() as sp:
@@ -101,22 +119,26 @@ async def test_savepoint_rolls_back_independently(
                     raise RuntimeError("inner")
             # Outer insert survives the savepoint rollback.
             assert await model.objects.count(tx) == 1
-        rows = await model.objects.all(pg_conn)
+        rows = await model.objects.all(db_conn)
         assert [r.name for r in rows] == ["outer"]
 
 
 @pytest.mark.integration
 async def test_cancellation_rolls_back_and_pool_usable(
-    pg_conn: ferrum.connection.Connection, require_native: None, unique_suffix: str
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
+    requires: Callable[[Capability], None],
+    require_native: None,
+    unique_suffix: str,
 ) -> None:
+    requires(Capability.TRANSACTIONS)
+
     table = f"ferrum_int_tx_cancel_{unique_suffix}"
     model = _model(table)
-    async with transient_table(
-        pg_conn, create_sql=_CREATE.format(t=table), drop_sql=f'DROP TABLE "{table}"'
-    ):
+    async with transient_table(db_conn, table, backend=backend, columns=_account_columns()):
 
         async def unit() -> None:
-            async with pg_conn.transaction() as tx:
+            async with db_conn.transaction() as tx:
                 await model.objects.create(tx, name="doomed", balance=1)
                 await asyncio.sleep(10)  # cancelled here
 
@@ -126,36 +148,46 @@ async def test_cancellation_rolls_back_and_pool_usable(
         with pytest.raises(asyncio.CancelledError):
             await task
         # Rolled back: no rows, and the pool still works afterwards.
-        assert await _row_count(pg_conn, table) == 0
-        await model.objects.create(pg_conn, name="after", balance=9)
-        assert await _row_count(pg_conn, table) == 1
+        assert await _row_count(db_conn, backend, table) == 0
+        await model.objects.create(db_conn, name="after", balance=9)
+        assert await _row_count(db_conn, backend, table) == 1
 
 
 @pytest.mark.integration
 async def test_serializable_isolation_accepted(
-    pg_conn: ferrum.connection.Connection, require_native: None, unique_suffix: str
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
+    requires: Callable[[Capability], None],
+    require_native: None,
+    unique_suffix: str,
 ) -> None:
+    requires(Capability.TRANSACTIONS)
+    if backend.name != "postgres":
+        pytest.skip("serializable isolation level is verified on PostgreSQL only")
+
     table = f"ferrum_int_tx_iso_{unique_suffix}"
     model = _model(table)
-    async with transient_table(
-        pg_conn, create_sql=_CREATE.format(t=table), drop_sql=f'DROP TABLE "{table}"'
-    ):
-        async with pg_conn.transaction(isolation="serializable") as tx:
+    async with transient_table(db_conn, table, backend=backend, columns=_account_columns()):
+        async with db_conn.transaction(isolation="serializable") as tx:
             await model.objects.create(tx, name="iso", balance=1)
-        assert await _row_count(pg_conn, table) == 1
+        assert await _row_count(db_conn, backend, table) == 1
 
 
 @pytest.mark.integration
 async def test_deadline_rolls_back(
-    pg_conn: ferrum.connection.Connection, require_native: None, unique_suffix: str
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
+    requires: Callable[[Capability], None],
+    require_native: None,
+    unique_suffix: str,
 ) -> None:
+    requires(Capability.TRANSACTIONS)
+
     table = f"ferrum_int_tx_deadline_{unique_suffix}"
     model = _model(table)
-    async with transient_table(
-        pg_conn, create_sql=_CREATE.format(t=table), drop_sql=f'DROP TABLE "{table}"'
-    ):
+    async with transient_table(db_conn, table, backend=backend, columns=_account_columns()):
         with pytest.raises(FerrumTimeoutError):
-            async with pg_conn.transaction(deadline=0.05) as tx:
+            async with db_conn.transaction(deadline=0.05) as tx:
                 await model.objects.create(tx, name="slow", balance=1)
                 await asyncio.sleep(5)
-        assert await _row_count(pg_conn, table) == 0
+        assert await _row_count(db_conn, backend, table) == 0

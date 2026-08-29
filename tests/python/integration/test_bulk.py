@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated
@@ -11,12 +12,15 @@ import pytest
 
 import ferrum
 
-from .helpers import transient_table
+from .backends import Backend, Capability
+from .helpers import transient_table as pg_transient_table
+from .schema import Column, transient_table
 
 
 @pytest.mark.integration
-async def test_bulk_create_update_delete_round_trip(
-    pg_conn: ferrum.connection.Connection,
+async def test_bulk_create_delete_round_trip(
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
     require_native: None,
     unique_suffix: str,
 ) -> None:
@@ -30,18 +34,18 @@ async def test_bulk_create_update_delete_round_trip(
         class Meta:
             table = table_name
 
-    create_sql = f"""
-        CREATE TABLE "{table_name}" (
-            id SERIAL PRIMARY KEY,
-            label TEXT NOT NULL,
-            qty INT NOT NULL DEFAULT 0
-        )
-    """
-    drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
-
-    async with transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
+    async with transient_table(
+        db_conn,
+        table_name,
+        backend=backend,
+        columns=[
+            Column("id", "pk_serial"),
+            Column("label", "text", null=False),
+            Column("qty", "int", null=False, default="0"),
+        ],
+    ) as conn:
         created = await Item.objects.bulk_create(
-            pg_conn,
+            conn,
             [{"label": "a", "qty": 1}, {"label": "b", "qty": 2}],
             batch_size=2,
         )
@@ -49,20 +53,64 @@ async def test_bulk_create_update_delete_round_trip(
         assert all(isinstance(row, Item) for row in created)
         assert created[0].id > 0
 
+        ids = [row.id for row in created]
+        deleted = await Item.objects.bulk_delete(conn, ids, batch_size=2)
+        assert deleted == 2
+        assert await Item.objects.count(conn) == 0
+
+
+@pytest.mark.integration
+async def test_bulk_create_update_delete_round_trip(
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
+    requires: Callable[[Capability], None],
+    require_native: None,
+    unique_suffix: str,
+) -> None:
+    requires(Capability.BULK_UPDATE)
+
+    table_name = f"ferrum_int_bulk_upd_{unique_suffix}"
+
+    class Item(ferrum.Model):
+        id: int = 0
+        label: str = ""
+        qty: int = 0
+
+        class Meta:
+            table = table_name
+
+    async with transient_table(
+        db_conn,
+        table_name,
+        backend=backend,
+        columns=[
+            Column("id", "pk_serial"),
+            Column("label", "text", null=False),
+            Column("qty", "int", null=False, default="0"),
+        ],
+    ) as conn:
+        created = await Item.objects.bulk_create(
+            conn,
+            [{"label": "a", "qty": 1}, {"label": "b", "qty": 2}],
+            batch_size=2,
+        )
+        assert len(created) == 2
+
         for row in created:
             row.label = row.label.upper()
-        updated = await Item.objects.bulk_update(pg_conn, created, ("label",), batch_size=2)
+        updated = await Item.objects.bulk_update(conn, created, ("label",), batch_size=2)
         assert updated == 2
 
         ids = [row.id for row in created]
-        deleted = await Item.objects.bulk_delete(pg_conn, ids, batch_size=2)
+        deleted = await Item.objects.bulk_delete(conn, ids, batch_size=2)
         assert deleted == 2
-        assert await Item.objects.count(pg_conn) == 0
+        assert await Item.objects.count(conn) == 0
 
 
 @pytest.mark.integration
 async def test_bulk_create_count_mode(
-    pg_conn: ferrum.connection.Connection,
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
     require_native: None,
     unique_suffix: str,
 ) -> None:
@@ -75,23 +123,23 @@ async def test_bulk_create_count_mode(
         class Meta:
             table = table_name
 
-    create_sql = f"""
-        CREATE TABLE "{table_name}" (
-            id SERIAL PRIMARY KEY,
-            val INT NOT NULL
-        )
-    """
-    drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
-
-    async with transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
+    async with transient_table(
+        db_conn,
+        table_name,
+        backend=backend,
+        columns=[
+            Column("id", "pk_serial"),
+            Column("val", "int", null=False),
+        ],
+    ) as conn:
         count = await Row.objects.bulk_create(
-            pg_conn,
+            conn,
             [{"val": i} for i in range(5)],
             returning=False,
             batch_size=2,
         )
         assert count == 5
-        assert await Row.objects.count(pg_conn) == 5
+        assert await Row.objects.count(conn) == 5
 
 
 @pytest.mark.integration
@@ -129,7 +177,7 @@ async def test_bulk_update_non_text_column_types(
     """
     drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
 
-    async with transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
+    async with pg_transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
         seen_at = datetime.now(UTC)
         row = await Ticket.objects.create(pg_conn, id=uuid4(), first_seen_at=seen_at)
 

@@ -3,35 +3,44 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 import pytest
 
 import ferrum
+from ferrum.connection import Connection
+from ferrum.errors import FerrumTimeoutError
 
-from .helpers import raw_pool, transient_table
+from .backends import Backend
+from .schema import Column, transient_table
 
 
 @pytest.mark.integration
 async def test_pool_exhaustion_blocks_until_timeout(
-    pg_dsn: str,
-    require_native: None,
+    backend: Backend,
 ) -> None:
-    """When all pool slots are held, acquire waits until asyncio cancels it."""
-    async with ferrum.connect(pg_dsn, min_size=1, max_size=2) as conn:
-        pool = raw_pool(conn)
-        holder_a = await pool.acquire()
-        holder_b = await pool.acquire()
-        try:
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(pool.acquire(), timeout=0.5)
-        finally:
-            await pool.release(holder_a)
-            await pool.release(holder_b)
+    """When all pool slots are held, acquire waits until the configured timeout."""
+    if backend.name == "sqlite":
+        pytest.skip("SQLite driver uses a single connection, not a pool")
+
+    dsn = os.environ.get(backend.dsn_env)
+    assert dsn is not None
+
+    conn = Connection(dsn, min_size=1, max_size=2, acquire_timeout=0.5)
+    await conn.open()
+    try:
+        async with conn.acquire(), conn.acquire():
+            with pytest.raises(FerrumTimeoutError, match="FERR-E102"):
+                async with conn.acquire():
+                    pass
+    finally:
+        await conn.close()
 
 
 @pytest.mark.integration
 async def test_concurrent_queryset_counts(
-    pg_conn: ferrum.connection.Connection,
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
     require_native: None,
     unique_suffix: str,
 ) -> None:
@@ -44,30 +53,31 @@ async def test_concurrent_queryset_counts(
         class Meta:
             table = table_name
 
-    create_sql = f"""
-        CREATE TABLE "{table_name}" (
-            id SERIAL PRIMARY KEY,
-            bucket INT NOT NULL
-        )
-    """
-    drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
-
-    async with transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
+    async with transient_table(
+        db_conn,
+        table_name,
+        backend=backend,
+        columns=[
+            Column("id", "pk_serial"),
+            Column("bucket", "int", null=False),
+        ],
+    ) as conn:
         for bucket in range(5):
-            await Metric.objects.create(pg_conn, bucket=bucket)
+            await Metric.objects.create(conn, bucket=bucket)
 
         results = await asyncio.gather(
-            *[Metric.objects.filter(bucket=i).count(pg_conn) for i in range(5)]
+            *[Metric.objects.filter(bucket=i).count(conn) for i in range(5)]
         )
         assert results == [1, 1, 1, 1, 1]
 
-        total = await asyncio.gather(*[Metric.objects.count(pg_conn) for _ in range(10)])
+        total = await asyncio.gather(*[Metric.objects.count(conn) for _ in range(10)])
         assert all(n == 5 for n in total)
 
 
 @pytest.mark.integration
 async def test_concurrent_reads_return_consistent_rows(
-    pg_conn: ferrum.connection.Connection,
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
     require_native: None,
     unique_suffix: str,
 ) -> None:
@@ -80,19 +90,19 @@ async def test_concurrent_reads_return_consistent_rows(
         class Meta:
             table = table_name
 
-    create_sql = f"""
-        CREATE TABLE "{table_name}" (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL
-        )
-    """
-    drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
+    async with transient_table(
+        db_conn,
+        table_name,
+        backend=backend,
+        columns=[
+            Column("id", "pk_serial"),
+            Column("name", "text", null=False),
+        ],
+    ) as conn:
+        await Widget.objects.create(conn, name="alpha")
+        await Widget.objects.create(conn, name="beta")
 
-    async with transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
-        await Widget.objects.create(pg_conn, name="alpha")
-        await Widget.objects.create(pg_conn, name="beta")
-
-        batches = await asyncio.gather(*[Widget.objects.all(pg_conn) for _ in range(8)])
+        batches = await asyncio.gather(*[Widget.objects.all(conn) for _ in range(8)])
         for rows in batches:
             assert len(rows) == 2
             assert {r.name for r in rows} == {"alpha", "beta"}

@@ -250,3 +250,16 @@ secrets.json
 .cursor/docs/
 .cursor/agents/
 
+# Shared production-readiness orchestration (other agent state remains local).
+# Rules, skills, commands, goals, loops, and .agent-work/ are already unignored;
+# explicit exceptions below expose only the selected ignored plans/agents.
+!.cursor/plans/
+.cursor/plans/*
+!.cursor/plans/ferrum-production-readiness_6b5f422d.plan.md
+!.cursor/agents/
+.cursor/agents/*
+!.cursor/agents/*.md
+!.claude/agents/
+.claude/agents/*
+!.claude/agents/*.md
+

@@ -1,0 +1,41 @@
+version: 1
+task_id: replace-me
+owner: unassigned
+status: specified
+phase: specify
+run_id: null
+base_revision: null
+dependencies_checked: false
+owned_paths_checked: false
+shared_path_lease: null
+spec_complete: false
+plan_complete: false
+tasks_complete: false
+implementation_complete: false
+executor_validation: pending
+independent_verification: pending
+security_triage_complete: false
+security_surfaces:
+  sql_compilation: false
+  migration_apply: false
+  errors_redaction: false
+  auth_secrets: false
+  rls_admin_gucs: false
+  schema_selection: false
+security_review: not_required
+security_review_justification: null
+architecture_review: not_required
+product_review: not_required
+code_review: required
+artifacts:
+  task_contract: null
+  latest_log: null
+  latest_verification: null
+  architecture_review: null
+  security_review: null
+  product_review: null
+  code_review: null
+changed_paths: []
+blockers: []
+next_action: complete Specify
+updated_at: null

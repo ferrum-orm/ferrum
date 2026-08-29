@@ -16,8 +16,6 @@ from ferrum.migrations.ledger import (
     record_applied,
 )
 
-from .helpers import raw_pool
-
 
 def _create_table_plan(table: str) -> str:
     return json.dumps(
@@ -59,8 +57,7 @@ async def test_dry_run_does_not_touch_database(
     assert result.applied is False
     assert result.ops_count == 1
 
-    pool = raw_pool(pg_conn)
-    row = await pool.fetchrow(
+    row = await pg_conn._require_driver().fetchrow(
         "SELECT 1 FROM information_schema.tables WHERE table_name = $1",
         table,
     )
@@ -90,8 +87,7 @@ async def test_apply_creates_table(
         assert applied.applied is True
         assert applied.ops_count == 1
 
-        pool = raw_pool(pg_conn)
-        row = await pool.fetchrow(
+        row = await pg_conn._require_driver().fetchrow(
             "SELECT 1 FROM information_schema.tables WHERE table_name = $1",
             table,
         )

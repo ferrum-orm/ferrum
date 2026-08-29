@@ -323,6 +323,19 @@ def _row_to_dict(row: Any) -> dict[str, Any]:  # noqa: ANN401
     return dict(row)
 
 
+def _coerce_hydrated_row(model: type[Model], row: dict[str, Any]) -> dict[str, Any]:
+    """Coerce only DB integer values backed by boolean model metadata."""
+    coerced = dict(row)
+    for field in model.get_metadata().fields:
+        if field.field_type != "bool":
+            continue
+        key = field.name if field.name in coerced else field.column_name
+        value = coerced.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            coerced[key] = bool(value)
+    return coerced
+
+
 class _RowEncoder(json.JSONEncoder):
     """JSON encoder for driver rows and non-JSON-native Python types.
 
@@ -629,7 +642,7 @@ def _hydrate_rows(
                 )
                 raise mapped from exc
 
-    instances = [model.model_construct(**row) for row in row_dicts]
+    instances = [model.model_construct(**_coerce_hydrated_row(model, row)) for row in row_dicts]
     if deferred:
         for inst in instances:
             object.__setattr__(inst, "__ferrum_deferred__", deferred)
@@ -2120,7 +2133,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             duration_ms=duration_ms,
             row_count=1,
         )
-        return self._model.model_construct(**_row_to_dict(row))
+        return self._model.model_construct(**_coerce_hydrated_row(self._model, _row_to_dict(row)))
 
     def _pk_field_name(self, metadata: ModelMetadata) -> str:
         """Return the name of the *first* PK field (backward-compat single-PK helper)."""
@@ -2492,7 +2505,12 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 raise mapped from None
             duration_ms = (time.monotonic() - t0) * 1000
             if returning:
-                batch_instances = [self._model.model_construct(**_row_to_dict(row)) for row in rows]
+                batch_instances = [
+                    self._model.model_construct(
+                        **_coerce_hydrated_row(self._model, _row_to_dict(row))
+                    )
+                    for row in rows
+                ]
                 created.extend(batch_instances)
                 _hooks.query_success(
                     fingerprint=fingerprint,
@@ -2715,10 +2733,11 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         Upsert is PostgreSQL ``ON CONFLICT`` only. The thin-parity backends
         (MySQL, SQLite, MSSQL) raise rather than emit a non-portable statement.
         """
-        if dialect == "mssql":
+        if dialect in ("mysql", "sqlite", "mssql"):
             raise FerrumConfigError(
-                "upsert()/bulk_upsert() (MERGE) is not supported on the MSSQL backend "
-                "in this version. Use separate insert/update calls. [FERR-C001]"
+                f"upsert()/bulk_upsert() is not supported on the {dialect!r} backend. "
+                "Ferrum upsert requires PostgreSQL ON CONFLICT syntax. "
+                "Use separate insert/update calls on non-PostgreSQL backends. [FERR-C001]"
             )
         field_by_name = {f.name: f for f in metadata.fields}
         for field_name in values:
@@ -2862,7 +2881,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         _hooks.query_success(fingerprint="", duration_ms=duration_ms, row_count=1 if row else 0)
         if not returning or row is None:
             return None
-        return self._model.model_construct(**_row_to_dict(row))
+        return self._model.model_construct(**_coerce_hydrated_row(self._model, _row_to_dict(row)))
 
     async def bulk_upsert(
         self,
@@ -2949,7 +2968,11 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                     if returning:
                         row = await driver.fetchrow(sql, *bound)
                         if row is not None:
-                            upserted.append(self._model.model_construct(**_row_to_dict(row)))
+                            upserted.append(
+                                self._model.model_construct(
+                                    **_coerce_hydrated_row(self._model, _row_to_dict(row))
+                                )
+                            )
                     else:
                         await driver.execute(sql, *bound)
                         total += 1
@@ -3490,7 +3513,11 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                     from ferrum.registry import get_model
 
                     rel_model = get_model(rel_meta.to_model)
-                    set_relation(inst, rel_name, rel_model.model_construct(**rel_row))
+                    set_relation(
+                        inst,
+                        rel_name,
+                        rel_model.model_construct(**_coerce_hydrated_row(rel_model, rel_row)),
+                    )
         if self._prefetch_related:
             from ferrum.relations import prefetch_related_objects
 

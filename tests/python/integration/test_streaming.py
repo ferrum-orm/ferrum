@@ -1,18 +1,28 @@
-"""Live PostgreSQL coverage for bounded cursor streaming."""
+"""Live coverage for bounded cursor streaming."""
 
 from __future__ import annotations
 
 import asyncio
+import os
+from collections.abc import Callable
 
 import pytest
 
 from ferrum.connection import Connection
 from ferrum.drivers.protocol import _compiled_query
 
+from .backends import Backend, Capability
+
 
 @pytest.mark.integration
-async def test_streams_compiled_query_in_bounded_chunks(pg_dsn: str) -> None:
-    conn = Connection(pg_dsn, min_size=1, max_size=1)
+async def test_streams_compiled_query_in_bounded_chunks(
+    backend: Backend,
+    requires: Callable[[Capability], None],
+) -> None:
+    requires(Capability.STREAMING)
+
+    dsn = os.environ[backend.dsn_env]
+    conn = Connection(dsn, min_size=1, max_size=1)
     await conn.open()
     try:
         compiled = _compiled_query(
@@ -31,8 +41,14 @@ async def test_streams_compiled_query_in_bounded_chunks(pg_dsn: str) -> None:
 
 
 @pytest.mark.integration
-async def test_early_break_releases_single_pool_connection(pg_dsn: str) -> None:
-    conn = Connection(pg_dsn, min_size=1, max_size=1, acquire_timeout=0.5)
+async def test_early_break_releases_single_pool_connection(
+    backend: Backend,
+    requires: Callable[[Capability], None],
+) -> None:
+    requires(Capability.STREAMING)
+
+    dsn = os.environ[backend.dsn_env]
+    conn = Connection(dsn, min_size=1, max_size=1, acquire_timeout=0.5)
     await conn.open()
     try:
         compiled = _compiled_query("SELECT generate_series(1, 1000) AS value", [])
@@ -46,8 +62,14 @@ async def test_early_break_releases_single_pool_connection(pg_dsn: str) -> None:
 
 
 @pytest.mark.integration
-async def test_stream_cancellation_closes_cursor_and_releases_connection(pg_dsn: str) -> None:
-    conn = Connection(pg_dsn, min_size=1, max_size=1, acquire_timeout=1.0)
+async def test_stream_cancellation_closes_cursor_and_releases_connection(
+    backend: Backend,
+    requires: Callable[[Capability], None],
+) -> None:
+    requires(Capability.STREAMING)
+
+    dsn = os.environ[backend.dsn_env]
+    conn = Connection(dsn, min_size=1, max_size=1, acquire_timeout=1.0)
     await conn.open()
     started = asyncio.Event()
 

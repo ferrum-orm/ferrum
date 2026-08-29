@@ -45,6 +45,7 @@ _TIER_A_KEYS = frozenset(
         "duration_ms",
         "status",
         "failure_category",
+        "category",
         "rows_affected",
     }
 )
@@ -194,22 +195,30 @@ def query_failure(
     fingerprint: str,
     duration_ms: float,
     failure_category: str,
+    category: str | None = None,
 ) -> None:
     """Dispatch a Tier A ``query_failure`` hook payload.
 
     Fires when SQL execution raises an exception. ``failure_category`` MUST be
     a Ferrum error class name (e.g. ``"FerrumIntegrityError"``), never a raw
     SQLSTATE code, exception message, or bound value (LOG-1).
+
+    ``category`` is the closed-enum error category from ``ERROR_CATEGORIES``
+    (e.g. ``"unique_violation"``, ``"deadlock"``, ``"connection"``). It is a
+    Tier A key and survives default redaction. When ``category`` is ``None``
+    (e.g. the caller has not yet been updated to pass it), the key is simply
+    omitted from the payload.
     """
-    dispatch(
-        {
-            "event": "query_failure",
-            "fingerprint": fingerprint,
-            "duration_ms": round(duration_ms, 3),
-            "failure_category": failure_category,
-            "status": "error",
-        }
-    )
+    payload: HookPayload = {
+        "event": "query_failure",
+        "fingerprint": fingerprint,
+        "duration_ms": round(duration_ms, 3),
+        "failure_category": failure_category,
+        "status": "error",
+    }
+    if category is not None:
+        payload["category"] = category
+    dispatch(payload)
 
 
 def hydration_failure(
@@ -217,6 +226,7 @@ def hydration_failure(
     fingerprint: str,
     failure_category: str,
     model: str,
+    category: str | None = None,
 ) -> None:
     """Dispatch a Tier A ``hydration_failure`` hook payload.
 
@@ -228,16 +238,19 @@ def hydration_failure(
         fingerprint: Query fingerprint (operation + model, no values).
         failure_category: Ferrum error class name (e.g. ``"FerrumHydrationError"``).
         model: Model class name — safe metadata, never user input.
+        category: Closed-enum error category from ``ERROR_CATEGORIES``
+            (e.g. ``"hydration"``). Tier A key; omitted when ``None``.
     """
-    dispatch(
-        {
-            "event": "hydration_failure",
-            "fingerprint": fingerprint,
-            "failure_category": failure_category,
-            "model": model,
-            "status": "error",
-        }
-    )
+    payload: HookPayload = {
+        "event": "hydration_failure",
+        "fingerprint": fingerprint,
+        "failure_category": failure_category,
+        "model": model,
+        "status": "error",
+    }
+    if category is not None:
+        payload["category"] = category
+    dispatch(payload)
 
 
 class QueryTimer:
@@ -257,6 +270,8 @@ class QueryTimer:
         duration_ms = (time.monotonic() - self._start) * 1000
         status = "error" if exc_val is not None else "ok"
         failure_category = type(exc_val).__name__ if exc_val is not None else None
+        # Extract the closed-enum category from FerrumError exceptions (§5a).
+        category = getattr(exc_val, "category", None) if exc_val is not None else None
         payload: HookPayload = {
             "event": "query",
             "model": self._model,
@@ -267,4 +282,6 @@ class QueryTimer:
         }
         if failure_category:
             payload["failure_category"] = failure_category
+        if category:
+            payload["category"] = category
         dispatch(payload)

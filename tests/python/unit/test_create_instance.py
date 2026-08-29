@@ -107,6 +107,18 @@ class TestCreateInstanceForm:
         assert created is not widget
 
     @pytest.mark.asyncio
+    async def test_create_coerces_sqlite_integer_boolean_without_revalidation(self) -> None:
+        qs: QuerySet[Widget] = QuerySet(Widget)
+        mock_ext, mock_conn = _mock_native_and_conn(
+            fetchrow_result={"id": 42, "name": "a", "active": 0}
+        )
+
+        with patch("ferrum.queryset._native_ext", mock_ext):
+            created = await qs.create(mock_conn, name="a", active=False)
+
+        assert created.active is False
+
+    @pytest.mark.asyncio
     async def test_create_instance_and_kwargs_raises(self) -> None:
         qs: QuerySet[Widget] = QuerySet(Widget)
         mock_ext, mock_conn = _mock_native_and_conn()

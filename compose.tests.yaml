@@ -1,0 +1,65 @@
+name: ferrum-tests
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    container_name: ferrum-test-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ferrum_test
+      POSTGRES_USER: ferrum_test
+      POSTGRES_PASSWORD: ferrum_test
+    ports:
+      - 5432:5432
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ferrum_test -d ferrum_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mysql:
+    image: mysql:9.0
+    container_name: ferrum-test-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: ferrum_test
+      MYSQL_USER: ferrum_test
+      MYSQL_PASSWORD: ferrum_test
+    ports:
+      - 3306:3306
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u ferrum_test -pferrum_test --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2025-latest
+    container_name: ferrum-test-mssql
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: Y
+      MSSQL_PID: Express
+      MSSQL_SA_PASSWORD: FerrumTest123
+    ports:
+      - 1433:1433
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$$MSSQL_SA_PASSWORD" -C
+          -Q "IF DB_ID(N'ferrum_test') IS NULL EXEC(N'CREATE DATABASE [ferrum_test]');
+          IF SUSER_ID(N'ferrum_test') IS NULL CREATE LOGIN [ferrum_test] WITH PASSWORD=N'FerrumTest123';
+          USE [ferrum_test];
+          IF DATABASE_PRINCIPAL_ID(N'ferrum_test') IS NULL CREATE USER [ferrum_test] FOR LOGIN [ferrum_test];
+          IF NOT EXISTS (
+          SELECT 1 FROM sys.database_role_members drm
+          JOIN sys.database_principals r ON r.principal_id=drm.role_principal_id
+          JOIN sys.database_principals m ON m.principal_id=drm.member_principal_id
+          WHERE r.name=N'db_owner' AND m.name=N'ferrum_test'
+          ) ALTER ROLE [db_owner] ADD MEMBER [ferrum_test]"
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s

@@ -13,11 +13,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 from ferrum.connection import ConnectionLike
 from ferrum.errors import FerrumCompileError, FerrumRelationNotLoadedError
-from ferrum.models import Model
+from ferrum.models import Model, RelationMeta
 from ferrum.registry import get_model
 
 if TYPE_CHECKING:
-    from ferrum.models import Model, ModelMetadata, RelationMeta
+    from ferrum.models import Model, ModelMetadata
 
 
 @dataclasses.dataclass(frozen=True)
@@ -33,6 +33,40 @@ class ReverseRelationMeta:
 
 _REVERSE: dict[str, dict[str, ReverseRelationMeta]] = {}
 _RELATION_DESCRIPTORS_INSTALLED: set[type] = set()
+
+
+def _quote_identifier(identifier: str, dialect: str) -> str:
+    """Quote an identifier already resolved from immutable model metadata."""
+    if dialect == "mysql":
+        return f"`{identifier.replace('`', '``')}`"
+    if dialect == "mssql":
+        return f"[{identifier.replace(']', ']]')}]"
+    if dialect in ("postgres", "sqlite"):
+        return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
+    raise FerrumCompileError(f"Unsupported prefetch dialect {dialect!r}.")
+
+
+def _placeholders(count: int, dialect: str) -> str:
+    if dialect == "postgres":
+        return ", ".join(f"${i}" for i in range(1, count + 1))
+    if dialect == "mysql":
+        return ", ".join("%s" for _ in range(count))
+    if dialect in ("sqlite", "mssql"):
+        return ", ".join("?" for _ in range(count))
+    raise FerrumCompileError(f"Unsupported prefetch dialect {dialect!r}.")
+
+
+def _coerce_hydrated_row(model: type[Model], row: dict[str, Any]) -> dict[str, Any]:
+    """Coerce only DB integer values backed by boolean model metadata."""
+    coerced = dict(row)
+    for field in model.get_metadata().fields:
+        if field.field_type != "bool":
+            continue
+        key = field.name if field.name in coerced else field.column_name
+        value = coerced.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            coerced[key] = bool(value)
+    return coerced
 
 
 def register_reverse(*, target_model: str, meta: ReverseRelationMeta) -> None:
@@ -307,13 +341,15 @@ async def _prefetch_reverse_fk(
     related_model = get_model(rev.related_model_name)
     related_meta = related_model.get_metadata()
     driver = conn._require_driver()
-    placeholders = ", ".join(f"${i}" for i in range(1, len(parent_ids) + 1))
-    sql = f'SELECT * FROM "{related_meta.table_name}" WHERE "{rev.fk_column}" IN ({placeholders})'
+    placeholders = _placeholders(len(parent_ids), conn.dialect)
+    table = _quote_identifier(related_meta.table_name, conn.dialect)
+    fk_column = _quote_identifier(rev.fk_column, conn.dialect)
+    sql = f"SELECT * FROM {table} WHERE {fk_column} IN ({placeholders})"
     raw_rows = await driver.fetch(sql, *parent_ids)
     grouped: dict[Any, list[Any]] = {pid: [] for pid in parent_ids}
     for raw in raw_rows:
         row_dict = dict(raw) if hasattr(raw, "keys") else raw
-        obj = related_model.model_construct(**{k: row_dict[k] for k in row_dict})
+        obj = related_model.model_construct(**_coerce_hydrated_row(related_model, row_dict))
         fk_val = getattr(obj, rev.fk_column, None)
         if fk_val in grouped:
             grouped[fk_val].append(obj)
@@ -341,10 +377,13 @@ async def _prefetch_m2m(
     owner_col = f"{metadata.table_name}_id"
     target_col = f"{target_table}_id"
     driver = conn._require_driver()
-    placeholders = ", ".join(f"${i}" for i in range(1, len(parent_ids) + 1))
+    placeholders = _placeholders(len(parent_ids), conn.dialect)
+    owner_ident = _quote_identifier(owner_col, conn.dialect)
+    target_ident = _quote_identifier(target_col, conn.dialect)
+    through_ident = _quote_identifier(rel.through_table, conn.dialect)
     join_sql = (
-        f'SELECT "{owner_col}", "{target_col}" FROM "{rel.through_table}" '
-        f'WHERE "{owner_col}" IN ({placeholders})'
+        f"SELECT {owner_ident}, {target_ident} FROM {through_ident} "
+        f"WHERE {owner_ident} IN ({placeholders})"
     )
     join_rows = await driver.fetch(join_sql, *parent_ids)
     target_ids: set[Any] = set()
@@ -360,14 +399,18 @@ async def _prefetch_m2m(
         for inst in instances:
             set_relation(inst, name, [])
         return
-    tpk = target.get_metadata().fields[target.get_metadata().pk_index].name
-    placeholders = ", ".join(f"${i}" for i in range(1, len(target_ids) + 1))
-    target_sql = f'SELECT * FROM "{target_table}" WHERE "{tpk}" IN ({placeholders})'
+    target_meta = target.get_metadata()
+    target_pk = target_meta.fields[target_meta.pk_index]
+    tpk = target_pk.name
+    placeholders = _placeholders(len(target_ids), conn.dialect)
+    target_table_ident = _quote_identifier(target_table, conn.dialect)
+    target_pk_ident = _quote_identifier(target_pk.column_name, conn.dialect)
+    target_sql = f"SELECT * FROM {target_table_ident} WHERE {target_pk_ident} IN ({placeholders})"
     target_rows = await driver.fetch(target_sql, *list(target_ids))
     by_id = {}
     for raw in target_rows:
         row_dict = dict(raw) if hasattr(raw, "keys") else raw
-        obj = target.model_construct(**row_dict)
+        obj = target.model_construct(**_coerce_hydrated_row(target, row_dict))
         by_id[getattr(obj, tpk)] = obj
     for inst in instances:
         pid = getattr(inst, pk_name)

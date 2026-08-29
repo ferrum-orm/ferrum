@@ -1,0 +1,5 @@
+# Regenerated on every `mise run baseline` / nightly run; the durable record
+# lives in the production-readiness run log and CI artifact storage instead,
+# so baseline drift across machines never shows up as noise in `git diff`.
+latest/
+baselines/

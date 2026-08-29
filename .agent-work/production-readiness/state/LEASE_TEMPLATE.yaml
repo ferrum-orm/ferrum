@@ -1,0 +1,8 @@
+lease_id: replace-me
+workstream: replace-me
+run_id: YYYYMMDDTHHMMSSZ
+holder: replace-me
+paths:
+  - replace-me
+acquired_at: YYYY-MM-DDTHH:MM:SSZ
+expires_at: YYYY-MM-DDTHH:MM:SSZ

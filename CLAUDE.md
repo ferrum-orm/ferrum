@@ -11,9 +11,10 @@
 ## Start here
 
 1. Read `AGENTS.md` (this repo's authoritative agent contract).
-2. Read `.claude/docs/PRODUCT_REQUIREMENTS.md` and
-   `.claude/docs/ARCHITECTURE.md` before substantial work.
+2. Read `README.md`, `CHANGELOG.md`, and relevant source/tests before substantial work.
 3. Check `.claude/rules/` for any deeper, file-scoped rules. More specific rules win.
+4. For production readiness, read the approved plan and
+   `.agent-work/production-readiness/PROTOCOL.md`.
 
 ## What Ferrum is
 
@@ -30,8 +31,9 @@ models**, and a **Django-inspired developer experience**, targeting async Postgr
   and persistence.
 - **PyO3 + maturin** bridge Rust and Python; the boundary maps `Err`/panics to catchable Python
   exceptions, never a process abort or leaked internals.
-- **PostgreSQL only** for the MVP — no multi-database abstraction, no SQLite/MySQL fallback
-  before the PostgreSQL MVP is stable.
+- **PostgreSQL is the only production-readiness and consumer-pilot target.** Shipped
+  mysql/sqlite/mssql extras are best-effort thin parity, out of P0 gates, and must not
+  shape PostgreSQL correctness (full text in `AGENTS.md` §2.6).
 - **No feature without tests.** **Public API changes require docs updates** in the same change.
 - **No raw SQL escape hatches.** Identifiers come from model-metadata allowlists; values are
   bound parameters only.
@@ -52,12 +54,19 @@ These are release-qualification gates and must be test-covered:
 **Flag any change to auth, secrets, SQL compilation, or migration apply for SecurityEngineer
 review.** Do not self-clear security-sensitive work.
 
-## Open ADRs — do not pre-empt (full text in `AGENTS.md` §5)
+## ADR status — do not pre-empt (full text in `AGENTS.md` §5)
 
-ADR-001 driver placement · ADR-002 IR contract · ADR-003 hydration semantics ·
-ADR-004 migration transactionality · ADR-005 packaging/CI matrix · ADR-006 centralized
-error/hook layer. If your task depends on an undecided ADR, surface it instead of hard-coding a
-choice.
+ADR-001/002/003/005/006 are resolved. ADR-004 migration transactionality is reopened because the
+current executor does not yet enforce the intended transactional default. Production-readiness
+W1-C owns its closure. Surface any new undecided architecture choice instead of hard-coding it.
+
+## Wave 0 contracts — ratified (full text in `AGENTS.md` §5a)
+
+`AGENTS.md` §5a is ratified for run `20260821T082329Z` (ChiefArchitect, SecurityEngineer,
+and CodeReviewer `decision: approved`; ProductManager resolution A on `20260821T075800Z`).
+The contract is binding. Live retry / `orchestrator.apply()` / tenancy **code** is not
+shipped to match it — W1-B, W1-C, W1-D, and W1-F own implementation after Wave 0
+completes. ADR-004 remains reopened in `AGENTS.md` §5.
 
 ## Working in this repo (Claude Code specifics)
 
@@ -70,11 +79,25 @@ choice.
   not rewrite working code to restyle it.
 - **Run the smallest verification that proves the change** — touched-file lint/type/tests over
   full-repo builds, unless the task scope warrants more.
-- **Production source is not implemented yet.** Do not add ORM source as part of
-  documentation, workspace-setup, or planning tasks.
 - **Git commits:** commit as `ferrum-orm <294406588+ferrum-orm@users.noreply.github.com>` and do
   **not** add any `Co-Authored-By:` trailer. This repo must show a single GitHub contributor
   (ferrum-orm); any author/committer/co-author identity other than that re-adds a contributor.
+
+## Production-readiness execution
+
+When working from `.cursor/plans/ferrum-production-readiness_6b5f422d.plan.md`:
+
+1. Load `.claude/skills/ferrum-readiness-orchestration/SKILL.md` for coordination or
+   `.claude/skills/ferrum-readiness-execution/SKILL.md` for an assigned task.
+2. Complete **Specify → Plan → Tasks → Implement** in the task contract.
+3. Run **Load → Execute → Validate executor output → Verify independently → Update state**.
+4. Keep aggregate state coordinator-owned, workstream paths executor-owned, and verifier evidence
+   independent. Append a new log/verification record rather than rewriting history.
+5. Use `.agent-work/production-readiness/` for durable state, evidence, and safe revert notes.
+6. Run focused checks during implementation and full `mise run ci-local` before completion.
+
+Use `.claude/commands/production-readiness-next.md` for one coordinator iteration and
+`.claude/commands/production-readiness-loop.md` only through a user-authorized recurring workflow.
 
 ## Definition of done (full checklist in `AGENTS.md` §8)
 

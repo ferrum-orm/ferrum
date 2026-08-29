@@ -55,6 +55,7 @@ CAP tradeoffs · Blast Radius · Data Gravity · Event-Driven vs Request-Respons
 
 ## Escalation
 
-Any change to auth, secrets, SQL compilation, or migration apply → **notify SecurityEngineer**.
+Any change to SQL compilation, migration apply, errors/redaction, auth/secrets,
+RLS/admin GUCs, or schema selection → **require SecurityEngineer approval**.
 Architecture decisions, ADRs, service boundaries, data models → **ChiefArchitect**. Do not
 implement a feature that bypasses architecture review — stop and flag it.

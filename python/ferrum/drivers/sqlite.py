@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -80,22 +81,52 @@ class AiosqliteDriver:
             )
         return self._conn
 
+    async def _cancel_operation(self, conn: Any, cursor: Any | None) -> None:
+        """Interrupt SQLite work before queued cursor/transaction cleanup."""
+        try:
+            await conn.interrupt()
+            if cursor is not None:
+                await cursor.close()
+            await conn.rollback()
+        except BaseException:
+            with contextlib.suppress(BaseException):
+                await conn.close()
+            if self._conn is conn:
+                self._conn = None
+
+    async def _close_cursor(self, cursor: Any | None) -> None:
+        if cursor is not None:
+            with contextlib.suppress(Exception):
+                await cursor.close()
+
     async def fetch(self, sql: str, *params: object) -> list[Any]:
         conn = self._require_conn()
+        cursor = None
         try:
-            async with conn.execute(sql, params) as cursor:
-                rows = await cursor.fetchall()
-                return [_row_to_dict(r) for r in rows]
+            cursor = await conn.execute(sql, params)
+            rows = await cursor.fetchall()
+            await self._close_cursor(cursor)
+            return [_row_to_dict(r) for r in rows]
+        except asyncio.CancelledError:
+            await asyncio.shield(self._cancel_operation(conn, cursor))
+            raise
         except Exception as exc:
+            await self._close_cursor(cursor)
             raise map_db_error(exc) from None
 
     async def fetchrow(self, sql: str, *params: object) -> Any | None:
         conn = self._require_conn()
+        cursor = None
         try:
-            async with conn.execute(sql, params) as cursor:
-                row = await cursor.fetchone()
-                return _row_to_dict(row) if row is not None else None
+            cursor = await conn.execute(sql, params)
+            row = await cursor.fetchone()
+            await self._close_cursor(cursor)
+            return _row_to_dict(row) if row is not None else None
+        except asyncio.CancelledError:
+            await asyncio.shield(self._cancel_operation(conn, cursor))
+            raise
         except Exception as exc:
+            await self._close_cursor(cursor)
             raise map_db_error(exc) from None
 
     async def fetchval(self, sql: str, *params: object) -> Any:
@@ -108,12 +139,21 @@ class AiosqliteDriver:
 
     async def execute(self, sql: str, *params: object) -> str:
         conn = self._require_conn()
+        cursor = None
         try:
-            async with conn.execute(sql, params) as cursor:
-                await conn.commit()
-                op = sql.strip().split()[0].upper()
-                return f"{op} {cursor.rowcount}"
+            cursor = await conn.execute(sql, params)
+            if cursor.description is not None:
+                await cursor.fetchall()
+            rowcount = cursor.rowcount
+            await self._close_cursor(cursor)
+            await conn.commit()
+            op = sql.strip().split()[0].upper()
+            return f"{op} {rowcount}"
+        except asyncio.CancelledError:
+            await asyncio.shield(self._cancel_operation(conn, cursor))
+            raise
         except Exception as exc:
+            await self._close_cursor(cursor)
             raise map_db_error(exc) from None
 
     @contextlib.asynccontextmanager

@@ -1,0 +1,6 @@
+version: 1
+supersessions:
+  .agent-work/production-readiness/verification/orchestration-bootstrap/20260821T080251Z.md:
+    schema: verification-v1-missing-base-revision
+    required_correction: .agent-work/production-readiness/verification/orchestration-bootstrap/20260821T080252Z.md
+    reason: original append-only record omitted base_revision

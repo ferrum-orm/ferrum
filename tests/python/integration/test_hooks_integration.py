@@ -1,18 +1,25 @@
-"""Integration tests verifying Tier A hook payloads on live query execution."""
+"""Integration tests verifying Tier A hook payloads on live query execution.
+
+Verifies the ratified §5a "Safe error fields" contract on live PostgreSQL:
+hook payloads carry ``failure_category`` and bound values are absent.
+"""
 
 from __future__ import annotations
 
 import pytest
 
 import ferrum
+from ferrum.errors import ERROR_CATEGORIES
 from ferrum.hooks import _TIER_A_KEYS, clear_hooks, register_hook
 
-from .helpers import transient_table
+from .backends import Backend
+from .schema import Column, transient_table
 
 
 @pytest.mark.integration
 async def test_successful_query_emits_tier_a_hooks_only(
-    pg_conn: ferrum.connection.Connection,
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
     require_native: None,
     unique_suffix: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -34,18 +41,18 @@ async def test_successful_query_emits_tier_a_hooks_only(
         class Meta:
             table = table_name
 
-    create_sql = f"""
-        CREATE TABLE "{table_name}" (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL
-        )
-    """
-    drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
-
     try:
-        async with transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
-            await HookTarget.objects.create(pg_conn, name="probe")
-            await HookTarget.objects.filter(name="probe").count(pg_conn)
+        async with transient_table(
+            db_conn,
+            table_name,
+            backend=backend,
+            columns=[
+                Column("id", "pk_serial"),
+                Column("name", "text", null=False),
+            ],
+        ) as conn:
+            await HookTarget.objects.create(conn, name="probe")
+            await HookTarget.objects.filter(name="probe").count(conn)
 
         events = {p["event"] for p in captured}
         assert "query_start" in events
@@ -56,7 +63,7 @@ async def test_successful_query_emits_tier_a_hooks_only(
             assert "bound_params" not in payload
             assert "sql_text" not in payload
             text = str(payload)
-            assert "postgresql://" not in text
+            assert "://" not in text
             assert "probe" not in text
     finally:
         clear_hooks()
@@ -64,7 +71,8 @@ async def test_successful_query_emits_tier_a_hooks_only(
 
 @pytest.mark.integration
 async def test_integrity_failure_emits_query_failure_hook(
-    pg_conn: ferrum.connection.Connection,
+    db_conn: ferrum.connection.Connection,
+    backend: Backend,
     require_native: None,
     unique_suffix: str,
 ) -> None:
@@ -80,22 +88,35 @@ async def test_integrity_failure_emits_query_failure_hook(
         class Meta:
             table = table_name
 
-    create_sql = f"""
-        CREATE TABLE "{table_name}" (
-            id SERIAL PRIMARY KEY,
-            code TEXT NOT NULL UNIQUE
-        )
-    """
-    drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
-
     try:
-        async with transient_table(pg_conn, create_sql=create_sql, drop_sql=drop_sql):
-            await UniqueRow.objects.create(pg_conn, code="dup")
-            with pytest.raises(ferrum.FerrumIntegrityError):
-                await UniqueRow.objects.create(pg_conn, code="dup")
+        async with transient_table(
+            db_conn,
+            table_name,
+            backend=backend,
+            columns=[
+                Column("id", "pk_serial"),
+                Column("code", "text", null=False, extra="UNIQUE"),
+            ],
+        ) as conn:
+            await UniqueRow.objects.create(conn, code="dup")
+            with pytest.raises(ferrum.FerrumIntegrityError) as exc_info:
+                await UniqueRow.objects.create(conn, code="dup")
 
         assert failures, "expected query_failure hook after integrity error"
         assert failures[-1]["failure_category"] == "FerrumIntegrityError"
         assert failures[-1]["status"] == "error"
+        # §5a: Tier-A payload keys are a subset of _TIER_A_KEYS.
+        assert set(failures[-1].keys()).issubset(_TIER_A_KEYS)
+        # §5a: bound values never appear in default hook payloads.
+        payload_str = str(failures[-1])
+        assert "dup" not in payload_str, "Bound value 'dup' must not appear in hook payload"
+        # §5a: the mapped exception carries structured category in the closed enum.
+        assert exc_info.value.category in ERROR_CATEGORIES, (
+            f"category={exc_info.value.category!r} not in closed enum"
+        )
+        if backend.name == "postgres":
+            assert exc_info.value.sqlstate == "23505", (
+                f"expected sqlstate=23505, got {exc_info.value.sqlstate!r}"
+            )
     finally:
         clear_hooks()

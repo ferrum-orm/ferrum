@@ -1,0 +1,181 @@
+version: 1
+goal: ferrum-production-readiness
+plan: .cursor/plans/ferrum-production-readiness_6b5f422d.plan.md
+updated_at: 2026-08-29T09:00:00Z
+updated_by: production-readiness-coordinator
+status: active
+current_wave: wave-1
+shared_path_leases: {}
+ownership_checked_at: 2026-08-29T09:00:00Z
+shared_paths:
+  - AGENTS.md
+  - CLAUDE.md
+  - README.md
+  - CHANGELOG.md
+  - pyproject.toml
+  - Cargo.toml
+  - uv.lock
+  - mise.toml
+  - .github/workflows/
+  - python/ferrum/__init__.py
+  - python/ferrum/migrations/ledger.py
+allowed_statuses:
+  - specified
+  - planned
+  - tasked
+  - ready
+  - in_progress
+  - validating
+  - awaiting_verification
+  - verified
+  - blocked
+  - complete
+  - reverted
+waves:
+  wave-0:
+    dependencies: []
+    status: complete
+    workstreams:
+      - w0-a-architecture-contracts
+      - w0-b-consumer-parity
+      - w0-c-reproducible-baselines
+  wave-1:
+    dependencies: [wave-0]
+    status: in_progress
+    workstreams:
+      - w1-a-query-correctness
+      - w1-b-transactions-retries-locks
+      - w1-c-migration-safety
+      - w1-d-error-taxonomy
+      - w1-e-pool-lifecycle
+      - w1-f-tenancy-shards
+  wave-2:
+    dependencies: [wave-1]
+    status: blocked
+    workstreams:
+      - w2-a-field-codecs
+      - w2-b-query-expressiveness
+      - w2-c-relations-bulk
+      - w2-d-framework-integrations
+      - w2-e-extension-lifecycle
+      - w2-f-schema-drift-cli
+  wave-3:
+    dependencies: [w1-c-migration-safety]
+    status: blocked
+    workstreams:
+      - w3-a-migration-graph
+      - w3-b-schema-shard-migrations
+      - w3-c-autodiff
+  wave-4:
+    dependencies: [wave-1]
+    status: blocked
+    workstreams:
+      - w4-a-observability
+      - w4-b-performance
+      - w4-c-typing
+      - w4-d-packaging-release
+  consumer-pilots:
+    dependencies: [wave-2, wave-4]
+    status: blocked
+    workstreams:
+      - pilot-ticket-analyzer
+      - pilot-org-ai-platform
+workstreams:
+  w0-a-architecture-contracts: verified
+  w0-b-consumer-parity: verified
+  w0-c-reproducible-baselines: verified
+  w1-a-query-correctness: in_progress
+  w1-b-transactions-retries-locks: tasked
+  w1-c-migration-safety: in_progress
+  w1-d-error-taxonomy: complete
+  w1-e-pool-lifecycle: ready
+  w1-f-tenancy-shards: tasked
+  w2-a-field-codecs: blocked
+  w2-b-query-expressiveness: blocked
+  w2-c-relations-bulk: blocked
+  w2-d-framework-integrations: blocked
+  w2-e-extension-lifecycle: blocked
+  w2-f-schema-drift-cli: blocked
+  w3-a-migration-graph: blocked
+  w3-b-schema-shard-migrations: blocked
+  w3-c-autodiff: blocked
+  w4-a-observability: blocked
+  w4-b-performance: blocked
+  w4-c-typing: blocked
+  w4-d-packaging-release: blocked
+  pilot-ticket-analyzer: blocked
+  pilot-org-ai-platform: blocked
+release_gates:
+  correctness: pending
+  transactions: pending
+  migrations: pending
+  error_redaction: pending
+  pool_operability: pending
+  consumer_contracts: pending
+  packaging: pending
+blockers:
+  - id: w0-c-shared-path-overlap
+    severity: resolved
+    workstream: w0-c-reproducible-baselines
+    lease: w0-c-shared-20260821T075802Z
+    overlapping_workstream: w0-b-consumer-parity
+    paths:
+      - mise.toml
+      - .github/workflows/ci.yml
+      - .github/workflows/nightly.yml
+    note: W0-B run 20260821T075801Z confirmed it never wrote these files; all of its edits are under tests/consumer_contracts/. The db-up / integration-matrix / ci.yml hunks are other-agent work and stay preserved. W0-B remains confined. Resume W0-C run 20260821T083900Z to wire nightly.yml under the existing exclusive lease. Do not revert other-agent hunks. Do not grant W0-B those paths.
+  - id: w0-a-named-reviews
+    severity: resolved
+    workstream: w0-a-architecture-contracts
+    run_id: 20260821T082329Z
+    prior_run_id: 20260821T075800Z
+    product_review: .agent-work/production-readiness/reviews/w0-a-architecture-contracts/20260821T075800Z-product-manager.md
+    architecture_review: .agent-work/production-readiness/reviews/w0-a-architecture-contracts/20260821T082329Z-chief-architect.md
+    architecture_review_prior: .agent-work/production-readiness/reviews/w0-a-architecture-contracts/20260821T075800Z-chief-architect.md
+    code_review: .agent-work/production-readiness/reviews/w0-a-architecture-contracts/20260821T082329Z-code-reviewer.md
+    code_review_prior: .agent-work/production-readiness/reviews/w0-a-architecture-contracts/20260821T075800Z-code-reviewer.md
+    security_review: .agent-work/production-readiness/reviews/w0-a-architecture-contracts/20260821T082329Z-security-engineer.md
+    security_review_prior: .agent-work/production-readiness/reviews/w0-a-architecture-contracts/20260821T075800Z-security-engineer.md
+    follow_through_log: .agent-work/production-readiness/logs/w0-a-architecture-contracts/20260821T085200Z.md
+    latest_verification: .agent-work/production-readiness/verification/w0-a-architecture-contracts/20260821T085200Z.md
+    note: Independent verifier recorded decision verified for heading-flip run 20260821T085200Z. Named 082329Z CA/SE/CR plus PM 075800Z remain approved. Lease w0-a-shared-20260821T082329Z released. §5a is the binding contract; live retry/apply/tenancy code is not shipped. Do not self-clear. W1-B/W1-C/W1-F still own implementation after Wave 0.
+  - id: unowned-integration-lint
+    severity: ci
+    paths:
+      - tests/python/integration/schema.py
+      - tests/python/integration/test_read_path.py
+    note: Unowned integration helpers fail ruff format/check. Outside Wave 0 ownership. Do not modify. Full ci-local cannot be claimed green until the owner of tests/python/integration/ fixes them.
+  - id: unowned-stale-docs
+    severity: docs
+    paths:
+      - docs/architecture.md
+      - .cursor/plans/wave-0-architect-verdict.md
+      - .cursor/plans/wave-0-backlog.md
+    note: Stale ADR-004 or compatibility claims outside W0-A owned paths. W0-A is verified; route a follow-up doc-sync for these files when a disjoint owner/lease exists. Do not treat this residual as a Wave 1 start gate.
+  - id: w0-c-code-review
+    severity: resolved
+    workstream: w0-c-reproducible-baselines
+    run_id: 20260821T090200Z
+    prior_run_id: 20260821T083900Z
+    code_review: .agent-work/production-readiness/reviews/w0-c-reproducible-baselines/20260821T090200Z-code-reviewer.md
+    prior_code_review: .agent-work/production-readiness/reviews/w0-c-reproducible-baselines/20260821T083900Z-code-reviewer.md
+    latest_verification: .agent-work/production-readiness/verification/w0-c-reproducible-baselines/20260821T090200Z.md
+    prior_verification: .agent-work/production-readiness/verification/w0-c-reproducible-baselines/20260821T083900Z.md
+    note: Independent verifier recorded decision verified for lint-fix run 20260821T090200Z. Lease w0-c-shared-20260821T075802Z released. Residual should-fix (nightly collect_baseline.py short-circuit; uv sync --extra dev before smoke-wheel) and unowned Connection._pool benches are not Wave 0 close-out of this workstream.
+  - id: w0-b-named-reviews
+    severity: resolved
+    workstream: w0-b-consumer-parity
+    run_id: 20260821T075801Z
+    architecture_review: .agent-work/production-readiness/reviews/w0-b-consumer-parity/20260821T075801Z-chief-architect.md
+    security_review: .agent-work/production-readiness/reviews/w0-b-consumer-parity/20260821T075801Z-security-engineer.md
+    code_review: .agent-work/production-readiness/reviews/w0-b-consumer-parity/20260821T075801Z-code-reviewer.md
+    latest_verification: .agent-work/production-readiness/verification/w0-b-consumer-parity/20260821T075801Z.md
+    note: Independent verifier recorded decision verified for inventory run 20260821T075801Z. Named CA/SE/CR remain approved. EnableRLS(force=True) FORCE-without-ENABLE is independently reproduced and is not cleared; ENABLE+FORCE remains W1-C residual. Quoted DEFAULT allowlist (ta-15) remains a later SecurityEngineer-gated fix. Wave 0 workstreams W0-A/B/C are verified. Do not implement production ORM fixes from this close-out.
+  - id: w1-c-enable-rls-force
+    severity: residual
+    workstream: w1-c-migration-safety
+    note: Production EnableRLS(force=True) emits FORCE without ENABLE (relrowsecurity stays false; policies are a silent no-op). Inventories as ta-16 with a strict xfail. W1-C run 20260821T093502Z owns the ENABLE+FORCE fix, confirm-gate hole, and ADR-004 apply. SecurityEngineer required on that diff before completion. Do not self-clear.
+  - id: w1-serial-connection-queryset
+    severity: sequencing
+    workstream: w1-b-transactions-retries-locks
+    note: W1-D complete (20260829T074746Z). W1-E is now ready (W1-D dependency met). W1-B still waits for W1-E and W1-A. W1-F still waits for W1-E plus an __init__.py lease. Do not dispatch W1-B/F until W1-E and W1-A are verified.

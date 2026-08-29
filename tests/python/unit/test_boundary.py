@@ -16,9 +16,12 @@ Run ``maturin develop`` to build it.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 import ferrum
+from ferrum.queryset import _hydrate_rows
 
 
 class TestRustPanicAndErrorBoundary:
@@ -357,6 +360,18 @@ class TestHydrateRowsPythonWiring:
             id: int = 0
 
         assert _hydrate_rows(Probe, []) == []
+
+    def test_hydrate_rows_coerces_only_metadata_boolean_integers(self) -> None:
+        class Probe(ferrum.Model):
+            id: int = 0
+            active: bool = False
+            amount: Decimal = Decimal("0")
+
+        amount = Decimal("12.50")
+        result = _hydrate_rows(Probe, [{"id": 1, "active": 1, "amount": amount}])
+
+        assert result[0].active is True
+        assert result[0].amount is amount
 
     def test_hydrate_rows_null_required_column_raises_ferrum_error(self) -> None:
         """NULL in non-nullable column raises FerrumHydrationError (native ext required)."""

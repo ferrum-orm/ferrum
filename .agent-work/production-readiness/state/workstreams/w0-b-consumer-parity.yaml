@@ -1,0 +1,87 @@
+version: 1
+task_id: w0-b-consumer-parity
+owner: production-readiness-executor
+status: verified
+phase: implement
+run_id: 20260821T075801Z
+base_revision: 768ec1f3013f6d0eccd7c8b590ba36b54b12d23e
+dependencies_checked: true
+owned_paths_checked: true
+shared_path_lease: null
+spec_complete: true
+plan_complete: true
+tasks_complete: true
+implementation_complete: true
+executor_validation: passed
+independent_verification: verified
+security_triage_complete: true
+security_surfaces:
+  sql_compilation: false
+  migration_apply: false
+  errors_redaction: false
+  auth_secrets: false
+  rls_admin_gucs: true
+  schema_selection: false
+security_review: required
+security_review_justification: >-
+  This run's contract-test audit discovered and reproduced a real Ferrum RLS
+  defect (ta-16-migration-force-rls-never-enables:
+  EnableRLS(table, force=True) never emits ENABLE ROW LEVEL SECURITY, only
+  FORCE, leaving relrowsecurity false and every policy a silent no-op). No
+  Ferrum production code was changed by this run, but the finding is
+  security-relevant per AGENTS.md SS3 and must not be self-cleared; flag for
+  SecurityEngineer review before any fix is scoped.
+architecture_review: required
+product_review: not_required
+code_review: required
+artifacts:
+  task_contract: .agent-work/production-readiness/tasks/w0-b-consumer-parity.md
+  latest_log: .agent-work/production-readiness/logs/w0-b-consumer-parity/20260821T075801Z.md
+  latest_verification: .agent-work/production-readiness/verification/w0-b-consumer-parity/20260821T075801Z.md
+  architecture_review: .agent-work/production-readiness/reviews/w0-b-consumer-parity/20260821T075801Z-chief-architect.md
+  security_review: .agent-work/production-readiness/reviews/w0-b-consumer-parity/20260821T075801Z-security-engineer.md
+  product_review: null
+  code_review: .agent-work/production-readiness/reviews/w0-b-consumer-parity/20260821T075801Z-code-reviewer.md
+changed_paths:
+  - tests/consumer_contracts/__init__.py
+  - tests/consumer_contracts/conftest.py
+  - tests/consumer_contracts/manifest.py
+  - tests/consumer_contracts/test_manifest_integrity.py
+  - tests/consumer_contracts/test_ticket_analyzer_contracts.py
+  - tests/consumer_contracts/test_org_ai_platform_contracts.py
+blockers:
+  - Coordinator interrupt (11:33 local) reported a shared-path lease overlap
+    on mise.toml, .github/workflows/nightly.yml, and .github/workflows/ci.yml,
+    which are exclusively leased to w0-c-shared-20260821T075802Z for
+    w0-c-reproducible-baselines. This run's own edit history (verified via git
+    status cross-check, recorded in the run log) shows no write to those
+    paths or to any path outside tests/consumer_contracts/; the pre-existing
+    diffs there belong to other in-flight workstreams and were preserved
+    untouched. Coordinator subsequently closed this as a misattribution
+    (11:37 local) and confirmed this run never wrote those paths.
+  - "mise run ci-local fails in the unowned agent-orchestration task \
+    (ERROR: assignment drift: w0-a-architecture-contracts:shared_path_lease; \
+    ERROR: completed task review path mismatch on \
+    w0-a-architecture-contracts:{security,architecture,product,code}_review) \
+    before any of lint-python/lint-rust/type-python/test-rust/boundary/\
+    import-boundary report a result. This is w0-a-architecture-contracts \
+    workstream state, not w0-b, and outside this run's owned paths (and \
+    outside state/index.yaml, which this run is forbidden to edit) — recorded \
+    as an external blocker, not fixed. mise run ci-local cannot be claimed \
+    green; the owned consumer-contract test suite is independently verified \
+    green (see latest_log)."
+  - "The shared local test-Postgres container this run originally used was \
+    torn down and replaced mid-session by concurrent w0-c-reproducible-\
+    baselines infrastructure work (mise.toml/compose.tests.yaml, unowned by \
+    this run). Re-validated the full owned suite against a throwaway, \
+    privately-named Postgres container with a verified non-superuser, \
+    non-bypassrls role instead of depending on that shared/mutating \
+    resource; see latest_log continuation for the stronger, final green \
+    result (9 passed/1 xfailed integration, 63 passed default, ruff clean)."
+next_action: >-
+  No further W0-B implementation. Independent verification of run
+  20260821T075801Z recorded decision verified. Production EnableRLS
+  ENABLE+FORCE and quoted DEFAULT allowlist remain W1-C / later, not this
+  workstream. Wave 0 is complete; Wave 1 assignment is a separate
+  coordinator tick.
+updated_at: 2026-08-21T09:31:00Z

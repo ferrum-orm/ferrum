@@ -24,11 +24,24 @@ Ferrum aims to provide all four.
 - Pydantic-first models
 - Django-inspired ORM experience
 - Rust-powered query engine
-- PostgreSQL-first architecture (MySQL, SQLite, and SQL Server via optional extras)
+- PostgreSQL-first architecture. MySQL, SQLite, and SQL Server extras are best-effort thin parity — not production-supported and not production-readiness release gates
 - Type-safe query construction
 - Automatic migrations
 - High-performance result hydration
 - Production-ready observability
+
+### Production-readiness execution
+
+Ferrum is still alpha. The remaining production work for Ticket Analyzer and an
+async-refactored Org AI Platform is tracked in
+[the production-readiness plan](.cursor/plans/ferrum-production-readiness_6b5f422d.plan.md).
+Execution is wave-based and supports parallel agents through disjoint file ownership,
+per-workstream state, immutable evidence logs, and an independent verification gate.
+
+Every task follows `Specify → Plan → Tasks → Implement`; every executor run follows
+`Load → Execute → Validate executor output → Verify independently → Update state`.
+See [.agent-work/production-readiness/](.agent-work/production-readiness/) for the durable
+execution contract and current aggregate state.
 
 ---
 
@@ -213,7 +226,9 @@ This allows Ferrum to maintain a Pythonic API without sacrificing performance.
 ### Cross-Driver Full-Text Search
 
 Native full-text search across PostgreSQL, MySQL, SQLite FTS5, and SQL Server — one
-QuerySet API, dialect-specific SQL emit and migration DDL.
+QuerySet API, dialect-specific SQL emit and migration DDL. Cross-dialect FTS on
+MySQL / SQLite / SQL Server is a **thin-extra** capability, not a P0
+production-readiness release gate. PostgreSQL FTS is the production-readiness target.
 
 **Query modes** (filter lookups and ranking):
 
@@ -294,7 +309,7 @@ and [API Reference](docs/api-reference.md) for per-dialect DDL and operator mapp
 - [x] Migrations (schema diff, apply, revert, CLI)
 - [x] Relationships (ForeignKey, OneToOne, ManyToMany)
 - [x] pgvector KNN search and HNSW/IVFFLAT index DDL
-- [x] Full-text search (cross-dialect: PostgreSQL, MySQL, SQLite FTS5, SQL Server)
+- [x] Full-text search (PostgreSQL is the P0 gate; MySQL/SQLite/SQL Server FTS is thin-extra)
 - [x] Observability hooks (Tier A/B/C)
 - [x] CLI (`makemigrations`, `migrate`, `revert`, `showmigrations`, `inspectdb`, `resetdb`)
 
@@ -325,7 +340,11 @@ and [API Reference](docs/api-reference.md) for per-dialect DDL and operator mapp
 
 Ferrum is currently in active development.
 
-The API is not yet stable and breaking changes should be expected until the first public release.
+The API is not yet stable. **0.x has no compatibility guarantee**: SemVer MINOR and PATCH
+may both break. After 1.0, public API and migration-ops breaks require a deprecation
+window of at least one minor release and 90 days, whichever is longer. Generated SQL is
+never a compatibility surface. Compatibility policy: `AGENTS.md` §5a. Thin extras:
+`AGENTS.md` §2.6. See also `CHANGELOG.md`.
 
 ## Installation
 
@@ -358,10 +377,45 @@ pip install ferrum-orm
 Bare `ferrum-orm` installs Pydantic and the Rust core only. Choose a driver extra
 (`pg`, `mysql`, `sqlite`, or `mssql`) before calling `ferrum.connect()`.
 
-MySQL, SQLite, and SQL Server are **thin-parity** backends: they support core CRUD
-and migrations but not transactions, upsert, `bulk_update`, RLS, or pgvector
-(PostgreSQL only). SQL Server connects via `aioodbc`/`pyodbc` and requires a system
-ODBC driver such as `msodbcsql18`; DSNs use the `mssql://` or `sqlserver://` scheme.
+MySQL, SQLite, and SQL Server are **best-effort thin-parity** backends: they are **not
+production-supported** and are **not production-readiness release gates**. Core CRUD is
+exercised across all four drivers; advanced behavior is capability-gated rather than
+emulated with incompatible SQL. The integration-suite registry
+(`tests/python/integration/backends.py`) is the coverage matrix — what is tested,
+not a stability or production-support claim. PostgreSQL claims every capability.
+MySQL and SQL Server claim full-text search and composite primary keys only.
+SQLite claims `RETURNING`, full-text search, and composite primary keys.
+
+| Capability | PostgreSQL | MySQL | SQLite | SQL Server |
+| ---------- | :--------: | :---: | :----: | :--------: |
+| Transactions | ✅ | — | — | — |
+| Savepoints | ✅ | — | — | — |
+| Cursor streaming | ✅ | — | — | — |
+| Bulk update | ✅ | — | — | — |
+| Aggregates / grouping | ✅ | — | — | — |
+| Upsert | ✅ | — | — | — |
+| Returning rows | ✅ | — | ✅ | — |
+| Row-level security helpers | ✅ | — | — | — |
+| pgvector | ✅ | — | — | — |
+| Full-text search | ✅ | ✅ | ✅ | ✅ |
+| JSON operators | ✅ | — | — | — |
+| Case-insensitive `ILIKE` | ✅ | — | — | — |
+| Array columns | ✅ | — | — | — |
+| Alter column | ✅ | — | — | — |
+| Composite primary keys | ✅ | ✅ | ✅ | ✅ |
+| Stored-function calls | ✅ | — | — | — |
+
+Unsupported capabilities fail with a typed Ferrum error before backend SQL is
+executed. Transactions, savepoints, aggregates, upsert, alter-column, and
+stored-function calls are PostgreSQL-only in this matrix; thin extras raise at
+the Python/compiler boundary rather than sending Postgres SQL. Pull requests
+exercise PostgreSQL and SQLite, while the nightly integration matrix runs
+PostgreSQL, MySQL, SQLite, and SQL Server independently. SQLite on PRs is CI
+coverage, not a production-readiness gate. Cross-dialect FTS in the matrix is
+thin-extra coverage, not a P0 release gate.
+
+SQL Server connects via `aioodbc`/`pyodbc` and requires a system ODBC driver such
+as `msodbcsql18`; DSNs use the `mssql://` or `sqlserver://` scheme.
 
 ### Wire format (advanced)
 

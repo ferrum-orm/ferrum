@@ -1,0 +1,94 @@
+version: 1
+task_id: w0-c-reproducible-baselines
+owner: production-readiness-executor
+status: verified
+phase: implement
+run_id: 20260821T090200Z
+base_revision: 768ec1f3013f6d0eccd7c8b590ba36b54b12d23e
+dependencies_checked: true
+owned_paths_checked: true
+shared_path_lease: null
+spec_complete: true
+plan_complete: true
+tasks_complete: true
+implementation_complete: true
+executor_validation: pass_with_external_blockers
+independent_verification: verified
+security_triage_complete: true
+security_surfaces:
+  sql_compilation: false
+  migration_apply: false
+  errors_redaction: false
+  auth_secrets: false
+  rls_admin_gucs: false
+  schema_selection: false
+security_review: not_required
+security_review_justification: benchmark and CI harness changes add no gated implementation
+architecture_review: not_required
+product_review: not_required
+code_review: required
+artifacts:
+  task_contract: .agent-work/production-readiness/tasks/w0-c-reproducible-baselines.md
+  latest_log: .agent-work/production-readiness/logs/w0-c-reproducible-baselines/20260821T090200Z.md
+  latest_verification: .agent-work/production-readiness/verification/w0-c-reproducible-baselines/20260821T090200Z.md
+  architecture_review: null
+  security_review: null
+  product_review: null
+  code_review: .agent-work/production-readiness/reviews/w0-c-reproducible-baselines/20260821T090200Z-code-reviewer.md
+changed_paths:
+  - benchmarks/__init__.py
+  - benchmarks/.gitignore
+  - benchmarks/collect_baseline.py
+  - benchmarks/smoke_wheel.sh
+  - tests/benchmarks/conftest.py
+  - tests/benchmarks/test_collect_baseline.py
+  - mise.toml
+  - .github/workflows/nightly.yml
+blockers:
+  - id: unowned-benchmark-pool-attribute-bug
+    severity: external
+    summary: >-
+      tests/python/benchmark/test_benchmark_crud.py and
+      test_benchmark_concurrency.py access Connection._pool / bench_conn._pool,
+      which no longer exists on Connection (re-confirmed via static grep this
+      run, not re-executed). Blocks mise run bench-python / mise run
+      baseline's end-to-end path locally and inside the new nightly job (the
+      nightly job's continue-on-error: true on those steps means this never
+      fails the workflow, but it does mean the uploaded baseline.json keeps
+      omitting/failing the affected Python benchmarks until fixed). Not in
+      owned paths, not modified.
+  - id: unowned-ci-local-db-up-failure
+    severity: external
+    summary: >-
+      Not re-executed this run (out of scope per coordinator instructions);
+      previously recorded db-up docker CLI flag parsing issue in this
+      sandbox is unchanged and treated as still open absent evidence of a
+      fix. Does not affect the new nightly.yml job, which never invokes
+      ci-local. NOTE: the lint half of this blocker (previously
+      "unowned-ci-local-lint-and-db-up-failures", ruff E501 in the unowned
+      tests/consumer_contracts/manifest.py) is now fully resolved: fresh
+      `mise run lint-python` exits 0 (both `ruff check` and `ruff format
+      --check` clean) after this run's fix to the one owned-path I001
+      finding on top of that already-externally-resolved E501 set. Do not
+      re-open the lint half without fresh evidence.
+resolved_since_last_run:
+  - id: unowned-integration-test-collection-broken
+    summary: >-
+      Previously: tests/python/integration/test_fts_sqlite.py and
+      test_migrations_per_dialect.py failed to import, breaking collection of
+      the whole tests/python/integration/ directory used by
+      test-consumer-contracts's -k compat selector. Re-checked this run
+      (read-only, via file-redirected pytest --collect-only output, since the
+      interactive shell in this sandbox showed a misleading "Pytest: No tests
+      collected" banner on some invocations): the directory now collects
+      cleanly (8/112 tests collected, 104 deselected, REAL_EXIT: 0, zero
+      import errors). Fixed by another workstream, not by this run. Not
+      re-executed against a live DB this round; recommend the verifier
+      confirm end-to-end.
+next_action: >-
+  No further W0-C implementation. Independent verification of run
+  20260821T090200Z recorded decision verified. Residual should-fix
+  (nightly collect_baseline.py; uv sync --extra dev) and unowned
+  Connection._pool benches are later assignment, not this close-out.
+  Wave 1 waits for W0-B.
+updated_at: 2026-08-21T09:22:00Z

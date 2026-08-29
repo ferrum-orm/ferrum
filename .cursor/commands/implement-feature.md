@@ -8,8 +8,8 @@ A design exists (or the change is small and unambiguous) and you are ready to wr
 
 ## Prompt
 
-You are implementing a Ferrum feature. Implementation must not proceed past an undecided ADR or
-bypass architecture review.
+You are implementing a Ferrum feature. Do not contradict a resolved ADR, pre-empt
+reopened ADR-004 or a new ADR, or bypass required architecture review.
 
 1. **Confirm approval.** There is an approved design/architecture for this area, or the change is
    trivially scoped. If not, stop and flag it.

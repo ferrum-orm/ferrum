@@ -67,7 +67,7 @@ all = [
     "ferrum-orm[dotenv]",
 ]
 dev = [
-    "ferrum-orm[pg,cli,dotenv]",
+    "ferrum-orm[pg,mysql,sqlite,mssql,cli,dotenv]",
     "maturin>=1.7,<2",
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -171,7 +171,7 @@ python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 markers = [
-    "integration: requires a live PostgreSQL instance",
+    "integration: requires a configured live database backend",
     "security: security qualification gate (required for release)",
     "smoke: post-install smoke check",
     "property: property-based tests (hypothesis)",
