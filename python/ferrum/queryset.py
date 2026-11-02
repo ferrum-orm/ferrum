@@ -1625,13 +1625,10 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
     chaining methods return a new instance (immutable chaining).
     """
 
-    # Narrow the base ``_model`` (``type[Model]``) to the concrete model type so
-    # ``create``/``bulk_*`` return precise ``_M`` instances.
-    # Use type: ignore to allow covariant narrowing
-    _model: type[_M]  # type: ignore[assignment]
-
     def __init__(self, model: type[_M]) -> None:
         super().__init__(model)
+        # Don't redeclare _model to avoid invalid-mutable-override.
+        # Methods use cast(type[_M], self._model) when needed.
 
     # ------------------------------------------------------------------
     # Model-only chaining (return QuerySet[_M])
@@ -2334,6 +2331,9 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 "create() requires an active Connection. "
                 "Obtain one from ferrum.connect(). [FERR-C001]"
             )
+        from typing import cast as typing_cast
+
+        model_cls = typing_cast(type[_M], self._model)
         metadata = self._get_metadata()
         compiled = self._compile_ir(self._build_insert_ir(values), dialect=conn.dialect)
         sql_text: str = compiled["sql_text"]
@@ -2407,7 +2407,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             duration_ms=duration_ms,
             row_count=1,
         )
-        return self._model.model_construct(**_coerce_hydrated_row(self._model, _row_to_dict(row)))
+        return model_cls.model_construct(**_coerce_hydrated_row(model_cls, _row_to_dict(row)))
 
     def _pk_field_name(self, metadata: ModelMetadata) -> str:
         """Return the name of the *first* PK field (backward-compat single-PK helper)."""
@@ -2723,6 +2723,9 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             )
         if batch_size < 1:
             raise FerrumConfigError("batch_size must be at least 1. [FERR-C001]")
+        from typing import cast as typing_cast
+
+        model_cls = typing_cast(type[_M], self._model)
         metadata = self._get_metadata()
         if metadata is None:
             raise FerrumCompileError(
@@ -2802,9 +2805,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             duration_ms = (time.monotonic() - t0) * 1000
             if returning:
                 batch_instances = [
-                    self._model.model_construct(
-                        **_coerce_hydrated_row(self._model, _row_to_dict(row))
-                    )
+                    model_cls.model_construct(**_coerce_hydrated_row(model_cls, _row_to_dict(row)))
                     for row in rows
                 ]
                 created.extend(batch_instances)
@@ -2843,6 +2844,9 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         """
         if _native_ext is None:
             raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
+        from typing import cast as typing_cast
+
+        model_cls = typing_cast(type[_M], self._model)
         if conn is None:
             raise FerrumConfigError(
                 "bulk_update() requires an active Connection. "
@@ -3117,6 +3121,9 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 "upsert() requires an active Connection. "
                 "Obtain one from ferrum.connect(). [FERR-C001]"
             )
+        from typing import cast as typing_cast
+
+        model_cls = typing_cast(type[_M], self._model)
         metadata = self._get_metadata()
         if metadata is None:
             raise FerrumCompileError(
@@ -3177,7 +3184,10 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         _hooks.query_success(fingerprint="", duration_ms=duration_ms, row_count=1 if row else 0)
         if not returning or row is None:
             return None
-        return self._model.model_construct(**_coerce_hydrated_row(self._model, _row_to_dict(row)))
+        from typing import cast as typing_cast
+
+        model_cls = typing_cast(type[_M], self._model)
+        return model_cls.model_construct(**_coerce_hydrated_row(model_cls, _row_to_dict(row)))
 
     async def bulk_upsert(
         self,
@@ -3218,6 +3228,9 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         if not objects:
             return [] if returning else 0
 
+        from typing import cast as typing_cast
+
+        model_cls = typing_cast(type[_M], self._model)
         metadata = self._get_metadata()
         if metadata is None:
             raise FerrumCompileError(
@@ -3265,8 +3278,8 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                         row = await driver.fetchrow(sql, *bound, is_write=True)  # type: ignore
                         if row is not None:
                             upserted.append(
-                                self._model.model_construct(
-                                    **_coerce_hydrated_row(self._model, _row_to_dict(row))
+                                model_cls.model_construct(
+                                    **_coerce_hydrated_row(model_cls, _row_to_dict(row))
                                 )
                             )
                     else:
@@ -3428,7 +3441,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 "danger_delete_all() requires an active Connection. "
                 "Obtain one from ferrum.connect(). [FERR-C001]"
             )
-        qs_all: QuerySet[_M] = QuerySet(self._model)
+        qs_all = QuerySet(self._model)
         delete_ir = qs_all._build_delete_ir()
         delete_ir["operation"]["danger"] = True  # bypass Rust MissingFilter for danger API
         compiled = qs_all._compile_ir(delete_ir, dialect=conn.dialect)
@@ -3714,7 +3727,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 )
             pk_map[pk_name] = pk_value
         assignments = {name: row[name] for name in field_list}
-        target: QuerySet[_M] = QuerySet(self._model).filter(**pk_map)
+        target = QuerySet(self._model).filter(**pk_map)
         return await target.update(conn, **assignments)
 
     async def danger_update_all(self, conn: ConnectionLike, **assignments: Any) -> int:  # noqa: ANN401
@@ -3738,7 +3751,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 "danger_update_all() requires an active Connection. "
                 "Obtain one from ferrum.connect(). [FERR-C001]"
             )
-        qs_all: QuerySet[_M] = QuerySet(self._model)
+        qs_all = QuerySet(self._model)
         update_ir = qs_all._build_update_ir(assignments)
         update_ir["operation"]["danger"] = True  # bypass Rust MissingFilter for danger API
         compiled = qs_all._compile_ir(update_ir, dialect=conn.dialect)

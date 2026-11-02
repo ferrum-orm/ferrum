@@ -1672,7 +1672,10 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
         if field_info.default is not ...:
             python_default = field_info.default
 
-        vector_dimensions = ferrum_extras.get("vector_dimensions")
+        vector_dimensions_raw = ferrum_extras.get("vector_dimensions")
+        vector_dimensions: int | None = (
+            vector_dimensions_raw if isinstance(vector_dimensions_raw, int) else None
+        )
         fts_config = ferrum_extras.get("fts_config")
         if fts_config is not None:
             cfg = str(fts_config)
@@ -1755,12 +1758,6 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
         max_length_raw = ferrum_extras.get("max_length")
         max_digits_raw = ferrum_extras.get("max_digits")
         decimal_places_raw = ferrum_extras.get("decimal_places")
-        vector_dims_raw = ferrum_extras.get("vector_dimensions")
-
-        # Use vector_dimensions from earlier extraction if present, otherwise check extras
-        final_vector_dims: int | None = vector_dimensions
-        if final_vector_dims is None and isinstance(vector_dims_raw, int):
-            final_vector_dims = vector_dims_raw
 
         fields.append(
             FieldMeta(
@@ -1780,7 +1777,7 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                 db_index=bool(ferrum_extras.get("db_index", False)),
                 db_default=db_default if isinstance(db_default, str) else None,
                 python_default=python_default,
-                vector_dimensions=final_vector_dims,
+                vector_dimensions=vector_dimensions,
                 enum_values=enum_values,
                 fts_config=str(fts_config) if fts_config is not None else None,
                 fts_source_columns=fts_source_columns,
