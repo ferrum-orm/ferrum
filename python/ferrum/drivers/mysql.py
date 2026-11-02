@@ -112,7 +112,7 @@ class AsyncmyDriver:
         pool = self._require_driver()
         try:
             async with pool.acquire() as conn:
-                async with conn.cursor(asyncmy.cursors.DictCursor) as cursor:  # type: ignore
+                async with conn.cursor(asyncmy.cursors.DictCursor) as cursor:
                     await cursor.execute(_convert_placeholders(sql), params)
                     rows = await cursor.fetchall()
                     return list(rows) if rows else []
@@ -130,7 +130,7 @@ class AsyncmyDriver:
         pool = self._require_driver()
         try:
             async with pool.acquire() as conn:
-                async with conn.cursor(asyncmy.cursors.DictCursor) as cursor:  # type: ignore
+                async with conn.cursor(asyncmy.cursors.DictCursor) as cursor:
                     await cursor.execute(_convert_placeholders(sql), params)
                     return await cursor.fetchone()
         except Exception as exc:
