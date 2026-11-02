@@ -37,7 +37,7 @@ try:
 
     _HAS_ASYNCPG: bool = True
 except ImportError:
-    _asyncpg_exc = None  # type: ignore
+    _asyncpg_exc = None
     _HAS_ASYNCPG = False
 
 try:
@@ -53,7 +53,7 @@ try:
 
     _HAS_AIOSQLITE: bool = True
 except ImportError:
-    aiosqlite = None  # type: ignore
+    aiosqlite = None
     _HAS_AIOSQLITE = False
 
 try:
@@ -61,7 +61,7 @@ try:
 
     _HAS_AIOODBC: bool = True
 except ImportError:
-    _pyodbc = None  # type: ignore
+    _pyodbc = None
     _HAS_AIOODBC = False
 
 

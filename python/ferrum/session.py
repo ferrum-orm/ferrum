@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -150,7 +150,7 @@ async def tenant_transaction(
     admin_guc: str = "app.platform_admin",
     isolation: str | None = None,
     readonly: bool = False,
-) -> AsyncIterator[Transaction]:
+) -> AsyncGenerator[Transaction, None]:
     """Open a transaction and bind tenant GUC before yielding.
 
     Admin mode additionally sets ``admin_guc = 'true'`` (for RLS bypass policies).
@@ -248,7 +248,7 @@ async def platform_admin_transaction(
     admin_guc: str = "app.platform_admin",
     isolation: str | None = None,
     readonly: bool = False,
-) -> AsyncIterator[Transaction]:
+) -> AsyncGenerator[Transaction, None]:
     """Open a transaction and bind ONLY an admin-bypass GUC — no fake tenant id.
 
     This is the dedicated platform-admin path ratified by AGENTS.md §5a. It
@@ -298,7 +298,7 @@ async def schema_transaction(
     allowed_schemas: frozenset[str] | None = None,
     isolation: str | None = None,
     readonly: bool = False,
-) -> AsyncIterator[Transaction]:
+) -> AsyncGenerator[Transaction, None]:
     """Open a transaction and set a transaction-local ``search_path``.
 
     The schema identifier is validated against a strict allowlist AND an
