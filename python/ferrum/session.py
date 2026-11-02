@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import re
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING
 from uuid import UUID
 
