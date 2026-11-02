@@ -17,7 +17,7 @@ try:
 
     _HAS_ASYNCPG: bool = True
 except ImportError:
-    _asyncpg_exc = None  # type: ignore
+    _asyncpg_exc = None
     _HAS_ASYNCPG = False
 
 try:
@@ -33,7 +33,7 @@ try:
 
     _HAS_AIOSQLITE: bool = True
 except ImportError:
-    aiosqlite = None  # type: ignore
+    aiosqlite = None
     _HAS_AIOSQLITE = False
 
 from ferrum.errors import FerrumIntegrityError, FerrumMigrationError

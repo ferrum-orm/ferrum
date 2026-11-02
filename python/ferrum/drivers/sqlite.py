@@ -17,8 +17,21 @@ def _sqlite_path_from_dsn(dsn: str) -> str:
         return ":memory:"
     if parsed.path in ("", "/"):
         return ":memory:"
-    # sqlite:///absolute/path or sqlite://relative
-    path = unquote(parsed.path.lstrip("/"))
+    # For absolute paths (sqlite:///path or sqlite:////path), preserve the leading slash.
+    # RFC3986 path starts with / after scheme://.
+    # sqlite:///path -> path="/path" -> keep as "/path"
+    # sqlite:////path -> path="//path" -> keep as "//path" then lstrip once to "/path"
+    path = unquote(parsed.path)
+    # If path starts with //, it's a 4-slash URL (sqlite:////absolute/path)
+    if path.startswith("//"):
+        path = path[1:]  # Remove one slash to get /absolute/path
+    elif path.startswith("/") and parsed.netloc == "":
+        # sqlite:///relative or sqlite:///absolute - keep as-is
+        pass
+    else:
+        # For relative paths or netloc-based URLs, strip leading slashes
+        path = path.lstrip("/")
+
     if parsed.netloc and parsed.netloc != ":memory:":
         path = f"{parsed.netloc}/{path}" if path else parsed.netloc
     return path or ":memory:"

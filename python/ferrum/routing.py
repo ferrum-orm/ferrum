@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, TypeVar
 from urllib.parse import urlparse
@@ -351,7 +351,7 @@ class ShardRouter(Generic[ShardKeyT]):
         readonly: bool = False,
         deferrable: bool = False,
         deadline: float | None = None,
-    ) -> AsyncIterator[Transaction]:
+    ) -> AsyncGenerator[Transaction, None]:
         """Open a transaction on the shard resolved from ``shard_key``.
 
         The transaction runs on the resolved shard's pinned connection and

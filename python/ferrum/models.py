@@ -1609,7 +1609,8 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
         # Bare default-value path: `field: T = Field(...)` stores extras directly.
         finfo_jse = field_info.json_schema_extra or {}
         if isinstance(finfo_jse, dict) and "__ferrum__" in finfo_jse:
-            ferrum_extras = finfo_jse["__ferrum__"]
+            ferrum_extra_raw = finfo_jse["__ferrum__"]
+            ferrum_extras = ferrum_extra_raw if isinstance(ferrum_extra_raw, dict) else {}
 
         # Honor explicit nullable= override from Field() — wins over annotation-derived value.
         nullable_override = ferrum_extras.get("nullable")
@@ -1671,7 +1672,10 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
         if field_info.default is not ...:
             python_default = field_info.default
 
-        vector_dimensions = ferrum_extras.get("vector_dimensions")
+        vector_dimensions_raw = ferrum_extras.get("vector_dimensions")
+        vector_dimensions: int | None = (
+            vector_dimensions_raw if isinstance(vector_dimensions_raw, int) else None
+        )
         fts_config = ferrum_extras.get("fts_config")
         if fts_config is not None:
             cfg = str(fts_config)
@@ -1681,7 +1685,7 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                 )
         raw_fts_source = ferrum_extras.get("fts_source_columns")
         fts_source_columns: tuple[str, ...] | None = None
-        if raw_fts_source is not None:
+        if raw_fts_source is not None and isinstance(raw_fts_source, (list, tuple)):
             fts_source_columns = tuple(str(c) for c in raw_fts_source)
         if db_type == "vector" and vector_dimensions is None:
             raise ValueError(
@@ -1690,9 +1694,15 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
             )
 
         # --- codec metadata (W2-A) ---
-        codec_kind_val: str | None = ferrum_extras.get("codec_kind")
+        codec_kind_val: str | None = None
+        raw_codec = ferrum_extras.get("codec_kind")
+        if raw_codec is not None and isinstance(raw_codec, str):
+            codec_kind_val = raw_codec
         codec_meta: CodecMeta | None = None
-        domain_name: str | None = ferrum_extras.get("codec_domain")
+        domain_name: str | None = None
+        raw_domain = ferrum_extras.get("codec_domain")
+        if raw_domain is not None and isinstance(raw_domain, str):
+            domain_name = raw_domain
         if codec_kind_val is not None:
             # Override field_type based on codec kind for correct DDL/SQL.
             override = _CODEC_FIELD_TYPE_OVERRIDES.get(codec_kind_val)
@@ -1713,13 +1723,21 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                     f"Model {cls.__name__!r} field {name!r}: "
                     "codec_kind='domain' requires codec_domain."
                 )
+            # Extract codec metadata with type checking
+            codec_pii_raw = ferrum_extras.get("codec_pii", False)
+            codec_key_id_raw = ferrum_extras.get("codec_key_id")
+            codec_model_raw = ferrum_extras.get("codec_model")
+            codec_element_type_raw = ferrum_extras.get("codec_element_type")
+
             codec_meta = CodecMeta(
                 kind=codec_kind_val,
-                pii=bool(ferrum_extras.get("codec_pii", False)),
-                key_id=ferrum_extras.get("codec_key_id"),
-                model_class_name=ferrum_extras.get("codec_model"),
+                pii=bool(codec_pii_raw),
+                key_id=codec_key_id_raw if isinstance(codec_key_id_raw, str) else None,
+                model_class_name=codec_model_raw if isinstance(codec_model_raw, str) else None,
                 domain_name=domain_name,
-                element_type=ferrum_extras.get("codec_element_type"),
+                element_type=(
+                    codec_element_type_raw if isinstance(codec_element_type_raw, str) else None
+                ),
             )
             # Re-validate vector dimensions for vector codec.
             if codec_kind_val == "vector" and vector_dimensions is None:
@@ -1736,10 +1754,15 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
         else:
             python_type_name = getattr(base_type, "__name__", str(base_type))
 
+        # Extract numeric constraints with type checking
+        max_length_raw = ferrum_extras.get("max_length")
+        max_digits_raw = ferrum_extras.get("max_digits")
+        decimal_places_raw = ferrum_extras.get("decimal_places")
+
         fields.append(
             FieldMeta(
                 name=name,
-                column_name=column_name,
+                column_name=str(column_name),
                 python_type_name=python_type_name,
                 field_type=db_type,
                 allowed_operators=_ALLOWED_OPERATORS.get(
@@ -1747,12 +1770,12 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
                 ),
                 nullable=nullable,
                 pk=is_pk,
-                max_length=ferrum_extras.get("max_length"),
-                max_digits=ferrum_extras.get("max_digits"),
-                decimal_places=ferrum_extras.get("decimal_places"),
+                max_length=max_length_raw if isinstance(max_length_raw, int) else None,
+                max_digits=max_digits_raw if isinstance(max_digits_raw, int) else None,
+                decimal_places=decimal_places_raw if isinstance(decimal_places_raw, int) else None,
                 unique=bool(ferrum_extras.get("unique", False)),
                 db_index=bool(ferrum_extras.get("db_index", False)),
-                db_default=db_default,
+                db_default=db_default if isinstance(db_default, str) else None,
                 python_default=python_default,
                 vector_dimensions=vector_dimensions,
                 enum_values=enum_values,

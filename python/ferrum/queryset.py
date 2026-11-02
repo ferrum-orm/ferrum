@@ -22,7 +22,8 @@ import time
 import types
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
+from datetime import time as time_type
 from typing import TYPE_CHECKING, Any, Generic, Literal, Self, TypeVar, cast, overload
 from uuid import UUID
 
@@ -202,9 +203,6 @@ def _encode_bind_value(value: object) -> dict[str, object]:
     ``{"type": "text", "value": "hello"}``, ``{"type": "int", "value": 42}``.
     ``BindValue::Null`` carries no ``value`` key: ``{"type": "null"}``.
 
-    ``date`` and ``time`` have no corresponding Rust ``BindValue`` variant in v1;
-    they fall through to the ``text`` fallback via ``str()``.
-
     isinstance ordering is significant:
     - ``bool`` must precede ``int`` (bool is a subclass of int).
     - ``datetime`` must precede any date-like check (datetime subclasses date).
@@ -223,6 +221,10 @@ def _encode_bind_value(value: object) -> dict[str, object]:
         return {"type": "bytes", "value": list(value)}
     if isinstance(value, datetime):
         return {"type": "datetime", "value": value.isoformat()}
+    if isinstance(value, date):
+        return {"type": "date", "value": value.isoformat()}
+    if isinstance(value, time_type):
+        return {"type": "time", "value": value.isoformat()}
     if isinstance(value, UUID):
         return {"type": "text", "value": str(value)}
     if isinstance(value, list):
@@ -305,6 +307,16 @@ def _decode_bound_param(param: str | dict[str, Any]) -> object:
     if typ == "datetime":
         try:
             return datetime.fromisoformat(str(val))
+        except (ValueError, TypeError):
+            return str(val)
+    if typ == "date":
+        try:
+            return date.fromisoformat(str(val))
+        except (ValueError, TypeError):
+            return str(val)
+    if typ == "time":
+        try:
+            return time_type.fromisoformat(str(val))
         except (ValueError, TypeError):
             return str(val)
     if typ == "float_array":
@@ -1613,12 +1625,10 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
     chaining methods return a new instance (immutable chaining).
     """
 
-    # Narrow the base ``_model`` (``type[Model]``) to the concrete model type so
-    # ``create``/``bulk_*`` return precise ``_M`` instances.
-    _model: type[_M]
-
     def __init__(self, model: type[_M]) -> None:
         super().__init__(model)
+        # Don't redeclare _model to avoid invalid-mutable-override.
+        # Methods use cast(type[_M], self._model) when needed.
 
     # ------------------------------------------------------------------
     # Model-only chaining (return QuerySet[_M])
@@ -2321,6 +2331,9 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 "create() requires an active Connection. "
                 "Obtain one from ferrum.connect(). [FERR-C001]"
             )
+        from typing import cast as typing_cast
+
+        model_cls = typing_cast(type[_M], self._model)
         metadata = self._get_metadata()
         compiled = self._compile_ir(self._build_insert_ir(values), dialect=conn.dialect)
         sql_text: str = compiled["sql_text"]
@@ -2337,7 +2350,44 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         )
         t0 = time.monotonic()
         try:
-            row = await driver.fetchrow(sql_text, *bound_params, is_write=True)  # type: ignore
+            # MySQL doesn't support RETURNING; use execute_returning_lastrowid + refetch
+            if conn.dialect == "mysql" and "RETURNING" not in sql_text.upper():
+                # MySQL-specific method for getting lastrowid
+                if not hasattr(driver, "execute_returning_lastrowid"):
+                    raise FerrumInternalError(
+                        "MySQL driver missing execute_returning_lastrowid method. [FERR-E500]"
+                    )
+                from typing import cast
+
+                rowcount, lastrowid = await cast(Any, driver).execute_returning_lastrowid(
+                    sql_text, *bound_params
+                )
+                if rowcount == 0:
+                    raise FerrumInternalError("INSERT returned 0 rows. [FERR-E500]")
+
+                # Build result from input values first
+                result_data = dict(values)
+
+                # If we got a last_insert_id for a single-column PK, add it and refetch
+                if lastrowid is not None and metadata is not None:
+                    pk_names = self._pk_field_names(metadata)
+                    if len(pk_names) == 1:
+                        pk_col = pk_names[0]
+                        result_data[pk_col] = lastrowid
+                        # Refetch to get all DB-generated values
+                        refetch_sql = f"SELECT * FROM `{table}` WHERE `{pk_col}` = {lastrowid}"
+                        refetched = await driver.fetchrow(refetch_sql)
+                        # Refetch failed but we have the PK - use constructed data
+                        row = refetched if refetched is not None else result_data
+                    else:
+                        # Composite PK or non-auto PK: use constructed data
+                        row = result_data
+                else:
+                    # No lastrowid (user-supplied PK): use constructed data
+                    row = result_data
+            else:
+                # PostgreSQL, SQLite, SQL Server: use RETURNING
+                row = await driver.fetchrow(sql_text, *bound_params, is_write=True)  # type: ignore
         except Exception as exc:
             duration_ms = (time.monotonic() - t0) * 1000
             mapped = map_db_error(exc, context={"model": model_name, "operation": "insert"})
@@ -2357,7 +2407,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             duration_ms=duration_ms,
             row_count=1,
         )
-        return self._model.model_construct(**_coerce_hydrated_row(self._model, _row_to_dict(row)))
+        return model_cls.model_construct(**_coerce_hydrated_row(model_cls, _row_to_dict(row)))
 
     def _pk_field_name(self, metadata: ModelMetadata) -> str:
         """Return the name of the *first* PK field (backward-compat single-PK helper)."""
@@ -2673,6 +2723,9 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             )
         if batch_size < 1:
             raise FerrumConfigError("batch_size must be at least 1. [FERR-C001]")
+        from typing import cast as typing_cast
+
+        model_cls = typing_cast(type[_M], self._model)
         metadata = self._get_metadata()
         if metadata is None:
             raise FerrumCompileError(
@@ -2707,15 +2760,37 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             t0 = time.monotonic()
             try:
                 if returning:
+                    # MySQL doesn't support RETURNING, raise clear error
+                    if conn.dialect == "mysql" and "RETURNING" not in sql_text.upper():
+                        raise FerrumConfigError(
+                            "bulk_create(returning=True) is not supported on MySQL. "
+                            "MySQL does not support RETURNING clauses. "
+                            "Use returning=False to get the inserted row count instead. [FERR-C001]"
+                        )
                     rows = await driver.fetch(sql_text, *bound_params, is_write=True)  # type: ignore
                 else:
-                    result: str = await driver.execute(sql_text, *bound_params)
-                    parts = result.split() if result else []
-                    try:
-                        total += int(parts[2]) if len(parts) > 2 else len(batch)
-                    except ValueError:
-                        total += len(batch)
-                    rows = []
+                    # MySQL can handle returning=False with execute_returning_lastrowid
+                    if conn.dialect == "mysql":
+                        if not hasattr(driver, "execute_returning_lastrowid"):
+                            raise FerrumInternalError(
+                                "MySQL driver missing execute_returning_lastrowid method. "
+                                "[FERR-E500]"
+                            )
+                        from typing import cast
+
+                        rowcount, _lastrowid = await cast(Any, driver).execute_returning_lastrowid(
+                            sql_text, *bound_params
+                        )
+                        total += rowcount
+                        rows = []
+                    else:
+                        result: str = await driver.execute(sql_text, *bound_params)
+                        parts = result.split() if result else []
+                        try:
+                            total += int(parts[2]) if len(parts) > 2 else len(batch)
+                        except ValueError:
+                            total += len(batch)
+                        rows = []
             except Exception as exc:
                 duration_ms = (time.monotonic() - t0) * 1000
                 mapped = map_db_error(
@@ -2730,9 +2805,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             duration_ms = (time.monotonic() - t0) * 1000
             if returning:
                 batch_instances = [
-                    self._model.model_construct(
-                        **_coerce_hydrated_row(self._model, _row_to_dict(row))
-                    )
+                    model_cls.model_construct(**_coerce_hydrated_row(model_cls, _row_to_dict(row)))
                     for row in rows
                 ]
                 created.extend(batch_instances)
@@ -3045,6 +3118,9 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 "upsert() requires an active Connection. "
                 "Obtain one from ferrum.connect(). [FERR-C001]"
             )
+        from typing import cast as typing_cast
+
+        model_cls = typing_cast(type[_M], self._model)
         metadata = self._get_metadata()
         if metadata is None:
             raise FerrumCompileError(
@@ -3105,7 +3181,10 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         _hooks.query_success(fingerprint="", duration_ms=duration_ms, row_count=1 if row else 0)
         if not returning or row is None:
             return None
-        return self._model.model_construct(**_coerce_hydrated_row(self._model, _row_to_dict(row)))
+        from typing import cast as typing_cast
+
+        model_cls = typing_cast(type[_M], self._model)
+        return model_cls.model_construct(**_coerce_hydrated_row(model_cls, _row_to_dict(row)))
 
     async def bulk_upsert(
         self,
@@ -3146,6 +3225,9 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         if not objects:
             return [] if returning else 0
 
+        from typing import cast as typing_cast
+
+        model_cls = typing_cast(type[_M], self._model)
         metadata = self._get_metadata()
         if metadata is None:
             raise FerrumCompileError(
@@ -3193,8 +3275,8 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                         row = await driver.fetchrow(sql, *bound, is_write=True)  # type: ignore
                         if row is not None:
                             upserted.append(
-                                self._model.model_construct(
-                                    **_coerce_hydrated_row(self._model, _row_to_dict(row))
+                                model_cls.model_construct(
+                                    **_coerce_hydrated_row(model_cls, _row_to_dict(row))
                                 )
                             )
                     else:
@@ -3356,7 +3438,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 "danger_delete_all() requires an active Connection. "
                 "Obtain one from ferrum.connect(). [FERR-C001]"
             )
-        qs_all: QuerySet[_M] = QuerySet(self._model)
+        qs_all = QuerySet(self._model)
         delete_ir = qs_all._build_delete_ir()
         delete_ir["operation"]["danger"] = True  # bypass Rust MissingFilter for danger API
         compiled = qs_all._compile_ir(delete_ir, dialect=conn.dialect)
@@ -3642,7 +3724,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 )
             pk_map[pk_name] = pk_value
         assignments = {name: row[name] for name in field_list}
-        target: QuerySet[_M] = QuerySet(self._model).filter(**pk_map)
+        target = QuerySet(self._model).filter(**pk_map)
         return await target.update(conn, **assignments)
 
     async def danger_update_all(self, conn: ConnectionLike, **assignments: Any) -> int:  # noqa: ANN401
@@ -3666,7 +3748,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                 "danger_update_all() requires an active Connection. "
                 "Obtain one from ferrum.connect(). [FERR-C001]"
             )
-        qs_all: QuerySet[_M] = QuerySet(self._model)
+        qs_all = QuerySet(self._model)
         update_ir = qs_all._build_update_ir(assignments)
         update_ir["operation"]["danger"] = True  # bypass Rust MissingFilter for danger API
         compiled = qs_all._compile_ir(update_ir, dialect=conn.dialect)

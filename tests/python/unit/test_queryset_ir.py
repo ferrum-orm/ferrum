@@ -84,18 +84,18 @@ class TestEncodeBindValue:
         result = _encode_bind_value(dt)
         assert result["type"] == "datetime"
 
-    def test_date_falls_through_to_text(self) -> None:
-        # date has no v1 Rust BindValue variant; falls back to text via str()
+    def test_date_encoded_as_date_type(self) -> None:
+        # date has a Rust BindValue::Date variant now
         d = date(2024, 6, 1)
         result = _encode_bind_value(d)
-        assert result == {"type": "text", "value": "2024-06-01"}
+        assert result == {"type": "date", "value": "2024-06-01"}
 
-    def test_time_falls_through_to_text(self) -> None:
-        # time has no v1 Rust BindValue variant; falls back to text via str()
+    def test_time_encoded_as_time_type(self) -> None:
+        # time has a Rust BindValue::Time variant now
         t = time(12, 30, 0)
         result = _encode_bind_value(t)
-        assert result["type"] == "text"
-        assert "12:30:00" in result["value"]  # type: ignore[operator]
+        assert result["type"] == "time"
+        assert result["value"] == "12:30:00"
 
     def test_unknown_type_fallback_to_text(self) -> None:
         class Custom:

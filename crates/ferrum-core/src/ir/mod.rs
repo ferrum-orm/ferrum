@@ -411,6 +411,10 @@ pub enum BindValue {
     Bytes(Vec<u8>),
     /// ISO-8601 datetime string — decoded by the DB driver on the Python side.
     Datetime(String),
+    /// ISO-8601 date string — decoded by the DB driver on the Python side.
+    Date(String),
+    /// ISO-8601 time string — decoded by the DB driver on the Python side.
+    Time(String),
     /// pgvector query vector — list of f64 components.
     FloatArray(Vec<f64>),
     /// `PostgreSQL` text[] array parameter.
