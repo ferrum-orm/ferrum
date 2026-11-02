@@ -2358,13 +2358,12 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                         "MySQL driver missing execute_returning_lastrowid method. [FERR-E500]"
                     )
                 from typing import cast
+
                 rowcount, lastrowid = await cast(Any, driver).execute_returning_lastrowid(
                     sql_text, *bound_params
                 )
                 if rowcount == 0:
-                    raise FerrumInternalError(
-                        "INSERT returned 0 rows. [FERR-E500]"
-                    )
+                    raise FerrumInternalError("INSERT returned 0 rows. [FERR-E500]")
 
                 # Build result from input values first
                 result_data = dict(values)
@@ -2775,6 +2774,7 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                                 "[FERR-E500]"
                             )
                         from typing import cast
+
                         rowcount, _lastrowid = await cast(Any, driver).execute_returning_lastrowid(
                             sql_text, *bound_params
                         )
