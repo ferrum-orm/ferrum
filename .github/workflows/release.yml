@@ -15,6 +15,10 @@ jobs:
   build-wheels:
     name: Build wheels (${{ matrix.platform }})
     runs-on: ${{ matrix.runs-on }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       # Don't cancel the other platform wheels if one fails.
       fail-fast: false
@@ -82,7 +86,7 @@ jobs:
 
       # Generate signed build-provenance attestations for the wheel artifacts
       # so PyPI consumers can verify artifact origin via gh attestation verify.
-      - uses: actions/attest-build-provenance@v1
+      - uses: actions/attest-build-provenance@v2
         with:
           subject-path: wheelhouse/*.whl
 
@@ -92,6 +96,10 @@ jobs:
   build-sdist:
     name: Build sdist
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -106,7 +114,7 @@ jobs:
           path: dist/*.tar.gz
 
       # Generate signed build-provenance attestation for the sdist artifact.
-      - uses: actions/attest-build-provenance@v1
+      - uses: actions/attest-build-provenance@v2
         with:
           subject-path: dist/*.tar.gz
 
@@ -263,8 +271,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.87.0"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        # Install with stable: the pinned 1.87.0 may lag cargo-audit's MSRV.
+        # cargo-audit is a standalone tool and doesn't need the project toolchain.
+        run: cargo +stable install cargo-audit --locked
       - name: Run cargo audit (deny advisories)
         run: cargo audit --deny warnings
 
