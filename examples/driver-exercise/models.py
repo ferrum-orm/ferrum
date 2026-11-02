@@ -16,7 +16,7 @@ from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
 
-from ferrum import Field, ForeignKey, ManyToMany, Model, OneToOne
+from ferrum import Field, ForeignKey, Model
 
 
 class Author(Model):

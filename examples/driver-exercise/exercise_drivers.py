@@ -23,22 +23,19 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from datetime import date, datetime, timezone
+from datetime import date
 from decimal import Decimal
-from pathlib import Path
 from typing import Any
-from uuid import UUID
+
+# Import models
+from models import Author, Book, Publisher, Review
 
 import ferrum
 from ferrum import Q
 from ferrum.errors import (
-    FerrumCompileError,
     FerrumConfigError,
     FerrumIntegrityError,
 )
-
-# Import models
-from models import Author, Book, BookAuthorLink, Publisher, Review
 
 
 class TestResult:
@@ -84,19 +81,48 @@ class DriverExercise:
 
     async def print_header(self) -> None:
         """Print test header."""
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Testing {self.driver_name.upper()}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
     async def drop_tables(self) -> None:
         """Drop all test tables."""
         driver = self.conn._require_driver()
         tables = ["reviews", "book_author_links", "books", "authors", "publishers"]
-        for table in tables:
-            try:
-                await driver.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
-            except Exception:
-                pass  # Ignore if table doesn't exist
+
+        if self.driver_name == "mssql":
+            # SQL Server: no IF EXISTS, must drop FKs first
+            for table in tables:
+                try:
+                    # Drop FK constraints first
+                    await driver.execute(f"""
+                        DECLARE @sql NVARCHAR(MAX) = N'';
+                        SELECT @sql += N'ALTER TABLE [dbo].[' + OBJECT_NAME(fk.parent_object_id) 
+                            + N'] DROP CONSTRAINT [' + fk.name + N'];'
+                        FROM sys.foreign_keys AS fk
+                        WHERE fk.referenced_object_id = OBJECT_ID('dbo.{table}');
+                        EXEC sp_executesql @sql;
+                    """)
+                    # Then drop the table
+                    await driver.execute(f"""
+                        IF OBJECT_ID('dbo.{table}', 'U') IS NOT NULL
+                        DROP TABLE dbo.{table}
+                    """)
+                except Exception:
+                    pass  # Ignore errors
+        elif self.driver_name == "sqlite":
+            # SQLite: no CASCADE support
+            for table in tables:
+                try:
+                    await driver.execute(f"DROP TABLE IF EXISTS {table}")
+                except Exception:
+                    pass  # Ignore if table doesn't exist
+        else:
+            for table in tables:
+                try:
+                    await driver.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
+                except Exception:
+                    pass  # Ignore if table doesn't exist
 
     async def create_schema(self) -> None:
         """Create tables for models."""
@@ -376,14 +402,15 @@ class DriverExercise:
     async def run_tests(self) -> None:
         """Run all tests."""
         try:
-            print(f"  • Dropping tables...")
+            print("  • Dropping tables...")
             await self.drop_tables()
-            print(f"  • Creating schema...")
+            print("  • Creating schema...")
             await self.create_schema()
-            print(f"  • Schema created successfully")
+            print("  • Schema created successfully")
         except Exception as e:
             print(f"  ✗ schema_setup: {e}")
             import traceback
+
             traceback.print_exc()
             # If schema creation fails, skip all other tests
             return
@@ -429,7 +456,7 @@ class DriverExercise:
             )
             assert author.id is not None
             assert author.name == "Jane Austen"
-            
+
             # SQLite stores dates as text, so compare as strings or skip date check
             if self.driver_name == "sqlite":
                 # SQLite returns date as string "1775-12-16"
@@ -437,12 +464,13 @@ class DriverExercise:
             else:
                 # Other drivers return proper date objects
                 assert author.birth_date == date(1775, 12, 16)
-            
+
             self.result.pass_test("create")
         except Exception as e:
             self.result.fail_test("create", str(e))
             # Print full traceback for debugging
             import traceback
+
             traceback.print_exc()
 
     async def test_read(self) -> None:
@@ -462,7 +490,7 @@ class DriverExercise:
             if author:
                 author.bio = "Acclaimed English novelist"
                 await Author.objects.update_instance(self.conn, author, fields=["bio"])
-                
+
                 # Verify update
                 updated = await Author.objects.get(self.conn, id=author.id)
                 assert updated.bio == "Acclaimed English novelist"
@@ -482,10 +510,10 @@ class DriverExercise:
                 email="temp@example.com",
             )
             temp_id = temp.id
-            
+
             # Delete
             await Author.objects.filter(id=temp_id).delete(self.conn)
-            
+
             # Verify deletion
             result = await Author.objects.filter(id=temp_id).first(self.conn)
             assert result is None
@@ -510,7 +538,7 @@ class DriverExercise:
                     rating=Decimal("4.50"),
                 ),
             ]
-            
+
             if self.driver_name == "mysql":
                 # MySQL doesn't support RETURNING clause
                 # Use returning=False to get count instead of instances
@@ -519,11 +547,12 @@ class DriverExercise:
             else:
                 created = await Author.objects.bulk_create(self.conn, authors)
                 assert len(created) == 2
-            
+
             self.result.pass_test("bulk_create")
         except Exception as e:
             self.result.fail_test("bulk_create", str(e))
             import traceback
+
             traceback.print_exc()
 
     async def test_filtering(self) -> None:
@@ -532,7 +561,7 @@ class DriverExercise:
             # Simple filter
             active = await Author.objects.filter(is_active=True).all(self.conn)
             assert all(a.is_active for a in active), "Not all returned authors are active"
-            
+
             # Q objects
             results = await Author.objects.filter(
                 Q(name__contains="Dickens") | Q(name__contains="Woolf")
@@ -540,11 +569,12 @@ class DriverExercise:
             # At this point Dickens and Woolf might not exist if bulk_create failed
             # Just check that the filter executes without error
             assert isinstance(results, list)
-            
+
             self.result.pass_test("filtering")
         except Exception as e:
             self.result.fail_test("filtering", str(e))
             import traceback
+
             traceback.print_exc()
 
     async def test_ordering(self) -> None:
@@ -554,12 +584,12 @@ class DriverExercise:
             authors = await Author.objects.order_by("name").all(self.conn)
             names = [a.name for a in authors]
             assert names == sorted(names)
-            
+
             # Descending
             authors_desc = await Author.objects.order_by("-name").all(self.conn)
             names_desc = [a.name for a in authors_desc]
             assert names_desc == sorted(names, reverse=True)
-            
+
             self.result.pass_test("ordering")
         except Exception as e:
             self.result.fail_test("ordering", str(e))
@@ -570,11 +600,11 @@ class DriverExercise:
             # Limit
             limited = await Author.objects.limit(2).all(self.conn)
             assert len(limited) <= 2
-            
+
             # Offset
             offset_results = await Author.objects.offset(1).limit(2).all(self.conn)
             assert len(offset_results) <= 2
-            
+
             self.result.pass_test("pagination")
         except Exception as e:
             self.result.fail_test("pagination", str(e))
@@ -593,11 +623,11 @@ class DriverExercise:
             )
             assert author.bio is None
             assert author.rating is None
-            
+
             # Filter by NULL
             nulls = await Author.objects.filter(bio=None).all(self.conn)
             assert any(a.id == author.id for a in nulls)
-            
+
             self.result.pass_test("null_handling")
         except Exception as e:
             self.result.fail_test("null_handling", str(e))
@@ -605,6 +635,13 @@ class DriverExercise:
     async def test_foreign_keys(self) -> None:
         """Test foreign key relationships."""
         try:
+            # MySQL doesn't support RETURNING clause
+            if self.driver_name == "mysql":
+                self.result.skip_test(
+                    "foreign_keys", "MySQL: RETURNING clause not supported in driver"
+                )
+                return
+
             # Create author for this test
             author = await Author.objects.create(
                 self.conn,
@@ -612,9 +649,10 @@ class DriverExercise:
                 email=f"fk-test-{self.driver_name}@example.com",
                 bio="Test author for FK test",
             )
-            
+
             # Create publisher
             from uuid import uuid4
+
             if self.driver_name == "postgres":
                 pub = await Publisher.objects.create(
                     self.conn,
@@ -628,13 +666,8 @@ class DriverExercise:
                     name="Penguin Books",
                     country="UK",
                 )
-            
+
             # Create book with foreign keys
-            # Note: MySQL create() may fail with RETURNING clause error (known limitation)
-            if self.driver_name == "mysql":
-                self.result.skip_test("foreign_keys", "MySQL: RETURNING clause not supported in driver")
-                return
-            
             book = await Book.objects.create(
                 self.conn,
                 title="Pride and Prejudice",
@@ -644,10 +677,10 @@ class DriverExercise:
                 author_id=author.id,
                 publisher_id=pub.id,
             )
-            
+
             assert book.author_id == author.id
             assert book.publisher_id == pub.id
-            
+
             self.result.pass_test("foreign_keys")
         except Exception as e:
             self.result.fail_test("foreign_keys", str(e))
@@ -660,7 +693,7 @@ class DriverExercise:
             if not book:
                 self.result.skip_test("composite_pk", "No book found")
                 return
-            
+
             # Create review with composite PK
             review = await Review.objects.create(
                 self.conn,
@@ -671,14 +704,12 @@ class DriverExercise:
             )
             assert review.book_id == book.id
             assert review.user_id == 1
-            
+
             # Read back
-            found = await Review.objects.filter(
-                book_id=book.id, user_id=1
-            ).first(self.conn)
+            found = await Review.objects.filter(book_id=book.id, user_id=1).first(self.conn)
             assert found is not None
             assert found.rating == 5
-            
+
             self.result.pass_test("composite_pk")
         except Exception as e:
             self.result.fail_test("composite_pk", str(e))
@@ -688,7 +719,7 @@ class DriverExercise:
         if not self.supports_transactions:
             self.result.skip_test("transaction_commit", "Driver does not support transactions")
             return
-        
+
         try:
             async with self.conn.transaction() as tx:
                 await Author.objects.create(
@@ -696,7 +727,7 @@ class DriverExercise:
                     name="Transaction Test",
                     email="tx@example.com",
                 )
-            
+
             # Verify committed
             found = await Author.objects.filter(email="tx@example.com").first(self.conn)
             assert found is not None
@@ -714,7 +745,7 @@ class DriverExercise:
         if not self.supports_transactions:
             self.result.skip_test("transaction_rollback", "Driver does not support transactions")
             return
-        
+
         try:
             try:
                 async with self.conn.transaction() as tx:
@@ -726,14 +757,16 @@ class DriverExercise:
                     raise RuntimeError("Simulated error")
             except RuntimeError:
                 pass
-            
+
             # Verify rolled back
             found = await Author.objects.filter(email="rollback@example.com").first(self.conn)
             assert found is None
             self.result.pass_test("transaction_rollback")
         except FerrumConfigError as e:
             if "does not support transactions" in str(e):
-                self.result.skip_test("transaction_rollback", "Driver does not support transactions")
+                self.result.skip_test(
+                    "transaction_rollback", "Driver does not support transactions"
+                )
             else:
                 raise
         except Exception as e:
@@ -748,7 +781,7 @@ class DriverExercise:
                 name="Unique Test",
                 email="unique@example.com",
             )
-            
+
             # Try to create duplicate email
             try:
                 await Author.objects.create(
@@ -756,7 +789,9 @@ class DriverExercise:
                     name="Unique Test 2",
                     email="unique@example.com",
                 )
-                self.result.fail_test("unique_constraint_violation", "Should have raised IntegrityError")
+                self.result.fail_test(
+                    "unique_constraint_violation", "Should have raised IntegrityError"
+                )
             except FerrumIntegrityError:
                 self.result.pass_test("unique_constraint_violation")
         except Exception as e:
@@ -792,6 +827,7 @@ async def test_driver(driver_name: str, dsn: str, supports_transactions: bool) -
     except Exception as e:
         print(f"Fatal error for {driver_name}: {e}")
         import traceback
+
         traceback.print_exc()
     return exercise.result
 
@@ -800,7 +836,7 @@ async def main() -> None:
     """Run all driver tests."""
     print("Comprehensive Ferrum Driver Exercise Suite")
     print("=" * 60)
-    
+
     # Define test configurations
     configs = [
         ("postgres", os.environ.get("FERRUM_TEST_DSN"), True),
@@ -808,13 +844,13 @@ async def main() -> None:
         ("sqlite", os.environ.get("FERRUM_TEST_SQLITE_DSN"), False),
         ("mssql", os.environ.get("FERRUM_TEST_MSSQL_DSN"), False),
     ]
-    
+
     results = []
     for driver_name, dsn, supports_tx in configs:
         # Skip if DSN is not set or empty
         if not dsn:
             continue
-            
+
         try:
             result = await test_driver(driver_name, dsn, supports_tx)
             results.append(result)
@@ -823,8 +859,9 @@ async def main() -> None:
         except Exception as e:
             print(f"\nFailed to test {driver_name}: {e}")
             import traceback
+
             traceback.print_exc()
-    
+
     # Print summary
     print("\n" + "=" * 60)
     print("SUMMARY")
@@ -832,10 +869,10 @@ async def main() -> None:
     for result in results:
         print(result.summary())
         if result.failed:
-            print(f"  Failed tests:")
+            print("  Failed tests:")
             for test_name, error in result.failed:
                 print(f"    - {test_name}: {error[:80]}")
-    
+
     # Exit with error if any tests failed
     total_failed = sum(len(r.failed) for r in results)
     if total_failed > 0:
