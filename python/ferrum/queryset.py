@@ -2844,9 +2844,6 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         """
         if _native_ext is None:
             raise FerrumConfigError(_EXT_NOT_BUILT_MSG)
-        from typing import cast as typing_cast
-
-        model_cls = typing_cast(type[_M], self._model)
         if conn is None:
             raise FerrumConfigError(
                 "bulk_update() requires an active Connection. "
