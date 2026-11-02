@@ -121,7 +121,7 @@ class AsyncmyDriver:
 
     async def fetchrow(self, sql: str, *params: object) -> Any | None:
         """Execute a query and return one row as a dict.
-        
+
         For MySQL INSERT without RETURNING, executes the insert and returns None
         (caller must handle PK retrieval via execute_returning_lastrowid).
         """
@@ -140,15 +140,14 @@ class AsyncmyDriver:
         self, sql: str, *params: object
     ) -> tuple[int, int | None]:
         """Execute an INSERT and return (rowcount, last_insert_id).
-        
+
         For single-row INSERTs, last_insert_id is the new auto-increment PK.
         For multi-row INSERTs, last_insert_id is the first generated ID
         (MySQL guarantees consecutive IDs with default innodb_autoinc_lock_mode).
-        
+
         Returns (rowcount, last_insert_id) where last_insert_id is None if
         the PK was supplied by the caller or the table has no auto-increment PK.
         """
-        import asyncmy  # type: ignore[import-untyped]
 
         pool = self._require_driver()
         try:

@@ -418,7 +418,7 @@ class TimedQueryExecutor:
         self, sql: str, *params: object
     ) -> tuple[int, int | None]:
         """MySQL-specific: execute INSERT and return (rowcount, last_insert_id).
-        
+
         This is always a write operation, so retries are disabled.
         """
         return await self._run(

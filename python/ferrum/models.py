@@ -1725,14 +1725,16 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
             codec_key_id_raw = ferrum_extras.get("codec_key_id")
             codec_model_raw = ferrum_extras.get("codec_model")
             codec_element_type_raw = ferrum_extras.get("codec_element_type")
-            
+
             codec_meta = CodecMeta(
                 kind=codec_kind_val,
                 pii=bool(codec_pii_raw),
                 key_id=codec_key_id_raw if isinstance(codec_key_id_raw, str) else None,
                 model_class_name=codec_model_raw if isinstance(codec_model_raw, str) else None,
                 domain_name=domain_name,
-                element_type=codec_element_type_raw if isinstance(codec_element_type_raw, str) else None,
+                element_type=(
+                    codec_element_type_raw if isinstance(codec_element_type_raw, str) else None
+                ),
             )
             # Re-validate vector dimensions for vector codec.
             if codec_kind_val == "vector" and vector_dimensions is None:
@@ -1754,12 +1756,12 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
         max_digits_raw = ferrum_extras.get("max_digits")
         decimal_places_raw = ferrum_extras.get("decimal_places")
         vector_dims_raw = ferrum_extras.get("vector_dimensions")
-        
+
         # Use vector_dimensions from earlier extraction if present, otherwise check extras
         final_vector_dims: int | None = vector_dimensions
         if final_vector_dims is None and isinstance(vector_dims_raw, int):
             final_vector_dims = vector_dims_raw
-        
+
         fields.append(
             FieldMeta(
                 name=name,

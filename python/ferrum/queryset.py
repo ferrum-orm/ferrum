@@ -2365,10 +2365,10 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                     raise FerrumInternalError(
                         "INSERT returned 0 rows. [FERR-E500]"
                     )
-                
+
                 # Build result from input values first
                 result_data = dict(values)
-                
+
                 # If we got a last_insert_id for a single-column PK, add it and refetch
                 if lastrowid is not None and metadata is not None:
                     pk_names = self._pk_field_names(metadata)
@@ -2378,11 +2378,8 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                         # Refetch to get all DB-generated values
                         refetch_sql = f"SELECT * FROM `{table}` WHERE `{pk_col}` = {lastrowid}"
                         refetched = await driver.fetchrow(refetch_sql)
-                        if refetched is not None:
-                            row = refetched
-                        else:
-                            # Refetch failed but we have the PK - use constructed data
-                            row = result_data
+                        # Refetch failed but we have the PK - use constructed data
+                        row = refetched if refetched is not None else result_data
                     else:
                         # Composite PK or non-auto PK: use constructed data
                         row = result_data
@@ -2774,10 +2771,11 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                     if conn.dialect == "mysql":
                         if not hasattr(driver, "execute_returning_lastrowid"):
                             raise FerrumInternalError(
-                                "MySQL driver missing execute_returning_lastrowid method. [FERR-E500]"
+                                "MySQL driver missing execute_returning_lastrowid method. "
+                                "[FERR-E500]"
                             )
                         from typing import cast
-                        rowcount, lastrowid = await cast(Any, driver).execute_returning_lastrowid(
+                        rowcount, _lastrowid = await cast(Any, driver).execute_returning_lastrowid(
                             sql_text, *bound_params
                         )
                         total += rowcount
