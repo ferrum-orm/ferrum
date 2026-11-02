@@ -22,7 +22,8 @@ import time
 import types
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
+from datetime import time as time_type
 from typing import TYPE_CHECKING, Any, Generic, Literal, Self, TypeVar, cast, overload
 from uuid import UUID
 
@@ -223,6 +224,12 @@ def _encode_bind_value(value: object) -> dict[str, object]:
         return {"type": "bytes", "value": list(value)}
     if isinstance(value, datetime):
         return {"type": "datetime", "value": value.isoformat()}
+    if isinstance(value, date):
+        # Encode as text for Rust validation, but mark it so we can decode back to date
+        return {"type": "text", "value": value.isoformat(), "__ferrum_date": True}
+    if isinstance(value, time_type):
+        # Encode as text for Rust validation, but mark it so we can decode back to time
+        return {"type": "text", "value": value.isoformat(), "__ferrum_time": True}
     if isinstance(value, UUID):
         return {"type": "text", "value": str(value)}
     if isinstance(value, list):
@@ -299,6 +306,11 @@ def _decode_bound_param(param: str | dict[str, Any]) -> object:
     if typ == "float":
         return float(val)
     if typ == "text":
+        # Check if this is actually a date or time that we encoded
+        if parsed.get("__ferrum_date"):
+            return date.fromisoformat(str(val))
+        if parsed.get("__ferrum_time"):
+            return time_type.fromisoformat(str(val))
         return str(val)
     if typ == "bytes":
         return bytes(int(b) for b in val)
