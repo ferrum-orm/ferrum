@@ -16,35 +16,48 @@ least one minor release and 90 days, whichever is longer, recorded here and in
 
 ### Added
 
-- Live multi-driver integration coverage for PostgreSQL, MySQL, SQLite, and SQL
-  Server, with PostgreSQL + SQLite required on pull requests and an independent
-  four-backend nightly matrix.
-
 ### Changed
-
-- Local database tooling now starts health-checked PostgreSQL, MySQL, and SQL
-  Server test services with the same `ferrum_test` credentials used by CI.
-- Backend support is documented and tested as an explicit capability matrix
-  matching the integration registry: PostgreSQL has full coverage; MySQL and
-  SQL Server claim FTS and composite primary keys only; SQLite additionally
-  claims `RETURNING`. Transactions, aggregates, and upsert are PostgreSQL-only.
-- Compatibility policy: 0.x carries no guarantee (MINOR and PATCH may both break);
-  1.0 starts a deprecation window of one minor + 90 days for public API and
-  migration-ops. Generated SQL remains a non-compatibility surface.
 
 ### Fixed
 
-- Upsert attempts on MySQL, SQLite, and SQL Server now fail early with a typed
-  Ferrum configuration error instead of sending PostgreSQL `ON CONFLICT` SQL to
-  an unsupported backend.
-- SQLite now drains `RETURNING` cursors before commit, cleans up cancelled
-  operations, and hydrates integer-backed boolean columns as `bool`. Relation
-  prefetch SQL now uses each driver's identifier quoting and parameter style
-  instead of PostgreSQL-only syntax.
+---
+
+## [0.1.19] - 2026-11-02
+
+### Added
+
+- New `examples/driver-exercise` multi-driver test suite that exercises CRUD,
+  filtering, ordering, pagination, NULL handling, relationships, foreign keys,
+  composite PKs, and unique constraints across PostgreSQL, MySQL, SQLite, and
+  SQL Server.
+- `Date` and `Time` variants to Rust `BindValue` enum for proper date/time
+  parameter binding across all drivers.
+
+### Changed
+
+### Fixed
+
+- Date and time parameter binding now uses native Python `date` and `time`
+  objects instead of ISO string conversion, fixing asyncpg `DataError` on
+  `DATE` and `TIME` columns. The Rust boundary now carries typed `Date` and
+  `Time` bind values that map to driver-native parameter types.
+- MySQL `create()` now retrieves the inserted primary key via `lastrowid`
+  instead of a broken `RETURNING` refetch. The old hack attempted to parse
+  the table name from the SQL and re-query via `SELECT ... WHERE id =
+  LAST_INSERT_ID()`, which failed for composite PKs and non-standard table
+  names.
+- MySQL `bulk_create(returning=True)` now raises a clear `FerrumConfigError`
+  ("MySQL does not support RETURNING in bulk inserts") instead of silently
+  returning an empty list. This matches the documented thin-parity contract.
+- SQLite absolute-path DSN parsing now correctly strips the leading slash
+  from `sqlite:////absolute/path` (four slashes) to produce `/absolute/path`.
+  The previous parser treated it as relative `//absolute/path`, breaking
+  CI workflows that use `${{ runner.temp }}/ferrum_test.db` with four-slash
+  absolute DSNs.
 
 ---
 
-## [0.1.17] - 2026-08-10
+## [0.1.18] - 2026-08-29
 
 ### Added
 
@@ -383,7 +396,20 @@ least one minor release and 90 days, whichever is longer, recorded here and in
 
 ---
 
-[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.19...HEAD
+[0.1.19]: https://github.com/ferrum-orm/ferrum/compare/v0.1.18...v0.1.19
+[0.1.18]: https://github.com/ferrum-orm/ferrum/compare/v0.1.17...v0.1.18
+[0.1.17]: https://github.com/ferrum-orm/ferrum/compare/v0.1.16...v0.1.17
+[0.1.16]: https://github.com/ferrum-orm/ferrum/compare/v0.1.15...v0.1.16
+[0.1.15]: https://github.com/ferrum-orm/ferrum/compare/v0.1.14...v0.1.15
+[0.1.14]: https://github.com/ferrum-orm/ferrum/compare/v0.1.13...v0.1.14
+[0.1.13]: https://github.com/ferrum-orm/ferrum/compare/v0.1.12...v0.1.13
+[0.1.12]: https://github.com/ferrum-orm/ferrum/compare/v0.1.11...v0.1.12
+[0.1.11]: https://github.com/ferrum-orm/ferrum/compare/v0.1.10...v0.1.11
+[0.1.10]: https://github.com/ferrum-orm/ferrum/compare/v0.1.9...v0.1.10
+[0.1.9]: https://github.com/ferrum-orm/ferrum/compare/v0.1.8...v0.1.9
+[0.1.8]: https://github.com/ferrum-orm/ferrum/compare/v0.1.7...v0.1.8
+[0.1.7]: https://github.com/ferrum-orm/ferrum/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/ferrum-orm/ferrum/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/ferrum-orm/ferrum/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/ferrum-orm/ferrum/compare/v0.1.3...v0.1.4
@@ -782,7 +808,20 @@ least one minor release and 90 days, whichever is longer, recorded here and in
 
 ---
 
-[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.19...HEAD
+[0.1.19]: https://github.com/ferrum-orm/ferrum/compare/v0.1.18...v0.1.19
+[0.1.18]: https://github.com/ferrum-orm/ferrum/compare/v0.1.17...v0.1.18
+[0.1.17]: https://github.com/ferrum-orm/ferrum/compare/v0.1.16...v0.1.17
+[0.1.16]: https://github.com/ferrum-orm/ferrum/compare/v0.1.15...v0.1.16
+[0.1.15]: https://github.com/ferrum-orm/ferrum/compare/v0.1.14...v0.1.15
+[0.1.14]: https://github.com/ferrum-orm/ferrum/compare/v0.1.13...v0.1.14
+[0.1.13]: https://github.com/ferrum-orm/ferrum/compare/v0.1.12...v0.1.13
+[0.1.12]: https://github.com/ferrum-orm/ferrum/compare/v0.1.11...v0.1.12
+[0.1.11]: https://github.com/ferrum-orm/ferrum/compare/v0.1.10...v0.1.11
+[0.1.10]: https://github.com/ferrum-orm/ferrum/compare/v0.1.9...v0.1.10
+[0.1.9]: https://github.com/ferrum-orm/ferrum/compare/v0.1.8...v0.1.9
+[0.1.8]: https://github.com/ferrum-orm/ferrum/compare/v0.1.7...v0.1.8
+[0.1.7]: https://github.com/ferrum-orm/ferrum/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/ferrum-orm/ferrum/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/ferrum-orm/ferrum/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/ferrum-orm/ferrum/compare/v0.1.3...v0.1.4
