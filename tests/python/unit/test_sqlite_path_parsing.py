@@ -34,6 +34,7 @@ class TestSqlitePathParsing:
     def test_percent_encoded_path(self) -> None:
         # URL-encoded characters should be unquoted
         assert _sqlite_path_from_dsn("sqlite:///test%20file.db") == "/test file.db"
-        assert (  # noqa: S108
-            _sqlite_path_from_dsn("sqlite:////tmp/test%20file.db") == "/tmp/test file.db"
+        assert (
+            _sqlite_path_from_dsn("sqlite:////tmp/test%20file.db")  # noqa: S108
+            == "/tmp/test file.db"  # noqa: S108
         )
