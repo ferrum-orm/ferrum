@@ -635,18 +635,14 @@ class DriverExercise:
     async def test_foreign_keys(self) -> None:
         """Test foreign key relationships."""
         try:
-            # MySQL doesn't support RETURNING clause
-            if self.driver_name == "mysql":
-                self.result.skip_test(
-                    "foreign_keys", "MySQL: RETURNING clause not supported in driver"
-                )
-                return
+            # Create author for this test with unique email
+            from uuid import uuid4
 
-            # Create author for this test
+            unique_suffix = str(uuid4())[:8]
             author = await Author.objects.create(
                 self.conn,
                 name="FK Test Author",
-                email=f"fk-test-{self.driver_name}@example.com",
+                email=f"fk-test-{self.driver_name}-{unique_suffix}@example.com",
                 bio="Test author for FK test",
             )
 
@@ -679,11 +675,14 @@ class DriverExercise:
             )
 
             assert book.author_id == author.id
-            assert book.publisher_id == pub.id
+            assert str(book.publisher_id) == str(pub.id)  # UUID may be string or UUID object
 
             self.result.pass_test("foreign_keys")
         except Exception as e:
             self.result.fail_test("foreign_keys", str(e))
+            import traceback
+
+            traceback.print_exc()
 
     async def test_composite_pk(self) -> None:
         """Test composite primary key operations."""

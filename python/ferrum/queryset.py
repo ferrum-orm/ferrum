@@ -1627,7 +1627,8 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
 
     # Narrow the base ``_model`` (``type[Model]``) to the concrete model type so
     # ``create``/``bulk_*`` return precise ``_M`` instances.
-    _model: type[_M]
+    # Use type: ignore to allow covariant narrowing
+    _model: type[_M]  # type: ignore[assignment]
 
     def __init__(self, model: type[_M]) -> None:
         super().__init__(model)
@@ -2349,7 +2350,47 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
         )
         t0 = time.monotonic()
         try:
-            row = await driver.fetchrow(sql_text, *bound_params, is_write=True)  # type: ignore
+            # MySQL doesn't support RETURNING; use execute_returning_lastrowid + refetch
+            if conn.dialect == "mysql" and "RETURNING" not in sql_text.upper():
+                # MySQL-specific method for getting lastrowid
+                if not hasattr(driver, "execute_returning_lastrowid"):
+                    raise FerrumInternalError(
+                        "MySQL driver missing execute_returning_lastrowid method. [FERR-E500]"
+                    )
+                rowcount, lastrowid = await driver.execute_returning_lastrowid(  # type: ignore[attr-defined]
+                    sql_text, *bound_params
+                )
+                if rowcount == 0:
+                    raise FerrumInternalError(
+                        "INSERT returned 0 rows. [FERR-E500]"
+                    )
+                
+                # Build result from input values first
+                result_data = dict(values)
+                
+                # If we got a last_insert_id for a single-column PK, add it and refetch
+                if lastrowid is not None and metadata is not None:
+                    pk_names = self._pk_field_names(metadata)
+                    if len(pk_names) == 1:
+                        pk_col = pk_names[0]
+                        result_data[pk_col] = lastrowid
+                        # Refetch to get all DB-generated values
+                        refetch_sql = f"SELECT * FROM `{table}` WHERE `{pk_col}` = {lastrowid}"
+                        refetched = await driver.fetchrow(refetch_sql)
+                        if refetched is not None:
+                            row = refetched
+                        else:
+                            # Refetch failed but we have the PK - use constructed data
+                            row = result_data
+                    else:
+                        # Composite PK or non-auto PK: use constructed data
+                        row = result_data
+                else:
+                    # No lastrowid (user-supplied PK): use constructed data
+                    row = result_data
+            else:
+                # PostgreSQL, SQLite, SQL Server: use RETURNING
+                row = await driver.fetchrow(sql_text, *bound_params, is_write=True)  # type: ignore
         except Exception as exc:
             duration_ms = (time.monotonic() - t0) * 1000
             mapped = map_db_error(exc, context={"model": model_name, "operation": "insert"})
@@ -2719,15 +2760,34 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
             t0 = time.monotonic()
             try:
                 if returning:
+                    # MySQL doesn't support RETURNING, raise clear error
+                    if conn.dialect == "mysql" and "RETURNING" not in sql_text.upper():
+                        raise FerrumConfigError(
+                            "bulk_create(returning=True) is not supported on MySQL. "
+                            "MySQL does not support RETURNING clauses. "
+                            "Use returning=False to get the inserted row count instead. [FERR-C001]"
+                        )
                     rows = await driver.fetch(sql_text, *bound_params, is_write=True)  # type: ignore
                 else:
-                    result: str = await driver.execute(sql_text, *bound_params)
-                    parts = result.split() if result else []
-                    try:
-                        total += int(parts[2]) if len(parts) > 2 else len(batch)
-                    except ValueError:
-                        total += len(batch)
-                    rows = []
+                    # MySQL can handle returning=False with execute_returning_lastrowid
+                    if conn.dialect == "mysql":
+                        if not hasattr(driver, "execute_returning_lastrowid"):
+                            raise FerrumInternalError(
+                                "MySQL driver missing execute_returning_lastrowid method. [FERR-E500]"
+                            )
+                        rowcount, lastrowid = await driver.execute_returning_lastrowid(  # type: ignore[attr-defined]
+                            sql_text, *bound_params
+                        )
+                        total += rowcount
+                        rows = []
+                    else:
+                        result: str = await driver.execute(sql_text, *bound_params)
+                        parts = result.split() if result else []
+                        try:
+                            total += int(parts[2]) if len(parts) > 2 else len(batch)
+                        except ValueError:
+                            total += len(batch)
+                        rows = []
             except Exception as exc:
                 duration_ms = (time.monotonic() - t0) * 1000
                 mapped = map_db_error(

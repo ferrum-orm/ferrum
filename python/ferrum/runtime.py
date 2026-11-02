@@ -414,6 +414,17 @@ class TimedQueryExecutor:
         # non-returning SELECTs). Per §5a autocommit writes never statement-retry.
         return await self._run(lambda: self._inner.execute(sql, *params), is_write=True)
 
+    async def execute_returning_lastrowid(
+        self, sql: str, *params: object
+    ) -> tuple[int, int | None]:
+        """MySQL-specific: execute INSERT and return (rowcount, last_insert_id).
+        
+        This is always a write operation, so retries are disabled.
+        """
+        return await self._run(
+            lambda: self._inner.execute_returning_lastrowid(sql, *params), is_write=True
+        )
+
 
 async def drain_inflight(lifecycle: _LifecycleGuard, *, timeout: float) -> None:
     """Wait until in-flight operations complete or ``timeout`` elapses."""

@@ -1609,7 +1609,8 @@ def _build_metadata(cls: type[_PydanticBaseModel]) -> ModelMetadata:
         # Bare default-value path: `field: T = Field(...)` stores extras directly.
         finfo_jse = field_info.json_schema_extra or {}
         if isinstance(finfo_jse, dict) and "__ferrum__" in finfo_jse:
-            ferrum_extras = finfo_jse["__ferrum__"]
+            ferrum_extra_raw = finfo_jse["__ferrum__"]
+            ferrum_extras = ferrum_extra_raw if isinstance(ferrum_extra_raw, dict) else {}
 
         # Honor explicit nullable= override from Field() — wins over annotation-derived value.
         nullable_override = ferrum_extras.get("nullable")
