@@ -203,9 +203,6 @@ def _encode_bind_value(value: object) -> dict[str, object]:
     ``{"type": "text", "value": "hello"}``, ``{"type": "int", "value": 42}``.
     ``BindValue::Null`` carries no ``value`` key: ``{"type": "null"}``.
 
-    ``date`` and ``time`` have no corresponding Rust ``BindValue`` variant in v1;
-    they fall through to the ``text`` fallback via ``str()``.
-
     isinstance ordering is significant:
     - ``bool`` must precede ``int`` (bool is a subclass of int).
     - ``datetime`` must precede any date-like check (datetime subclasses date).
@@ -225,11 +222,9 @@ def _encode_bind_value(value: object) -> dict[str, object]:
     if isinstance(value, datetime):
         return {"type": "datetime", "value": value.isoformat()}
     if isinstance(value, date):
-        # Encode as text for Rust validation, but mark it so we can decode back to date
-        return {"type": "text", "value": value.isoformat(), "__ferrum_date": True}
+        return {"type": "date", "value": value.isoformat()}
     if isinstance(value, time_type):
-        # Encode as text for Rust validation, but mark it so we can decode back to time
-        return {"type": "text", "value": value.isoformat(), "__ferrum_time": True}
+        return {"type": "time", "value": value.isoformat()}
     if isinstance(value, UUID):
         return {"type": "text", "value": str(value)}
     if isinstance(value, list):
@@ -306,17 +301,22 @@ def _decode_bound_param(param: str | dict[str, Any]) -> object:
     if typ == "float":
         return float(val)
     if typ == "text":
-        # Check if this is actually a date or time that we encoded
-        if parsed.get("__ferrum_date"):
-            return date.fromisoformat(str(val))
-        if parsed.get("__ferrum_time"):
-            return time_type.fromisoformat(str(val))
         return str(val)
     if typ == "bytes":
         return bytes(int(b) for b in val)
     if typ == "datetime":
         try:
             return datetime.fromisoformat(str(val))
+        except (ValueError, TypeError):
+            return str(val)
+    if typ == "date":
+        try:
+            return date.fromisoformat(str(val))
+        except (ValueError, TypeError):
+            return str(val)
+    if typ == "time":
+        try:
+            return time_type.fromisoformat(str(val))
         except (ValueError, TypeError):
             return str(val)
     if typ == "float_array":

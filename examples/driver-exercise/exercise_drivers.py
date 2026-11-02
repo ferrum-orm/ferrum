@@ -418,17 +418,18 @@ class DriverExercise:
     async def test_create(self) -> None:
         """Test creating records."""
         try:
-            # Create author (skip date fields for now due to asyncpg issue)
+            # Create author
             author = await Author.objects.create(
                 self.conn,
                 name="Jane Austen",
                 email="jane@example.com",
                 bio="English novelist",
                 rating=Decimal("4.75"),
-                # birth_date=date(1775, 12, 16),  # Skip for now
+                birth_date=date(1775, 12, 16),
             )
             assert author.id is not None
             assert author.name == "Jane Austen"
+            assert author.birth_date == date(1775, 12, 16)
             self.result.pass_test("create")
         except Exception as e:
             self.result.fail_test("create", str(e))
