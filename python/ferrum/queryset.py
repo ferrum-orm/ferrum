@@ -2357,7 +2357,8 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                     raise FerrumInternalError(
                         "MySQL driver missing execute_returning_lastrowid method. [FERR-E500]"
                     )
-                rowcount, lastrowid = await driver.execute_returning_lastrowid(  # type: ignore[attr-defined]
+                from typing import cast
+                rowcount, lastrowid = await cast(Any, driver).execute_returning_lastrowid(
                     sql_text, *bound_params
                 )
                 if rowcount == 0:
@@ -2775,7 +2776,8 @@ class QuerySet(_QuerySetBase[_M], Generic[_M]):
                             raise FerrumInternalError(
                                 "MySQL driver missing execute_returning_lastrowid method. [FERR-E500]"
                             )
-                        rowcount, lastrowid = await driver.execute_returning_lastrowid(  # type: ignore[attr-defined]
+                        from typing import cast
+                        rowcount, lastrowid = await cast(Any, driver).execute_returning_lastrowid(
                             sql_text, *bound_params
                         )
                         total += rowcount
