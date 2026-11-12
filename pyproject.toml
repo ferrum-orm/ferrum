@@ -180,10 +180,4 @@ markers = [
 # Do not run integration/security by default locally; require explicit -m flag.
 addopts = "-m 'not integration and not security'"
 
-# ---------------------------------------------------------------------------
-# import-linter
-# ---------------------------------------------------------------------------
-[tool.importlinter]
-root_packages = ["ferrum"]
-include_external_packages = true
-contracts_file = ".importlinter"
+# import-linter is configured in .importlinter.

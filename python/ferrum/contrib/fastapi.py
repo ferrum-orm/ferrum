@@ -373,7 +373,7 @@ def _import_fastapi_users_db_protocol() -> Any:  # noqa: ANN401 — soft import
             without a new Ferrum-side hard dependency.
     """
     try:
-        from fastapi_users.db.base import BaseUserDatabase  # ty: ignore[unresolved-import]
+        from fastapi_users.db.base import BaseUserDatabase  # ty: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover — exercised by unit test
         raise ImportError(
             "FerrumUserDatabase requires the optional 'fastapi-users' package. "
@@ -545,7 +545,7 @@ class FerrumUserDatabase:
     def _raise_user_already_exists(exc: FerrumIntegrityError) -> None:
         """Translate a Ferrum unique/integrity error into UserAlreadyExists."""
         try:
-            from fastapi_users.exceptions import UserAlreadyExists  # ty: ignore[unresolved-import]
+            from fastapi_users.exceptions import UserAlreadyExists  # ty: ignore[import-not-found]
         except ImportError:  # pragma: no cover — exercised by unit test
             # Without fastapi-users installed there is no UserAlreadyExists
             # to raise; re-raise the Ferrum error so the caller still sees

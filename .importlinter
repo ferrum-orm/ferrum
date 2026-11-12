@@ -1,3 +1,8 @@
+[importlinter]
+root_packages =
+    ferrum
+include_external_packages = True
+
 [importlinter:contract:cli-isolation]
 name = CLI and contrib are not imported by core query modules
 type = forbidden
@@ -32,19 +37,17 @@ forbidden_modules =
     ferrum.contrib
 
 # Contract 3: core must not import CLI.
-# ferrum.models is excluded from this layers contract because the Manager descriptor
-# in models.py contains a deferred import of ferrum.queryset (needed for User.objects).
-# The forbidden contracts above already enforce that models cannot import ferrum.cli
-# or ferrum.contrib, which are the security-critical isolation gates.
+# A forbidden contract, not a layers contract: the query path legitimately
+# imports connection, errors and hooks, which a strict layer order rejects.
 [importlinter:contract:core-does-not-import-cli]
 name = core query path does not import CLI
-type = layers
-layers =
-    ferrum.cli
-    ferrum.contrib
-    ferrum.migrations
+type = forbidden
+source_modules =
+    ferrum.queryset
+    ferrum.connection
     ferrum.hooks
     ferrum.errors
-    ferrum.connection
-    ferrum.queryset
+    ferrum.migrations
     ferrum.config
+forbidden_modules =
+    ferrum.cli

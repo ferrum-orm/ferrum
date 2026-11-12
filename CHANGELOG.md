@@ -32,6 +32,11 @@ least one minor release and 90 days, whichever is longer, recorded here and in
   specified for column"). A migration column that combines a serial type with
   `default=` now fails with `FERR-M001` before any SQL runs. Remove `default=` from
   that column in migration files written by an earlier version.
+- Bump `rustix` 1.1.4 -> 1.1.6 to fix RUSTSEC-2026-0486 (unsound xattr functions).
+- CI: the import-linter contracts in `.importlinter` are enforced again. The
+  `contracts_file` setting in `pyproject.toml` was never read, so the job checked
+  0 contracts. The core-does-not-import-cli contract is now a `forbidden` contract
+  because its layer order rejected imports that the query path needs.
 
 ---
 
