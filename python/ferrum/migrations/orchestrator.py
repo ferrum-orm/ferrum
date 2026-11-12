@@ -26,6 +26,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -274,6 +275,9 @@ _DEFAULT_VALUE_ALLOWLIST: frozenset[str] = frozenset(
 )
 
 
+_NUMERIC_LITERAL_RE = re.compile(r"-?\d+(\.\d+)?([eE][-+]?\d+)?")
+
+
 def _normalize_column_default(default: Any) -> str:  # noqa: ANN401
     """Normalize a migration default value to its SQL literal token."""
     text = str(default)
@@ -282,8 +286,31 @@ def _normalize_column_default(default: Any) -> str:  # noqa: ANN401
     return text
 
 
-def _python_default_to_sql(*, value: Any, field_meta: FieldMeta) -> str | None:  # noqa: ANN401
-    """Map a Python-side field default to an allowed SQL DEFAULT literal, if possible."""
+def _is_allowed_default(token: str) -> bool:
+    """Return whether *token* may appear unquoted after ``DEFAULT`` in DDL.
+
+    The single rule shared by the generator and the DDL check: an allowlisted
+    token, or a plain numeric literal (sign, digits, fraction, exponent only).
+    """
+    return token.upper() in _DEFAULT_VALUE_ALLOWLIST or bool(_NUMERIC_LITERAL_RE.fullmatch(token))
+
+
+def _python_default_to_sql(
+    *,
+    value: Any,  # noqa: ANN401
+    field_meta: FieldMeta,
+    model_name: str,
+) -> str | None:
+    """Map a Python-side field default to an allowed SQL DEFAULT literal, if possible.
+
+    Returns ``None`` when the default has no DB-side form (the value is then
+    applied by Python on insert only).
+
+    Raises:
+        FerrumMigrationError: a numeric default that cannot be written as a SQL
+            literal (``inf``, ``nan``), so ``makemigrations`` fails instead of
+            ``migrate``.
+    """
     if value is None:
         return None
     field_type = field_meta.field_type
@@ -293,11 +320,24 @@ def _python_default_to_sql(*, value: Any, field_meta: FieldMeta) -> str | None: 
         return None
     if field_type == "bool" and isinstance(value, bool):
         return "TRUE" if value else "FALSE"
-    if field_type in ("int", "big_int") and isinstance(value, int) and not isinstance(value, bool):
-        return str(value)
-    if field_type == "float" and isinstance(value, (int, float)) and not isinstance(value, bool):
-        return str(value)
-    return None
+    if isinstance(value, bool):
+        return None
+    token: str | None = None
+    if (field_type in ("int", "big_int") and isinstance(value, int)) or (
+        field_type == "float" and isinstance(value, (int, float))
+    ):
+        token = str(value)
+    elif field_type == "decimal" and isinstance(value, (int, Decimal)):
+        token = format(value, "f") if isinstance(value, Decimal) else str(value)
+    if token is None:
+        return None
+    if not _is_allowed_default(token):
+        raise FerrumMigrationError(
+            f"Model {model_name!r} field {field_meta.name!r}: the default is not a "
+            "finite number, so it cannot be a SQL DEFAULT. Use a finite default or "
+            "set db_default=. [FERR-M001]"
+        )
+    return token
 
 
 def _quote_ident(name: str, dialect: str) -> str:
@@ -472,7 +512,7 @@ def _col_def(col: dict[str, Any], *, dialect: str = "postgres") -> str:
         parts.append("NOT NULL")
     if default is not None:
         normalized = _normalize_column_default(default)
-        if normalized.upper() not in _DEFAULT_VALUE_ALLOWLIST:
+        if not _is_allowed_default(normalized):
             raise FerrumMigrationError(
                 f"Unsupported DEFAULT value {default!r}. "
                 f"Only simple literals are allowed. [FERR-M001]"
@@ -594,7 +634,7 @@ def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
         default = op.get("default")
         if default is not None:
             default_token = _normalize_column_default(default)
-            if default_token.upper() not in _DEFAULT_VALUE_ALLOWLIST:
+            if not _is_allowed_default(default_token):
                 raise FerrumMigrationError(
                     f"Default value {default!r} is not in the migration allowlist. [FERR-M001]"
                 )
@@ -853,7 +893,7 @@ def _index_columns_sql(
     return ", ".join(parts)
 
 
-def _field_to_col_def(field_meta: FieldMeta, *, is_pk: bool) -> dict[str, Any]:
+def _field_to_col_def(field_meta: FieldMeta, *, is_pk: bool, model_name: str) -> dict[str, Any]:
     """Convert a ``FieldMeta`` to a column-def dict for the plan JSON.
 
     Security: all names come from model-metadata allowlists — never user input.
@@ -870,7 +910,9 @@ def _field_to_col_def(field_meta: FieldMeta, *, is_pk: bool) -> dict[str, Any]:
     # A Python-side default on a serial PK (e.g. ``id: int = 0``) is an
     # insert-time value, not a DB default: the sequence owns the DB default.
     if default is None and sql_type.upper() not in _SERIAL_SQL_TYPES:
-        default = _python_default_to_sql(value=field_meta.python_default, field_meta=field_meta)
+        default = _python_default_to_sql(
+            value=field_meta.python_default, field_meta=field_meta, model_name=model_name
+        )
     col_def: dict[str, Any] = {
         "name": field_meta.column_name,
         "sql_type": sql_type,
@@ -927,7 +969,7 @@ def _autodiff_existing_table(
 
     Security: all identifiers come from model metadata allowlists or
     ``SchemaState`` that was itself built from prior migration ops — never user
-    input.  Default values are checked against ``_DEFAULT_VALUE_ALLOWLIST`` by
+    input.  Default values are checked by ``_is_allowed_default`` in
     ``_op_to_sql`` when the plan is applied.
 
     Out of scope: sql_type changes, renames, drops (unchanged v0.1 rule).
@@ -989,7 +1031,11 @@ def _autodiff_existing_table(
         col_state = existing_col_attrs[f.column_name]
 
         desired_not_null = not f.nullable
-        desired_default = f.db_default  # already normalized in FieldMeta
+        # Same default the generator writes for a new column (db_default, else
+        # the Python default when it has a SQL literal form).
+        desired_default = _field_to_col_def(f, is_pk=f.pk, model_name=metadata.model_name)[
+            "default"
+        ]
 
         # Compare case-insensitively to handle legacy lowercase defaults in state.
         state_default_upper = col_state.default.upper() if col_state.default else None
@@ -1109,7 +1155,7 @@ def compute_plan(
             # _col_def skips the inline PRIMARY KEY (the constraint is table-level).
             col_defs: list[dict[str, Any]] = []
             for f in metadata.fields:
-                cd = _field_to_col_def(f, is_pk=f.pk)
+                cd = _field_to_col_def(f, is_pk=f.pk, model_name=metadata.model_name)
                 if is_composite_pk and f.pk:
                     cd = {**cd, "primary_key": False, "composite_pk": True}
                 col_defs.append(cd)
@@ -1240,7 +1286,7 @@ def compute_plan(
 
             for f in metadata.fields:
                 if f.column_name not in existing_col_names:
-                    col_def = _field_to_col_def(f, is_pk=False)
+                    col_def = _field_to_col_def(f, is_pk=False, model_name=metadata.model_name)
                     ops.append(
                         {
                             "kind": "add_column",

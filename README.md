@@ -144,6 +144,11 @@ class Event(Model):
 
 `makemigrations` honours these field attributes:
 - `db_default` / `nullable` are written into `CREATE TABLE` and `ADD COLUMN` DDL.
+- A plain Python default also becomes the column `DEFAULT` when it has a safe SQL
+  literal form: `bool`, `""`, and finite `int` / `float` / `Decimal` numbers (e.g.
+  `int = 14` → `DEFAULT 14`, `float = 1e-06` → `DEFAULT 1e-06`). Other defaults
+  (non-empty strings, dates, objects) are applied by Python on insert only. A
+  non-finite number (`inf`, `nan`) fails `makemigrations` with `FERR-M001`.
 - `db_index=True` emits `CREATE INDEX` after the table op.
 - A `ForeignKey` / `OneToOne` references the target model's primary-key column, so
   natural keys work (e.g. `REFERENCES catalog_version(version)`). A target with a

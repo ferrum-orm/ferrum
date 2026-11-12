@@ -22,6 +22,34 @@ least one minor release and 90 days, whichever is longer, recorded here and in
 
 ---
 
+## [0.1.22] - 2026-11-12
+
+### Added
+
+- `makemigrations` writes `Decimal` Python defaults as a column `DEFAULT`
+  (`Decimal("0")` on `NUMERIC(12,2)` → `DEFAULT 0`).
+
+### Changed
+
+- On existing tables, `makemigrations` compares column defaults with the same rule
+  it uses for new columns (the Python default counts, not only `db_default=`). It
+  no longer proposes `DROP DEFAULT` for Python defaults it wrote earlier, and it
+  proposes `SET DEFAULT` for a `Decimal` default added by this release.
+
+### Fixed
+
+- `migrate` rejected numeric column defaults other than `0` and `1` that
+  `makemigrations` wrote (`Unsupported DEFAULT value 14 ... [FERR-M001]`). The
+  generator and the DDL check now share one rule: allowlisted tokens plus plain
+  numeric literals (`-?digits[.digits][e±digits]`), for `CREATE TABLE`,
+  `ADD COLUMN` and `ALTER COLUMN ... SET DEFAULT`.
+- A non-finite numeric default (`inf`, `nan`) now fails `makemigrations` with a
+  `FERR-M001` error naming the model and field, instead of failing `migrate`.
+  `makemigrations` prints Ferrum errors as one `Error:` line (exit code 2)
+  instead of a traceback.
+
+---
+
 ## [0.1.21] - 2026-11-12
 
 ### Added
@@ -445,7 +473,8 @@ least one minor release and 90 days, whichever is longer, recorded here and in
 
 ---
 
-[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.21...HEAD
+[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.22...HEAD
+[0.1.22]: https://github.com/ferrum-orm/ferrum/compare/v0.1.21...v0.1.22
 [0.1.21]: https://github.com/ferrum-orm/ferrum/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/ferrum-orm/ferrum/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/ferrum-orm/ferrum/compare/v0.1.18...v0.1.19
@@ -859,7 +888,8 @@ least one minor release and 90 days, whichever is longer, recorded here and in
 
 ---
 
-[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.21...HEAD
+[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.22...HEAD
+[0.1.22]: https://github.com/ferrum-orm/ferrum/compare/v0.1.21...v0.1.22
 [0.1.21]: https://github.com/ferrum-orm/ferrum/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/ferrum-orm/ferrum/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/ferrum-orm/ferrum/compare/v0.1.18...v0.1.19

@@ -22,6 +22,7 @@ from rich import print as rprint
 if TYPE_CHECKING:
     from ferrum.models import Model
 
+from ferrum.errors import FerrumError
 from ferrum.migrations import loader
 from ferrum.migrations.orchestrator import ColumnState, IndexState, SchemaState, compute_plan
 
@@ -308,7 +309,11 @@ async def run_makemigrations(
     existing_state = _build_existing_state(existing_migrations)
     model_classes = _get_all_model_subclasses()
 
-    plan = compute_plan(model_classes, existing_state)
+    try:
+        plan = compute_plan(model_classes, existing_state)
+    except FerrumError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     ops = plan.get("ops", [])
 
     if not ops:
