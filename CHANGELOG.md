@@ -16,6 +16,16 @@ least one minor release and 90 days, whichever is longer, recorded here and in
 
 ### Added
 
+### Changed
+
+### Fixed
+
+---
+
+## [0.1.21] - 2026-11-12
+
+### Added
+
 - `ops.Column(enum_values=[...])` carries a `Literal[...]` field's allowed values;
   the DDL adds `CHECK (col IN (...))` with each value escaped.
 
@@ -435,7 +445,8 @@ least one minor release and 90 days, whichever is longer, recorded here and in
 
 ---
 
-[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.20...HEAD
+[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.21...HEAD
+[0.1.21]: https://github.com/ferrum-orm/ferrum/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/ferrum-orm/ferrum/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/ferrum-orm/ferrum/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/ferrum-orm/ferrum/compare/v0.1.17...v0.1.18
@@ -848,7 +859,8 @@ least one minor release and 90 days, whichever is longer, recorded here and in
 
 ---
 
-[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.20...HEAD
+[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.21...HEAD
+[0.1.21]: https://github.com/ferrum-orm/ferrum/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/ferrum-orm/ferrum/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/ferrum-orm/ferrum/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/ferrum-orm/ferrum/compare/v0.1.17...v0.1.18
