@@ -41,22 +41,33 @@ class Column:
         not_null: bool = False,
         default: str | None = None,
         primary_key: bool = False,
+        enum_values: list[str] | None = None,
     ) -> None:
+        """Describe one column.
+
+        Args:
+            enum_values: Allowed values of a ``Literal[...]`` field. The DDL
+                adds ``CHECK (<column> IN (...))`` with each value escaped.
+        """
         self.name = name
         self.sql_type = sql_type
         self.not_null = not_null
         self.default = default
         self.primary_key = primary_key
+        self.enum_values = list(enum_values) if enum_values is not None else None
 
     def to_col_dict(self) -> dict[str, Any]:
         """Return a column-def dict consumed by ``_col_def`` / ``_op_to_sql``."""
-        return {
+        col: dict[str, Any] = {
             "name": self.name,
             "sql_type": self.sql_type,
             "not_null": self.not_null,
             "default": self.default,
             "primary_key": self.primary_key,
         }
+        if self.enum_values:
+            col["enum_values"] = list(self.enum_values)
+        return col
 
     def __repr__(self) -> str:
         flags = []
@@ -66,6 +77,8 @@ class Column:
             flags.append("primary_key=True")
         if self.default is not None:
             flags.append(f"default={self.default!r}")
+        if self.enum_values:
+            flags.append(f"enum_values={self.enum_values!r}")
         extra = (", " + ", ".join(flags)) if flags else ""
         return f"Column({self.name!r}, {self.sql_type!r}{extra})"
 
@@ -101,7 +114,12 @@ class CreateTable(Operation):
         return "safe"
 
     def __repr__(self) -> str:
-        return f"CreateTable({self.table_name!r}, {self.columns!r})"
+        extra = (
+            f", composite_pk_columns={self.composite_pk_columns!r}"
+            if self.composite_pk_columns
+            else ""
+        )
+        return f"CreateTable({self.table_name!r}, {self.columns!r}{extra})"
 
 
 class DropTable(Operation):

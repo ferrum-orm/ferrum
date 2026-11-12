@@ -17,10 +17,13 @@ Security invariants:
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from ferrum.errors import FerrumSchemaError
+from ferrum.migrations.orchestrator import _resolve_fk_target
 from ferrum.registry import all_models
 
 if TYPE_CHECKING:
@@ -1068,21 +1071,29 @@ def _expected_constraints(metadata: ModelMetadata) -> list[dict[str, Any]]:
                     "definition": f"UNIQUE ({field_meta.column_name})",
                 }
             )
-    # FK constraints from declared relations.
+    # FK constraints from declared relations. The name and target mirror what
+    # makemigrations emits (``fk_<table>_<column>``, target primary key).
+    meta_by_name = {name: model.get_metadata() for name, model in all_models().items()}
     for relation in metadata.relations:
         if relation.kind in ("fk", "one_to_one") and relation.db_column:
+            try:
+                ref_table, ref_column = _resolve_fk_target(
+                    relation, metadata.table_name, meta_by_name
+                )
+            except FerrumSchemaError:
+                ref_table, ref_column = relation.to_model, "?"
+            delete_rule = (relation.on_delete or "NO ACTION").upper()
             expected.append(
                 {
-                    "name": f"{metadata.table_name}_{relation.db_column}_fkey",
+                    "name": f"fk_{metadata.table_name}_{relation.db_column}",
                     "type": "FOREIGN KEY",
                     "column": relation.db_column,
-                    "foreign_table": None,  # resolved by metadata caller if needed
-                    "foreign_column": None,
-                    "delete_rule": (relation.on_delete or "NO ACTION").upper(),
+                    "foreign_table": ref_table,
+                    "foreign_column": ref_column,
+                    "delete_rule": delete_rule,
                     "definition": (
                         f"FOREIGN KEY ({relation.db_column}) REFERENCES "
-                        f"{relation.to_model} (id) ON DELETE "
-                        f"{(relation.on_delete or 'NO ACTION').upper()}"
+                        f"{ref_table}({ref_column}) ON DELETE {delete_rule}"
                     ),
                 }
             )
@@ -1101,6 +1112,31 @@ def _expected_constraints(metadata: ModelMetadata) -> list[dict[str, Any]]:
     return expected
 
 
+_CHECK_IN_RE = re.compile(
+    r"^CHECK\s*\(\s*\"?(\w+)\"?\s+IN\s*\((.*)\)\s*\)$", re.IGNORECASE | re.DOTALL
+)
+_CHECK_ANY_RE = re.compile(
+    r"^CHECK\s*\(\s*\(\s*\"?(\w+)\"?\s*=\s*ANY\s*\(\s*ARRAY\s*\[(.*)\]\s*\)\s*\)\s*\)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_CHECK_LITERAL_RE = re.compile(r"'((?:[^']|'')*)'(?:::[\w ]+)?")
+
+
+def _canonical_check(definition: str) -> str:
+    """Normalize an enum CHECK so model and live forms compare equal.
+
+    PostgreSQL stores ``col IN ('a', 'b')`` as
+    ``((col = ANY (ARRAY['a'::text, 'b'::text])))``. Both reduce to
+    ``CHECK (COL IN ('a', 'b'))``; other definitions are only uppercased.
+    """
+    text = definition.strip()
+    match = _CHECK_IN_RE.match(text) or _CHECK_ANY_RE.match(text)
+    if match is None:
+        return text.upper()
+    values = _CHECK_LITERAL_RE.findall(match.group(2))
+    return f"CHECK ({match.group(1).upper()} IN ({', '.join(repr(v) for v in values)}))"
+
+
 def _compare_constraints(
     table: str,
     expected: list[dict[str, Any]],
@@ -1109,6 +1145,17 @@ def _compare_constraints(
     diffs: list[ConstraintDifference] = []
     actual_by_name = {str(a["name"]): a for a in actual}
     expected_by_name = {str(e["name"]): e for e in expected}
+
+    # A live FK on the expected column satisfies the expectation under any
+    # name (e.g. PostgreSQL's default ``<table>_<column>_fkey``).
+    actual_fk_by_column = {
+        str(a.get("column")): str(a["name"]) for a in actual if a["type"] == "FOREIGN KEY"
+    }
+    for name, expected_c in list(expected_by_name.items()):
+        if expected_c["type"] == "FOREIGN KEY" and name not in actual_by_name:
+            live_name = actual_fk_by_column.get(str(expected_c["column"]))
+            if live_name is not None and live_name not in expected_by_name:
+                expected_by_name[live_name] = expected_by_name.pop(name)
 
     for name, expected_c in expected_by_name.items():
         if name not in actual_by_name:
@@ -1142,8 +1189,8 @@ def _compare_constraints(
                     )
             # For CHECK constraints, compare the normalized definition.
             if expected_c["type"] == "CHECK":
-                expected_def = str(expected_c.get("definition") or "").upper()
-                actual_def = str(actual_c.get("definition") or "").upper()
+                expected_def = _canonical_check(str(expected_c.get("definition") or ""))
+                actual_def = _canonical_check(str(actual_c.get("definition") or ""))
                 if expected_def and actual_def and expected_def != actual_def:
                     diffs.append(
                         ConstraintDifference(

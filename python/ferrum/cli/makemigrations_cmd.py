@@ -142,6 +142,8 @@ def _col_source(col: dict[str, Any]) -> str:
         flags.append("primary_key=True")
     if col.get("default") is not None:
         flags.append(f"default={col['default']!r}")
+    if col.get("enum_values"):
+        flags.append(f"enum_values={list(col['enum_values'])!r}")
     extra = (", " + ", ".join(flags)) if flags else ""
     return f"ops.Column({col['name']!r}, {col['sql_type']!r}{extra})"
 
@@ -179,10 +181,12 @@ def _op_to_source(op: dict[str, Any]) -> str:
     if kind == "create_table":
         table = op["table"]
         col_lines = [f"            {_col_source(c)}," for c in op.get("columns", [])]
+        composite = op.get("composite_pk_columns")
+        pk_arg = f", composite_pk_columns={list(composite)!r}" if composite else ""
         if col_lines:
             cols_block = "\n".join(col_lines)
-            return f"        ops.CreateTable({table!r}, [\n{cols_block}\n        ]),"
-        return f"        ops.CreateTable({table!r}, []),"
+            return f"        ops.CreateTable({table!r}, [\n{cols_block}\n        ]{pk_arg}),"
+        return f"        ops.CreateTable({table!r}, []{pk_arg}),"
 
     if kind == "add_column":
         table = op["table"]
@@ -192,6 +196,7 @@ def _op_to_source(op: dict[str, Any]) -> str:
             "not_null": op.get("not_null", False),
             "default": op.get("default"),
             "primary_key": op.get("primary_key", False),
+            "enum_values": op.get("enum_values"),
         }
         return f"        ops.AddColumn({table!r}, {_col_source(col)}),"
 
@@ -260,7 +265,8 @@ def _build_reverse_block(ops: list[dict[str, Any]]) -> str:
     If any op has no known reverse, the block uses the irreversible-comment form
     with an empty list so the developer can fill it in manually.
     """
-    rev_lines = [_reverse_op_to_source(op) for op in ops]
+    # Undo in reverse order: FKs drop before the tables they reference.
+    rev_lines = [_reverse_op_to_source(op) for op in reversed(ops)]
     has_irreversible = any(line is None for line in rev_lines)
     if has_irreversible:
         return (

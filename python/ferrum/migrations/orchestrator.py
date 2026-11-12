@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from ferrum.errors import FerrumMigrationError
+from ferrum.errors import FerrumMigrationError, FerrumSchemaError
 from ferrum.migrations.ledger import (
     ADVISORY_LOCK_KEY_1,
     ADVISORY_LOCK_KEY_2,
@@ -44,7 +44,7 @@ from ferrum.migrations.tokens import verify_token
 if TYPE_CHECKING:
     from ferrum.connection import Connection, ConnectionLike
     from ferrum.migrations.loader import MigrationModule
-    from ferrum.models import FieldMeta, Model, ModelMetadata
+    from ferrum.models import FieldMeta, Model, ModelMetadata, RelationMeta
 
 
 # ---------------------------------------------------------------------------
@@ -484,9 +484,20 @@ def _col_def(col: dict[str, Any], *, dialect: str = "postgres") -> str:
         parts.append("PRIMARY KEY")
     if col.get("unique"):
         parts.append("UNIQUE")
-    if col.get("enum_check"):
-        parts.append(str(col["enum_check"]))
+    enum_values = col.get("enum_values")
+    if enum_values:
+        parts.append(_enum_check_sql(col["name"], enum_values, dialect))
     return " ".join(parts)
+
+
+def _enum_check_sql(column: str, values: list[str], dialect: str) -> str:
+    """Build ``CHECK (col IN ('a', 'b'))`` for a ``Literal`` field.
+
+    Values come from the model's ``Literal[...]`` annotation. Each one is
+    emitted as an escaped string literal, never interpolated raw.
+    """
+    literals = ", ".join("'" + str(v).replace("'", "''") + "'" for v in values)
+    return f"CHECK ({_quote_ident(column, dialect)} IN ({literals}))"
 
 
 def _op_to_sql(op: dict[str, Any], *, dialect: str = "postgres") -> str:
@@ -860,7 +871,7 @@ def _field_to_col_def(field_meta: FieldMeta, *, is_pk: bool) -> dict[str, Any]:
     # insert-time value, not a DB default: the sequence owns the DB default.
     if default is None and sql_type.upper() not in _SERIAL_SQL_TYPES:
         default = _python_default_to_sql(value=field_meta.python_default, field_meta=field_meta)
-    return {
+    col_def: dict[str, Any] = {
         "name": field_meta.column_name,
         "sql_type": sql_type,
         "not_null": not field_meta.nullable,
@@ -868,6 +879,37 @@ def _field_to_col_def(field_meta: FieldMeta, *, is_pk: bool) -> dict[str, Any]:
         "primary_key": is_pk,
         "unique": field_meta.unique,
     }
+    if field_meta.field_type == "enum" and field_meta.enum_values:
+        col_def["enum_values"] = list(field_meta.enum_values)
+    return col_def
+
+
+def _resolve_fk_target(
+    rel: RelationMeta,
+    owner_table: str,
+    meta_by_name: dict[str, ModelMetadata],
+) -> tuple[str, str]:
+    """Return ``(ref_table, ref_column)`` for an FK / one-to-one relation.
+
+    The referenced column is the target model's primary-key column. A target
+    outside the planned model set keeps the legacy ``<model>.id`` fallback.
+
+    Raises:
+        FerrumSchemaError: the target has a composite primary key, which a
+            single-column foreign key cannot reference.
+    """
+    target_meta = meta_by_name.get(rel.to_model)
+    if target_meta is None:
+        return rel.to_model.lower(), "id"
+    pk_columns = [target_meta.fields[i].column_name for i in target_meta.pk_fields]
+    if len(pk_columns) != 1:
+        raise FerrumSchemaError(
+            f"Foreign key {owner_table}.{rel.db_column} references {rel.to_model}, "
+            f"which has a composite primary key ({', '.join(pk_columns)}). A "
+            "single-column foreign key cannot reference it. [FERR-S001]",
+            model=rel.to_model,
+        )
+    return target_meta.table_name, pk_columns[0]
 
 
 def _autodiff_existing_table(
@@ -1051,6 +1093,7 @@ def compute_plan(
     # Track M2M join tables already emitted to avoid duplicate CREATE TABLE ops
     # when both sides of the relationship appear in model_classes.
     emitted_m2m_tables: set[str] = set()
+    fk_ops: list[dict[str, Any]] = []
 
     for cls in model_classes:
         # ModelMetadata is built once at class-definition time and is read-only.
@@ -1069,13 +1112,6 @@ def compute_plan(
                 cd = _field_to_col_def(f, is_pk=f.pk)
                 if is_composite_pk and f.pk:
                     cd = {**cd, "primary_key": False, "composite_pk": True}
-                # Enum columns get an inline CHECK constraint in the DDL.
-                if f.field_type == "enum" and f.enum_values:
-                    quoted_vals = ", ".join(f"'{v}'" for v in f.enum_values)
-                    # Store check expression; _col_def doesn't handle it, so we embed
-                    # it as a suffix directly on the column entry via a post-pass.
-                    check = f"CHECK ({_quote_ident(f.column_name, 'postgres')} IN ({quoted_vals}))"
-                    cd = {**cd, "enum_check": check}
                 col_defs.append(cd)
 
             create_op: dict[str, Any] = {
@@ -1118,20 +1154,20 @@ def compute_plan(
                     index_op["opclasses"] = opclasses
                 ops.append(index_op)
 
-            # Emit AddForeignKey ops for FK / OneToOne relations on new tables.
+            # AddForeignKey ops for new tables are deferred until every table
+            # exists, so the target may be declared later, be the table itself,
+            # or form a cycle.
             for rel in metadata.relations:
                 if rel.kind in ("fk", "one_to_one"):
-                    target_meta = meta_by_name.get(rel.to_model)
-                    target_table = target_meta.table_name if target_meta else rel.to_model.lower()
-                    constraint_name = f"fk_{table}_{rel.db_column}"
-                    ops.append(
+                    ref_table, ref_column = _resolve_fk_target(rel, table, meta_by_name)
+                    fk_ops.append(
                         {
                             "kind": "add_fk",
                             "table": table,
-                            "name": constraint_name,
+                            "name": f"fk_{table}_{rel.db_column}",
                             "column": rel.db_column,
-                            "ref_table": target_table,
-                            "ref_column": "id",
+                            "ref_table": ref_table,
+                            "ref_column": ref_column,
                             "on_delete": rel.on_delete or "CASCADE",
                         }
                     )
@@ -1174,7 +1210,7 @@ def compute_plan(
                                 ],
                             }
                         )
-                        ops.append(
+                        fk_ops.append(
                             {
                                 "kind": "add_fk",
                                 "table": through,
@@ -1185,7 +1221,7 @@ def compute_plan(
                                 "on_delete": "CASCADE",
                             }
                         )
-                        ops.append(
+                        fk_ops.append(
                             {
                                 "kind": "add_fk",
                                 "table": through,
@@ -1235,6 +1271,7 @@ def compute_plan(
                     schema_state.indexes,
                 )
 
+    ops.extend(fk_ops)
     return {
         "version": 1,
         "name": f"auto_{timestamp}",

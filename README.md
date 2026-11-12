@@ -145,6 +145,17 @@ class Event(Model):
 `makemigrations` honours these field attributes:
 - `db_default` / `nullable` are written into `CREATE TABLE` and `ADD COLUMN` DDL.
 - `db_index=True` emits `CREATE INDEX` after the table op.
+- A `ForeignKey` / `OneToOne` references the target model's primary-key column, so
+  natural keys work (e.g. `REFERENCES catalog_version(version)`). A target with a
+  composite primary key raises `FerrumSchemaError`, because a single-column foreign
+  key cannot reference it.
+- Every `AddForeignKey` comes after all `CreateTable` ops in the same migration, so
+  model order, self-references and cycles do not matter.
+- Several `primary_key=True` fields produce
+  `CreateTable(..., composite_pk_columns=[...])` → `PRIMARY KEY (a, b, ...)`.
+- A `Literal[...]` field produces `ops.Column(..., enum_values=[...])` →
+  `CHECK (col IN (...))`, with each value escaped.
+- `reverse_operations` undo in reverse order, so foreign keys drop before tables.
 - For **already-existing tables**, `makemigrations` now **autodiffs** index and column
   attribute changes against the state projected from prior migration files:
   - Adding `db_index=True` to an existing field → `AddIndex` op.
