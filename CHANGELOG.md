@@ -20,6 +20,13 @@ least one minor release and 90 days, whichever is longer, recorded here and in
 
 ### Fixed
 
+- `makemigrations` no longer writes a Python-side primary-key default (for example
+  `id: int = 1` or the `= 0` sentinel) as a DB `DEFAULT` on a `BIGSERIAL` column.
+  PostgreSQL rejected that DDL with SQLSTATE 42601 ("multiple default values
+  specified for column"). A migration column that combines a serial type with
+  `default=` now fails with `FERR-M001` before any SQL runs. Remove `default=` from
+  that column in migration files written by an earlier version.
+
 ---
 
 ## [0.1.19] - 2026-11-02
