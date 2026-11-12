@@ -196,6 +196,13 @@ def _validate_timeout(value: str | None, name: str) -> None:
         )
 
 
+# Serial pseudo-types carry an implicit sequence DEFAULT; PostgreSQL rejects a
+# second DEFAULT on the same column (SQLSTATE 42601).
+_SERIAL_SQL_TYPES: frozenset[str] = frozenset(
+    {"SMALLSERIAL", "SERIAL2", "SERIAL", "SERIAL4", "BIGSERIAL", "SERIAL8"}
+)
+
+
 # SQL type allowlist — only these tokens may appear in DDL type position.
 # Prevents DDL injection if upstream metadata validation is bypassed.
 _SQL_TYPE_ALLOWLIST: frozenset[str] = frozenset(
@@ -426,7 +433,13 @@ def _col_def(col: dict[str, Any], *, dialect: str = "postgres") -> str:
     For composite-PK tables ``primary_key`` may be ``False`` on individual columns
     (the table-level constraint is emitted by ``_op_to_sql`` for ``create_table``).
     """
-    sql_type = _map_sql_type(col.get("sql_type", "TEXT"), dialect)
+    source_type = str(col.get("sql_type", "TEXT"))
+    if col.get("default") is not None and source_type.strip().upper() in _SERIAL_SQL_TYPES:
+        raise FerrumMigrationError(
+            f"Column {col['name']!r} is {source_type.upper()}, which already has a "
+            "sequence DEFAULT. Remove default= from this column. [FERR-M001]"
+        )
+    sql_type = _map_sql_type(source_type, dialect)
     base_type = sql_type.split("(")[0].upper()
     # Array types end with "[]"; strip that suffix before allowlist check.
     base_type_check = base_type.rstrip("[]") if base_type.endswith("[]") else base_type
@@ -841,12 +854,15 @@ def _field_to_col_def(field_meta: FieldMeta, *, is_pk: bool) -> dict[str, Any]:
     parameterised column types (``VARCHAR(n)``, ``NUMERIC(p,s)``) are emitted
     correctly.
     """
+    sql_type = field_meta.sql_type
     default = field_meta.db_default
-    if default is None:
+    # A Python-side default on a serial PK (e.g. ``id: int = 0``) is an
+    # insert-time value, not a DB default: the sequence owns the DB default.
+    if default is None and sql_type.upper() not in _SERIAL_SQL_TYPES:
         default = _python_default_to_sql(value=field_meta.python_default, field_meta=field_meta)
     return {
         "name": field_meta.column_name,
-        "sql_type": field_meta.sql_type,
+        "sql_type": sql_type,
         "not_null": not field_meta.nullable,
         "default": default,
         "primary_key": is_pk,

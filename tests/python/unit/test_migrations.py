@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Annotated
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -232,6 +233,39 @@ def test_create_table_sql_with_default() -> None:
     }
     sql = _op_to_sql(op)
     assert "DEFAULT true" in sql
+
+
+@pytest.mark.parametrize("pk_default", [0, 1])
+def test_compute_plan_serial_pk_python_default_emits_no_db_default(pk_default: int) -> None:
+    """Regression: ``id: int = n`` must not emit ``BIGSERIAL ... DEFAULT n``.
+
+    PostgreSQL rejects two defaults on one column (SQLSTATE 42601).
+    """
+
+    class Singleton(ferrum.Model):
+        model_config = ferrum.ModelConfig(table="singleton")
+        id: Annotated[int, ferrum.Field(primary_key=True)] = pk_default
+
+    plan = compute_plan([Singleton], existing_tables={})
+    id_col = next(c for c in plan["ops"][0]["columns"] if c["name"] == "id")
+
+    assert id_col["sql_type"] == "BIGSERIAL"
+    assert id_col["default"] is None
+    assert "DEFAULT" not in _op_to_sql(plan["ops"][0])
+
+
+@pytest.mark.parametrize("sql_type", ["BIGSERIAL", "serial", "SMALLSERIAL"])
+def test_create_table_serial_with_default_rejected_before_sql(sql_type: str) -> None:
+    """A serial column with an explicit default fails with a Ferrum error, not a DB error."""
+    op = {
+        "kind": "create_table",
+        "table": "singleton",
+        "columns": [
+            {"name": "id", "sql_type": sql_type, "primary_key": True, "default": "1"},
+        ],
+    }
+    with pytest.raises(FerrumMigrationError, match=r"sequence DEFAULT.*FERR-M001"):
+        _op_to_sql(op)
 
 
 # ---------------------------------------------------------------------------
