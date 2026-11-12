@@ -22,6 +22,37 @@ least one minor release and 90 days, whichever is longer, recorded here and in
 
 ---
 
+## [0.1.21] - 2026-11-12
+
+### Added
+
+- `ops.Column(enum_values=[...])` carries a `Literal[...]` field's allowed values;
+  the DDL adds `CHECK (col IN (...))` with each value escaped.
+
+### Changed
+
+- `makemigrations` writes every `AddForeignKey` after all `CreateTable` ops of the
+  migration, and writes `reverse_operations` in reverse order (foreign keys drop
+  before tables).
+
+### Fixed
+
+- `makemigrations` foreign keys reference the target model's primary-key column
+  instead of a hard-coded `id`. A foreign key to a composite-primary-key model now
+  raises `FerrumSchemaError` instead of emitting invalid DDL.
+- `makemigrations` no longer emits a foreign key before the table it references
+  exists (`UndefinedTableError`, SQLSTATE 42P01, on `ferrum migrate`).
+- Composite primary keys are kept in the generated migration file
+  (`composite_pk_columns=`); such tables were created with no primary key.
+- `Literal[...]` CHECK constraints are kept in the generated migration file and
+  are also emitted for added columns; they were silently dropped.
+- Drift detection no longer reports a correct foreign key as missing plus extra
+  (it now matches by column, under `fk_<table>_<column>` or PostgreSQL's
+  `<table>_<column>_fkey`), and compares enum CHECKs independent of PostgreSQL's
+  `= ANY (ARRAY[...])` rewrite.
+
+---
+
 ## [0.1.20] - 2026-11-12
 
 ### Fixed
@@ -414,7 +445,8 @@ least one minor release and 90 days, whichever is longer, recorded here and in
 
 ---
 
-[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.20...HEAD
+[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.21...HEAD
+[0.1.21]: https://github.com/ferrum-orm/ferrum/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/ferrum-orm/ferrum/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/ferrum-orm/ferrum/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/ferrum-orm/ferrum/compare/v0.1.17...v0.1.18
@@ -827,7 +859,8 @@ least one minor release and 90 days, whichever is longer, recorded here and in
 
 ---
 
-[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.20...HEAD
+[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.21...HEAD
+[0.1.21]: https://github.com/ferrum-orm/ferrum/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/ferrum-orm/ferrum/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/ferrum-orm/ferrum/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/ferrum-orm/ferrum/compare/v0.1.17...v0.1.18

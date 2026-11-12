@@ -52,6 +52,7 @@ from ferrum.migrations.orchestrator import (
     IndexState,
     SchemaState,
     _is_op_destructive,
+    _resolve_fk_target,
     compute_plan,
 )
 
@@ -516,13 +517,12 @@ def compute_autodiff_plan(
         for rel in metadata.relations:
             if rel.kind in ("fk", "one_to_one") and rel.db_column:
                 constraint_name = f"fk_{table}_{rel.db_column}"
-                target_meta = meta_by_name.get(rel.to_model)
-                target_table = target_meta.table_name if target_meta else rel.to_model.lower()
+                ref_table, ref_column = _resolve_fk_target(rel, table, meta_by_name)
                 desired_fks[constraint_name] = ForeignKeyState(
                     table=table,
                     column=rel.db_column,
-                    ref_table=target_table,
-                    ref_column="id",
+                    ref_table=ref_table,
+                    ref_column=ref_column,
                     on_delete=rel.on_delete or "CASCADE",
                 )
         existing_fks = {
