@@ -20,6 +20,12 @@ least one minor release and 90 days, whichever is longer, recorded here and in
 
 ### Fixed
 
+---
+
+## [0.1.20] - 2026-11-12
+
+### Fixed
+
 - `makemigrations` no longer writes a Python-side primary-key default (for example
   `id: int = 1` or the `= 0` sentinel) as a DB `DEFAULT` on a `BIGSERIAL` column.
   PostgreSQL rejected that DDL with SQLSTATE 42601 ("multiple default values
@@ -403,7 +409,8 @@ least one minor release and 90 days, whichever is longer, recorded here and in
 
 ---
 
-[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.19...HEAD
+[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.20...HEAD
+[0.1.20]: https://github.com/ferrum-orm/ferrum/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/ferrum-orm/ferrum/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/ferrum-orm/ferrum/compare/v0.1.17...v0.1.18
 [0.1.17]: https://github.com/ferrum-orm/ferrum/compare/v0.1.16...v0.1.17
@@ -815,7 +822,8 @@ least one minor release and 90 days, whichever is longer, recorded here and in
 
 ---
 
-[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.19...HEAD
+[Unreleased]: https://github.com/ferrum-orm/ferrum/compare/v0.1.20...HEAD
+[0.1.20]: https://github.com/ferrum-orm/ferrum/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/ferrum-orm/ferrum/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/ferrum-orm/ferrum/compare/v0.1.17...v0.1.18
 [0.1.17]: https://github.com/ferrum-orm/ferrum/compare/v0.1.16...v0.1.17
